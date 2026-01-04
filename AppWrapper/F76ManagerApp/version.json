@@ -1,6 +1,6 @@
 {
-  "version": "3.0.0",
-  "notes": ".",
+  "version": "3.1.0",
+  "notes": "-Xbox Gamepass is now supported click on the Steam badge on the top of the program to switch between platforms\n\n",
   "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
   "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
 }
