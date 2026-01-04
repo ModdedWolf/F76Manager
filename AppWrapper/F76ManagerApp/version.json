@@ -1,0 +1,6 @@
+{
+  "version": "2.8.8",
+  "notes": "-GitHub Migration: Update hosting moved to GitHub to save home bandwidth.\n\n-Reliable Delivery: Files are now served via GitHub CDN for faster and more stable updates.\n\n-Silent Update Support: Internal logic updated to correctly handle GitHub Release redirections.\n\n",
+  "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
+  "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
+}
