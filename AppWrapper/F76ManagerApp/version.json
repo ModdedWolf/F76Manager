@@ -1,6 +1,6 @@
 {
-  "version": "3.2.8",
-  "notes": "-Fixed an issue where the tweaks made would write in the wrong ini causing the game to crash ",
+  "version": "3.2.9",
+  "notes": "-Fixed internal timeouts for large file uploads/downloads.\n-Restored full stability with 'Nuclear Scrubbing' for illegal settings.",
   "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
   "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
 }
