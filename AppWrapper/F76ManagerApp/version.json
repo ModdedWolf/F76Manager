@@ -1,6 +1,6 @@
 {
-  "version": "3.1.7",
-  "notes": "-Fixed File pathing being set to \u0022Not Set\u0022\n\n-Fixed when users hit Deploy Mods and then showing 0 mods and displaying Uknown Path",
+  "version": "3.2.2",
+  "notes": "",
   "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
   "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
 }
