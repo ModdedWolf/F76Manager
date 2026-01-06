@@ -1,6 +1,6 @@
 {
-  "version": "3.3.0",
-  "notes": "-Fixed some Tweaks toggles\n\n-Added a Motion Blur toggle ",
+  "version": "3.3.1",
+  "notes": "-Fixed Mod Load order not working in the last update",
   "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
   "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
 }
