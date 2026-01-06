@@ -1,6 +1,6 @@
 {
-  "version": "3.2.9",
-  "notes": "-Fixed internal timeouts for large file uploads/downloads.\n-Restored full stability with 'Nuclear Scrubbing' for illegal settings.",
+  "version": "3.3.0",
+  "notes": "-Fixed some Tweaks toggles\n\n-Added a Motion Blur toggle ",
   "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
   "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
 }
