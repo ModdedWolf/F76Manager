@@ -1,6 +1,6 @@
 {
-  "version": "3.3.1",
-  "notes": "-Fixed Mod Load order not working in the last update",
+  "version": "3.3.2",
+  "notes": "-Fixed the Xbox Gamepass Play Fallout 76 button in the dashboard not being able to find the exe to launch the game",
   "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
   "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
 }
