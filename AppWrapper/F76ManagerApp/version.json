@@ -1,6 +1,7 @@
 {
-  "version": "3.3.4",
-  "notes": "-Hopefully Fixed where the tool would create another data folder in the data folder then clearing the ini\u0027s",
-  "url": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
-  "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe"
+    "version":  "3.3.4",
+    "notes":  "-Added the ability to create mod bundles (needs more testing)\n\n-Fixed Drag and Drop (can be from anywhere now)\n\n-Added more ini settings to the Faster Loading toggle\n\n-Fixed Logs (may not show everything)\n\n-Fixed the Endorse pop up to be less invasive",
+    "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
+    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
+    "exeHash":  "76663c16610ef179cc87898b7c8efb5ea031cc2c616cce95d7220b66ca88a750"
 }
