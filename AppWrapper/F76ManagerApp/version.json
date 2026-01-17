@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.6",
-    "notes":  "-Redid Bundles ",
+    "version":  "3.3.7",
+    "notes":  "-Fixed crash on startup ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "d1558c8f5e07069e27e2fad6aa16c3a1a965b2e74c06a1b028d0a6932cf186f3"
+    "exeHash":  "3c5b85330f52efdf82852d6c211d614f49ddda94ad9eadcb13b180ab0b5f80f6"
 }
