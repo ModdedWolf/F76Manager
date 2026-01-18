@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.9",
-    "notes":  "-Fixed crash on startup when a bad bundle was deployed \n\n-Fixed Bundles \n\n-Fixed Profiles\n",
+    "version":  "3.3.10",
+    "notes":  "-Fixed a few ui bugs ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "8dce85744933a5b1e84efea0f5371dd354d916f74d31ea2dcbb8518034ddc1db"
+    "exeHash":  "2f75c0553919f4219ca954d4c5777679f7c662c17af49e8b913b014686dcf370"
 }
