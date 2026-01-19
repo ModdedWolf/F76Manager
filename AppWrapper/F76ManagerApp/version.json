@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.10",
-    "notes":  "-Fixed a few ui bugs ",
+    "version":  "3.3.11",
+    "notes":  "-Added these Languages: English\nFran�ais\nDeutsch\nEspa�ol\nItaliano\nPolski\n???????\n????\n????\n???\n???",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "2f75c0553919f4219ca954d4c5777679f7c662c17af49e8b913b014686dcf370"
+    "exeHash":  "961972923688d56f81afba9e117fe13f658a51d5f774c7796dfb8269586abeee"
 }
