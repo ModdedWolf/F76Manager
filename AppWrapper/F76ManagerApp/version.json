@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.11",
-    "notes":  "-Added these Languages: English\nFran�ais\nDeutsch\nEspa�ol\nItaliano\nPolski\n???????\n????\n????\n???\n???",
+    "version":  "3.3.12",
+    "notes":  "-Fixed some UI issues \n\n-When disabling Mods they now go in a Folder in the main DIR of the Tool\n\n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "5174080be0704031c38661d6facfb50d78f9b2df656d45514cd7bda27bb37bc1"
+    "exeHash":  "be3bbf3945ea1445dca40d4cb57ba975be2ef717e58b01471ccca36d74488898"
 }
