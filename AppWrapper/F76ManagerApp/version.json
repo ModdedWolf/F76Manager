@@ -3,5 +3,5 @@
     "notes":  "-Added Nexus API to make adding mods even easier\n\n-Fixed some more UI issues with the other languages \n\n-Fixed an issue where disabling Mods then tring to re endable then you had to do it twice for the check to stick\n\n-Fixed the Mod List when everytime you unchecked or checked a mod the mod list would refresh and take users back to the top of the list \n\n-Fixed the header in the mod list (wasnt static)\n\n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "693c255c205e0793f3c3c12456b67e605f557e0ad8bd01ad02cdb011cd95b49e"
+    "exeHash":  "9882c4daffd480019a88baff5f07c8eba016340b8238dcc12396f00b1850463e"
 }
