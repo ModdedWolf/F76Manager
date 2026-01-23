@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.13",
-    "notes":  "-Added Nexus API to make adding mods even easier\n\n-Fixed some more UI issues with the other languages \n\n-Fixed an issue where disabling Mods then tring to re endable then you had to do it twice for the check to stick\n\n-Fixed the Mod List when everytime you unchecked or checked a mod the mod list would refresh and take users back to the top of the list \n\n-Fixed the header in the mod list (wasnt static)\n\n",
+    "version":  "3.3.14",
+    "notes":  "-Added a new language (PT-BR)\n\n-Added my discord server as a button in the dashboard tab (can be removed)\n\n-Tweaks no longer auto saves to prevent overwriting already configured ini\u0027s \n\n-Added an option to edit ini\u0027s in the Tweaks tab\n\n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "9882c4daffd480019a88baff5f07c8eba016340b8238dcc12396f00b1850463e"
+    "exeHash":  "fc720e2e0049e3bf7ecba39d59c318507b7eb3f846bfb3f3e302b9017cd3d55f"
 }
