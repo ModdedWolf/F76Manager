@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.14",
-    "notes":  "-Added a new language (PT-BR)\n\n-Added my discord server as a button in the dashboard tab (can be removed)\n\n-Tweaks no longer auto saves to prevent overwriting already configured ini\u0027s \n\n-Added an option to edit ini\u0027s in the Tweaks tab\n\n",
+    "version":  "3.3.15",
+    "notes":  "-Fixed some language issues not displaying correctly ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "fc720e2e0049e3bf7ecba39d59c318507b7eb3f846bfb3f3e302b9017cd3d55f"
+    "exeHash":  "0b7f413dde0950d95405057aeb3367eb4718982ca31044b5f2528df3b2a8cc59"
 }
