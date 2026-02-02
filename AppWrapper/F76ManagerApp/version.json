@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.15",
-    "notes":  "-Fixed some language issues not displaying correctly ",
+    "version":  "3.3.16",
+    "notes":  "-Persistent Window State: The app now remembers your window size, position, and maximized status between sessions.\n\n-4K / High DPI Support: Improved scaling and layout flexibility for users on 4K monitors and high-resolution displays. The interface now properly adapts to larger screens without cutoff or layout issues.",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "0b7f413dde0950d95405057aeb3367eb4718982ca31044b5f2528df3b2a8cc59"
+    "exeHash":  "727031e56fdb7729b5a3fb79bf5aa595bb25df1019ce15e59abe9e3ca3434f14"
 }
