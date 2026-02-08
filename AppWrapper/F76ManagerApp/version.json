@@ -1,7 +1,7 @@
 {
     "version":  "3.3.17",
-    "notes":  "-Added the option to change the Quick-Boy, and Power Armor Pip-boy color \n\n-Added a setting in the Pip-boy tab to sync all colors (off by deafult)",
+    "notes":  "-Fixed the Pip-boy color sync toggle ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "cc1e6cc2c4a5d992822dfe42da224f6b0c14f386c5332f9e6f89505fafc9dac2"
+    "exeHash":  "c7e328d508759f873d7d977ea4c6608f303842e31fcdd92a884fa11734fcf64f"
 }
