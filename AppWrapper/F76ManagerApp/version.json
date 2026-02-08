@@ -1,7 +1,7 @@
 {
-    "version":  "3.3.17",
-    "notes":  "-Fixed the Pip-boy color sync toggle ",
+    "version":  "3.4.0",
+    "notes":  "-Improved logs",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "c7e328d508759f873d7d977ea4c6608f303842e31fcdd92a884fa11734fcf64f"
+    "exeHash":  "56040bcb0b44fefaab552e916edb0bf1f60dbdee342e07bc279766360c1bf190"
 }
