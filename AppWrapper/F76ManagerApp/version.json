@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.1",
-    "notes":  "-Fixed Languages \n\n-Added a button on the mod tab to take users to Fallout76 mods on Nexus ",
+    "version":  "3.4.2",
+    "notes":  "-Fixed Bundling Issue",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "5ad4cd1035edc01ae93e1d986ba68cb7ca035f581297362571e1ecce4222ea73"
+    "exeHash":  "542dd2d7c4bc0d26d6140141ec07659e4108ce233a1174487cec9cc1747fad83"
 }
