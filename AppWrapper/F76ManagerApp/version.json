@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.3",
-    "notes":  "-Fixed an issue where the current window dimensions and position was not being saved before the app shuts down ",
+    "version":  "3.4.4",
+    "notes":  "-Fixed all the constant refreshes in every tab when the user would apply, save an option or check for update\n\n-Redesign the Setting tab \n\n-Fixed a few Languages\n\n-Changed the mod list image that takes users to Nexus \n\n-Fixed raw strings showing in the create new bundle area \n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "1bcb834f2946d32998b3da29ab8d72deed5b1c5f0f2f3e73b3d2fd4dc3fd42e7"
+    "exeHash":  "db170c3bafa9afc092ccd8cb9c0615f1650aa0380cd20e72fc69c4095db6a7f2"
 }
