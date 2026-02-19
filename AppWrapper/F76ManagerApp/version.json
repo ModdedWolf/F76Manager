@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.5",
-    "notes":  "-Fixed Mod list flickering on the bottom of the list\n\n-Fixed Logs screen tabs so switching between Activity and Error now reliably updates the visible log content\n\n-Added Full support for importing compressed archives (ZIP/7z/RAR) by auto-extracting them and importing any BA2/ESM/ESP/STRINGS files inside\n\n-Fixed Update screen now preserves changelog spacing/line breaks so release notes are readable\n\n-Added Visual border/card around the Logs view to match the rest of the UI\n\n-Adde: GitHub button on the Update screen header",
+    "version":  "3.4.6",
+    "notes":  "-Fixed Update Page",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "e722901bfa6ea17c3037656a4be99e9365ece5542422f77fae3a0fb9a3992d37"
+    "exeHash":  "e0e8002e650dbf088b137b3efe2cc19a18d4242375bfb6c57afc297d22396160"
 }
