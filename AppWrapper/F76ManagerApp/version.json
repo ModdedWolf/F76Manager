@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.6",
-    "notes":  "-Fixed Update Page",
+    "version":  "3.4.7",
+    "notes":  "-THIS VERSION SHOULD FIX THE ISSUE WHERE USERS COULDNT USE THE TOOL-\n\n-Added more tweaks (some im still testing)\n\n-Redesigned the Tweaks,Settings, and Update Tab \n\n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "e0e8002e650dbf088b137b3efe2cc19a18d4242375bfb6c57afc297d22396160"
+    "exeHash":  "ece01d53358b59a18857c259c765660ff108dd1a8ce04ed1b6c88b1bc57dea73"
 }
