@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.7",
-    "notes":  "-THIS VERSION SHOULD FIX THE ISSUE WHERE USERS COULDNT USE THE TOOL-\n\n-Added more tweaks (some im still testing)\n\n-Redesigned the Tweaks,Settings, and Update Tab \n\n",
+    "version":  "3.4.8",
+    "notes":  "\n-Fixed the Force Deploy on the Conflict popup should now deploy your mods instead of saying 0 ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "ece01d53358b59a18857c259c765660ff108dd1a8ce04ed1b6c88b1bc57dea73"
+    "exeHash":  "81319cc8b08b69b474f3bf20c47523e823ee840d30184625d6f51f8e48939ab5"
 }
