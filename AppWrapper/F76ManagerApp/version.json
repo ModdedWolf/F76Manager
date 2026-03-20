@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.8",
-    "notes":  "\n-Fixed the Force Deploy on the Conflict popup should now deploy your mods instead of saying 0 ",
+    "version":  "3.4.9",
+    "notes":  "-Added Archive INI Key to the settings tab so no more having to manually change sResourceArchive2List to sResourceIndexFileList like some users had too. Now allowing users to load there mods correctly. options are: Auto Detect, sResourceArchive2List, sResourceIndexFileList. \n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "81319cc8b08b69b474f3bf20c47523e823ee840d30184625d6f51f8e48939ab5"
+    "exeHash":  "816da5c95c893b2633e0b15b201ac22c4bbf4100b3fbe7ba9eaf9cfb240fd67b"
 }
