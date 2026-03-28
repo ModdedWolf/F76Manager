@@ -1,7 +1,7 @@
 {
-    "version":  "3.4.9",
-    "notes":  "-Added Archive INI Key to the settings tab so no more having to manually change sResourceArchive2List to sResourceIndexFileList like some users had too. Now allowing users to load there mods correctly. options are: Auto Detect, sResourceArchive2List, sResourceIndexFileList. \n",
+    "version":  "3.5.0",
+    "notes":  "-Fixed the Server: Online/Offline moving in a different spot when selecting a different tab\n\n-Fixed the Github Logo missing in the Update tab\n\n-Fixed the Main Image on the top left of the sidebar \n\n-Fixed Type and Actions being not Centered in the Mod List header \n\n-Added 3 Different FOV\u0027s that the ini allows to help not being able to see the pipboy using 120 FOV overall (Roughly using 120,100, and 70 is a decent start) \n\n-Next Update ill re-add the type of mod in the Mod List",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "816da5c95c893b2633e0b15b201ac22c4bbf4100b3fbe7ba9eaf9cfb240fd67b"
+    "exeHash":  "75c1bf58ccfa3c65ac27a94d4138225c9245a558f815b034bab734b9204f9a84"
 }
