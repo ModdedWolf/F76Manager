@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.0",
-    "notes":  "-Fixed the Server: Online/Offline moving in a different spot when selecting a different tab\n\n-Fixed the Github Logo missing in the Update tab\n\n-Fixed the Main Image on the top left of the sidebar \n\n-Fixed Type and Actions being not Centered in the Mod List header \n\n-Added 3 Different FOV\u0027s that the ini allows to help not being able to see the pipboy using 120 FOV overall (Roughly using 120,100, and 70 is a decent start) \n\n-Next Update ill re-add the type of mod in the Mod List",
+    "version":  "3.5.1",
+    "notes":  "-Added Virtual Mod Mode in the Settings tab  (Keeps your game folder clean) (Beta)\n\n ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "75c1bf58ccfa3c65ac27a94d4138225c9245a558f815b034bab734b9204f9a84"
+    "exeHash":  "e34170b6a5e5abebb4779243e55f9893ded1cd2afcfe0aff234c09f37f4fdafc"
 }
