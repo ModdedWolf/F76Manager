@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.3",
+    "version":  "3.5.4",
     "notes":  "*THIS UPDATE AND FUTHER YOU WILL NEED TO SET YOUR OWN PATH TO 7ZIP AND OR WINRAR*\n\n-Added winrar support when importing mods\n\n-Fixed drag handle made them bigger and easier to drag \n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "a1d98d06f9ffcff1af261b16fcff8513ebf5326c990a6711c266c7bd2228f375"
+    "exeHash":  "d48bc9ba37a91c04914d357590f183aaecd385ba1b523a9e56240cb8a8e785f0"
 }
