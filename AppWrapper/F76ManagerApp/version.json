@@ -1,7 +1,7 @@
 {
     "version":  "3.5.3",
-    "notes":  "-Fixed UI in mod list \n\n-Redesigned the edit mod popup in the mod list Also added a Details Box where users can add a note about the mod\n\n-Added more strings to each Language\n\n-Fixed a bug if Virtual Mod Mode was enabled and the user switched to Xbox then back to Steam the mods from the Xbox mod list would then be on the Steam mod list   ",
+    "notes":  "*THIS UPDATE AND FUTHER YOU WILL NEED TO SET YOUR OWN PATH TO 7ZIP AND OR WINRAR*\n\n-Added winrar support when importing mods\n\n-Fixed drag handle made them bigger and easier to drag \n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "0064badbfb7b077ee8d021bbea78c833a93b4a9affea7d17646bc3cc5d6f7404"
+    "exeHash":  "a1d98d06f9ffcff1af261b16fcff8513ebf5326c990a6711c266c7bd2228f375"
 }
