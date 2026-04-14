@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.4",
-    "notes":  "*THIS UPDATE AND FUTHER YOU WILL NEED TO SET YOUR OWN PATH TO 7ZIP AND OR WINRAR*\n\n-Added winrar support when importing mods\n\n-Fixed drag handle made them bigger and easier to drag \n",
+    "version":  "3.5.5",
+    "notes":  "-Fixed banner when importing mods through Nexus\n\n-Added support for d3d11.dll and dxgi.dll \n\n-Added the ability to change the color of the TYPE extention in the mod list \n\n-Added a Clear Errors in the log tab\n\n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "d48bc9ba37a91c04914d357590f183aaecd385ba1b523a9e56240cb8a8e785f0"
+    "exeHash":  "50c2191f37501710c5b05ab01c55d9b7a7bb7d853cdb7f48562982ba049f6971"
 }
