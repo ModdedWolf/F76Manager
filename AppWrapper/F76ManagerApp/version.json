@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.6",
-    "notes":  "-Fixed an issue when importing mods/ini in a folder and the ini just deleting it self \n\n-Fixed the Microsoft Store (Xbox) installation path not changing when switching from steam to xbox ",
+    "version":  "3.5.7",
+    "notes":  "-Added support for .json .txt and .ini files to be in the mod list\n\n-Added support to edit  .json .txt and .ini files from the manager\n\n-Fixed a bug with searching for a mod \n\nWill work with Hud Mod Loader and others",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "f5658613448ad80547cd2d123d90139d1cd11e55aeac3845359dc7d640efb967"
+    "exeHash":  "7e35a4c73fc215b24d1273fa2ed99486c4853dc240af806dcc39b442792ae5ae"
 }
