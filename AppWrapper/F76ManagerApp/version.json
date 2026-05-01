@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.7",
-    "notes":  "-Added support for .json .txt and .ini files to be in the mod list\n\n-Added support to edit  .json .txt and .ini files from the manager\n\n-Fixed a bug with searching for a mod \n\nWill work with Hud Mod Loader and others",
+    "version":  "3.5.8",
+    "notes":  "-New Config Tab that will show ini,json files for mods like Hud Mod Loaders etc \n\n-Added a Backup Configs to the Configs tab",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "7e35a4c73fc215b24d1273fa2ed99486c4853dc240af806dcc39b442792ae5ae"
+    "exeHash":  "2e3a3801bbb9cdfc0ce8c06db28741ed9ab8c03acac50e11f3c10b1c163cbb4a"
 }
