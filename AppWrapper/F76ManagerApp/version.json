@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.8",
-    "notes":  "-New Config Tab that will show ini,json files for mods like Hud Mod Loaders etc \n\n-Added a Backup Configs to the Configs tab",
+    "version":  "3.5.9",
+    "notes":  "-Fixed the text boxes when editing a Config now users can scroll to the bottom of an ini and or json file \n\n-Fixed the dup JSON is Valid",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "2e3a3801bbb9cdfc0ce8c06db28741ed9ab8c03acac50e11f3c10b1c163cbb4a"
+    "exeHash":  "6c45dd0d73e03d975da5f4cb0f09e8869901c603bfce2c74b0295afa1f43614e"
 }
