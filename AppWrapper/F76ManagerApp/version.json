@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.9",
-    "notes":  "-Fixed the text boxes when editing a Config now users can scroll to the bottom of an ini and or json file \n\n-Fixed the dup JSON is Valid",
+    "version":  "3.5.10",
+    "notes":  "-Fixed the issue that wouldnt allow hitting Enter to make a new line while editing a Config",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "6c45dd0d73e03d975da5f4cb0f09e8869901c603bfce2c74b0295afa1f43614e"
+    "exeHash":  "7fcd60af943ef960024221adc1f1dd851ed97b55f6ae291c90a8f6b68e05cdfa"
 }
