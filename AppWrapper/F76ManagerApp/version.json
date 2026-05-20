@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.10",
-    "notes":  "-Fixed the issue that wouldnt allow hitting Enter to make a new line while editing a Config",
+    "version":  "3.5.11",
+    "notes":  "-Fixed Mod list flickering when importing a mod \n\n-Fixed a Banner issue when importing then deploying and it showing 2 banners at once \n\n-Implemented additive config merge on re-import\n\n-Added Confirm Before delete option in the settings (OFF by default) \n\n-Made the Manager Preferences text smaller so less scrolling \n",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "7fcd60af943ef960024221adc1f1dd851ed97b55f6ae291c90a8f6b68e05cdfa"
+    "exeHash":  "a93499edd8ab5d887ae58f4705cd9402414ae3a86755b5ed0202709730aab2cb"
 }
