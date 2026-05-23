@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.11",
-    "notes":  "-Fixed Mod list flickering when importing a mod \n\n-Fixed a Banner issue when importing then deploying and it showing 2 banners at once \n\n-Implemented additive config merge on re-import\n\n-Added Confirm Before delete option in the settings (OFF by default) \n\n-Made the Manager Preferences text smaller so less scrolling \n",
+    "version":  "3.5.12",
+    "notes":  "-You can now Update Mods with F76Manager\n\n-Added (Confirm before removing old mod on update) Settings\u003eManager Preferences\u003e (OFF by default)\n\n-Resized the Dashboard\n\n-Updated All Languages\n\n-Added the github button to the dashboard ",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "a93499edd8ab5d887ae58f4705cd9402414ae3a86755b5ed0202709730aab2cb"
+    "exeHash":  "d44645c30a768fefebf221797fdcb3c5e946879ebe7e9c1e8fa4fe684f4b82de"
 }
