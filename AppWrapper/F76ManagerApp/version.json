@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.12",
-    "notes":  "-You can now Update Mods with F76Manager\n\n-Added (Confirm before removing old mod on update) Settings\u003eManager Preferences\u003e (OFF by default)\n\n-Resized the Dashboard\n\n-Updated All Languages\n\n-Added the github button to the dashboard ",
+    "version":  "3.5.13",
+    "notes":  "-Fixed Progression Banner when downloading Collections \n\n-Added the Actions buttons to the Mod,Configs, and Bundle Tab (with their respective options)\n\n-Removed the Sort by on the Mod list header \n\n-Added Restore Backup for Configs and Mods \n\n-Fixed Strings not showing in the Mod list \n\n-Added a way to delete backups \n\n-Added Backup Mods to the action button in the mod tab \n\n-Added Keybinds",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "d44645c30a768fefebf221797fdcb3c5e946879ebe7e9c1e8fa4fe684f4b82de"
+    "exeHash":  "91d956756b6ddff8e8b37839c6cd2bd8c8075138ad2fa86c6c97a07a2a66adff"
 }
