@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.13",
-    "notes":  "-Fixed Progression Banner when downloading Collections \n\n-Added the Actions buttons to the Mod,Configs, and Bundle Tab (with their respective options)\n\n-Removed the Sort by on the Mod list header \n\n-Added Restore Backup for Configs and Mods \n\n-Fixed Strings not showing in the Mod list \n\n-Added a way to delete backups \n\n-Added Backup Mods to the action button in the mod tab \n\n-Added Keybinds",
+    "version":  "3.5.16",
+    "notes":  "-Fixed the selected theme not loading instantly on startup \n\n-Fixed Update tab not updating to the newest version\n\nCurently the Theme Creator is available in the discord",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
-    "exeHash":  "b4a97d4536996953428d07c092edb0602ecdbe8009ac79b95ca6774f7ae17a64"
+    "exeHash":  "ae82358ff33d10f6d7cff76bc235316b22a30acb47e534697732240105ca6173"
 }
