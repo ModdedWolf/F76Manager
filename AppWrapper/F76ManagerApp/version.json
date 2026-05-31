@@ -1,5 +1,5 @@
 {
-    "version":  "3.5.16",
+    "version":  "3.5.15",
     "notes":  "-Fixed the selected theme not loading instantly on startup \n\n-Fixed Update tab not updating to the newest version\n\nCurently the Theme Creator is available in the discord",
     "url":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76Manager.exe",
     "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/latest/download/F76MUpdater.exe",
