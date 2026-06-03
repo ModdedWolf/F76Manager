@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.17",
-    "notes":  "-Fixed Themes not loading\n\n-Fixed the Theme Creator ",
-    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.17/F76Manager.exe",
-    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.17/F76MUpdater.exe",
-    "exeHash":  "4b3dc096bb7d9a0704b99f3f70c43d87e2ad4d3de7a465f6c8cf56db1c07d3c8"
+    "version":  "3.5.18",
+    "notes":  "-Fixed disabled mods changing order when deploying active mods\n\n-Fixed Config tab and Backup Configs showing/using the wrong config file after a mod update\n\n-Fixed redundant �You are up to date� banner when opening the Update tab on the current version\n\n-Fixed �No .f76theme files found in the Themes folder� banner appearing the first time you open Settings when no user themes are installed",
+    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.18/F76Manager.exe",
+    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.18/F76MUpdater.exe",
+    "exeHash":  "63e75ae244576781ba6e3690609fe9ac85a44f1a66b6201e8abf406ba4b5434d"
 }
