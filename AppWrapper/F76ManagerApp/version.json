@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.19",
-    "notes":  "-Fixed the Mod list not picking up on mod updates ",
-    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.19/F76Manager.exe",
-    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.19/F76MUpdater.exe",
-    "exeHash":  "087663b0cb17a7971783ea8f45b29fbaa37795cafc28b4f9cea21883ac8c4827"
+    "version":  "3.5.20",
+    "notes":  "-Fixed disabled mods going to the buttom of the list \n\n-Added Vats Blur toggle in the Tweaks tab Default is on \n\n-Fixed the setting tab Theme, and Language UI\n\n-Updated all Languages \n\n",
+    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.20/F76Manager.exe",
+    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.20/F76MUpdater.exe",
+    "exeHash":  "e72a77daaa3158a080aad1ccf1ef618005578cc1432202ab301cb314ce7087ab"
 }
