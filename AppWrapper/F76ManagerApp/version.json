@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.20",
-    "notes":  "-Fixed disabled mods going to the buttom of the list \n\n-Added Vats Blur toggle in the Tweaks tab Default is on \n\n-Fixed the setting tab Theme, and Language UI\n\n-Updated all Languages \n\n",
-    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.20/F76Manager.exe",
-    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.20/F76MUpdater.exe",
-    "exeHash":  "e72a77daaa3158a080aad1ccf1ef618005578cc1432202ab301cb314ce7087ab"
+    "version":  "3.5.21",
+    "notes":  "-Fixed a Unicode issue with these Languages: German, Spanish, French, Italian, Polish, Portuguese (Brazil), and Russian\n\n-Fixed the hash mismatch issue when users tried updating from v3.5.19 to v3.5.20 (users might have to replace the EXE with the current release)\n\n\n\n",
+    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.21/F76Manager.exe",
+    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.21/F76MUpdater.exe",
+    "exeHash":  "0fdd130dd5856e280ff1e76af0df33cf0ecc6463a7bfc3e119080d62f21c397c"
 }
