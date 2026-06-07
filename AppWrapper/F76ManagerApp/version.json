@@ -1,7 +1,7 @@
 {
-    "version":  "3.5.21",
-    "notes":  "-Fixed a Unicode issue with these Languages: German, Spanish, French, Italian, Polish, Portuguese (Brazil), and Russian\n\n-Fixed the hash mismatch issue when users tried updating from v3.5.19 to v3.5.20 (users might have to replace the EXE with the current release)\n\n\n\n",
-    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.21/F76Manager.exe",
-    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.5.21/F76MUpdater.exe",
-    "exeHash":  "0fdd130dd5856e280ff1e76af0df33cf0ecc6463a7bfc3e119080d62f21c397c"
+    "version":  "3.6.0",
+    "notes":  "-Changed the Bundle tab so now users can OPEN,VIEW, and make BA2\u0027s\n\n-Added an x to the search bar to make it easier to clear it\n\n-Made it easier to move mods around in the mod list",
+    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.0/F76Manager.exe",
+    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.0/F76MUpdater.exe",
+    "exeHash":  "1660166e8b320cdf867d2aadb4d98b36a0825b4b8c91db033535cd82134265ed"
 }
