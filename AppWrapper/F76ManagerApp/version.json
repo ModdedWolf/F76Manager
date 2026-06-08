@@ -1,7 +1,7 @@
 {
-    "version":  "3.6.2",
-    "notes":  "-Added an option to just move the mods from the bundle tab to the mod list \n\n-Fixed the issue where adding a folder to turn into a ba2 would show what was in it \n\n-Fixed the Tweak desc and toggles \n\n-Added a Background Auto-Update \n\n",
-    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.2/F76Manager.exe",
-    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.2/F76MUpdater.exe",
-    "exeHash":  "5748d72dbc148a7445a4bab25c36500feea35dcbd67e315f0e1afb11c3bcb2d8"
+  "version": "3.6.3",
+  "notes": "-Fixed an issue with the Tweak option \u0022Pip-Boy CRT Effect\u0022 is toggled off, Turning on the effect and not allowing users to see the pipboy in some tabs\n\n-Updated all Languages  ",
+  "url": "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.3/F76Manager.exe",
+  "updaterUrl": "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.3/F76MUpdater.exe",
+  "exeHash": "0aedea74653cbf429bb94a7497bcf76281751eaefacdf1adf512d293a4308c4d"
 }
