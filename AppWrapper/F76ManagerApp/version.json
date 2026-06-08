@@ -1,7 +1,7 @@
 {
-    "version":  "3.6.0",
-    "notes":  "-Changed the Bundle tab so now users can OPEN,VIEW, and make BA2\u0027s\n\n-Added an x to the search bar to make it easier to clear it\n\n-Made it easier to move mods around in the mod list",
-    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.0/F76Manager.exe",
-    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.0/F76MUpdater.exe",
-    "exeHash":  "1660166e8b320cdf867d2aadb4d98b36a0825b4b8c91db033535cd82134265ed"
+    "version":  "3.6.1",
+    "notes":  "-Fixed the issue where some vanilla ba2\u0027s from not loading within the Bundle tab\n\n\n",
+    "url":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.1/F76Manager.exe",
+    "updaterUrl":  "https://github.com/ModdedWolf/F76Manager/releases/download/v3.6.1/F76MUpdater.exe",
+    "exeHash":  "13e63b9a400d777ef2fd851b9adf4f6a0417c6936305aa07fabb356cda85f0f5"
 }
