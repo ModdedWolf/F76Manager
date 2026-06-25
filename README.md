@@ -1,7 +1,7 @@
 # Fallout 76 Manager
 
 
-Point it at your game folder (Steam or Xbox/Game Pass), tweak your settings, install mods, and deploy when you're ready. The UI is a web front-end baked into the app with WebView2; the heavy lifting runs in C# behind it.
+Point it at your game folder (Steam or Xbox/Game Pass), tweak your settings, install mods, and deploy when you're ready. The UI is a web front-end baked into the app with WebView2.
 
 ## What it does
 
