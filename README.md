@@ -60,4 +60,3 @@ AppWrapper/F76ManagerApp/   Main app (F76Manager.exe)
 WebSrc/                     UI (embedded at build time)
 ```
 
-Source is on GitHub: https://github.com/ModdedWolf/F76Manager-Source
