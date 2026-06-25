@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fallout 76 Manager</title>
+    <script src="js/user-themes-boot.js"></script>
+    <script>
+        (function () {
+            var k = 'f76_ui_theme', d = 'fallout';
+            var fallbackBuiltin = ['fallout', 'vault-tec', 'red-black', 'black-white'];
+            var builtin = (typeof window.__F76_BUILTIN_THEME_IDS !== 'undefined')
+                ? window.__F76_BUILTIN_THEME_IDS
+                : fallbackBuiltin;
+            var user = (typeof window.__F76_USER_THEME_IDS !== 'undefined') ? window.__F76_USER_THEME_IDS : [];
+            function allowed(id) {
+                return builtin.indexOf(id) !== -1 || user.indexOf(id) !== -1;
+            }
+            function applyTheme(id) {
+                document.documentElement.dataset.theme = id;
+                var css = window.__F76_USER_THEME_CSS && window.__F76_USER_THEME_CSS[id];
+                if (css) {
+                    var el = document.createElement('style');
+                    el.id = 'user-theme-' + id;
+                    el.textContent = css;
+                    document.head.appendChild(el);
+                }
+                try { localStorage.setItem(k, id); } catch (e) { }
+            }
+            var theme = null;
+            if (typeof window.__F76_BOOT_UI_THEME === 'string' && window.__F76_BOOT_UI_THEME && allowed(window.__F76_BOOT_UI_THEME)) {
+                theme = window.__F76_BOOT_UI_THEME;
+            } else {
+                try {
+                    var s = localStorage.getItem(k);
+                    if (s && allowed(s)) theme = s;
+                } catch (e) { }
+            }
+            applyTheme(theme || d);
+        })();
+    </script>
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="css/style.css?v=X.X.X">
+    <link rel="stylesheet" href="css/fonts/fonts.css?v=X.X.X">
+    <script src="js/vendor/lucide.min.js?v=X.X.X" onerror="console.warn('[FALLBACK] Local Lucide failed to load. Icons will be missing.'); window.lucide = window.lucide || { createIcons: function(){} };"></script>
+</head>
+
+<body oncontextmenu="return false">
+    <script>
+        if (window.f76_ipc) {
+            window.chrome = window.chrome || {};
+            window.chrome.webview = window.f76_ipc.webview;
+            console.log("[IPC] Linux bridge initialized.");
+        }
+
+        window.onerror = function (message, source, lineno, colno, error) {
+            const msg = `[JS_CRITICAL_PARSE] ${message} at ${source}:${lineno}:${colno}`;
+            console.error(msg);
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage({ type: 'JS_LOG', message: msg });
+            }
+        };
+
+        window.addEventListener('unhandledrejection', function (event) {
+            const msg = `[JS_UNHANDLED_PROMISE] ${event.reason}`;
+            console.error(msg);
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage({ type: 'JS_LOG', message: msg });
+            }
+        });
+    </script>
+    <div id="app">
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-container">
+                    <img id="app-logo" src="assets/Icon-nobg.png" alt="Vault Logo" class="logo">
+                    <script>
+                        (function () {
+                            var logo = window.__F76_BOOT_LOGO;
+                            if (!logo) return;
+                            var el = document.getElementById('app-logo');
+                            if (!el) return;
+                            el.src = logo.indexOf('http') === 0
+                                ? logo
+                                : 'https://f76manager.app/' + logo.replace(/^\//, '');
+                        })();
+                    </script>
+                    <span class="app-name">F76 Manager</span>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="#dashboard" class="nav-item active" data-section="dashboard">
+                    <i data-lucide="layout-dashboard"></i>
+                    <span class="nav-label">Dashboard</span>
+                </a>
+                <a href="#mods" class="nav-item" data-section="mods">
+                    <i data-lucide="package"></i>
+                    <span class="nav-label">Mods</span>
+                </a>
+                <a href="#config" class="nav-item" data-section="config">
+                    <i data-lucide="file-text"></i>
+                    <span class="nav-label">Config</span>
+                </a>
+
+                <a href="#bundle" class="nav-item" data-section="bundle">
+                    <i data-lucide="archive"></i>
+                    <span class="nav-label">Bundle</span>
+                </a>
+                <a href="#tweaks" class="nav-item" data-section="tweaks">
+                    <i data-lucide="sliders-horizontal"></i>
+                    <span class="nav-label">Tweaks</span>
+                </a>
+                <a href="#pipboy" class="nav-item" data-section="pipboy">
+                    <i data-lucide="monitor"></i>
+                    <span class="nav-label">Pip-Boy</span>
+                </a>
+                <div class="nav-divider"></div>
+                <a href="#profiles" class="nav-item" data-section="profiles">
+                    <i data-lucide="users"></i>
+                    <span class="nav-label">Profiles</span>
+                </a>
+                <a href="#logs" class="nav-item" data-section="logs">
+                    <i data-lucide="terminal"></i>
+                    <span class="nav-label">Logs</span>
+                </a>
+                <a href="#settings" class="nav-item" data-section="settings">
+                    <i data-lucide="settings"></i>
+                    <span class="nav-label">Settings</span>
+                </a>
+
+                <div id="endorsement-container" class="endorsement-container hidden">
+                    <a href="#" class="nav-item endorsement-item" id="endorsement-nav-item">
+                        <i data-lucide="heart" class="heart-icon"></i>
+                        <span class="nav-label">Endorse</span>
+                    </a>
+                    <span id="endorsement-later" class="endorsement-later">Maybe later</span>
+                </div>
+            </nav>
+
+
+        </aside>
+
+        <main class="main-container">
+            <header class="top-bar">
+                <div class="top-bar-left">
+                    <div id="section-title" class="section-title">Dashboard</div>
+                </div>
+
+                <div class="top-bar-right">
+                    <div id="platform-toggle" class="platform-badge steam" style="cursor: pointer;">
+                        <i data-lucide="gamepad-2"></i>
+                        <span>Steam</span>
+                    </div>
+                    <div class="profile-selector">
+                        <select id="profile-dropdown">
+                            <option value="default">Default Profile</option>
+                            <option value="test">Testing</option>
+                            <option value="ultra">Ultra PC</option>
+                        </select>
+                    </div>
+                </div>
+            </header>
+
+            <div id="content-area" class="content-area">
+                
+            </div>
+        </main>
+    </div>
+
+    <div id="notification-container" class="notification-container"></div>
+
+    
+    <div id="confirm-modal" class="modal-overlay" role="presentation">
+        <div class="endorsement-modal-content" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+            <div class="endorsement-modal-header">
+                <div class="endorsement-modal-title">
+                    <i data-lucide="alert-triangle" id="confirm-icon" aria-hidden="true"></i>
+                    <h3 id="confirm-title">Confirmation</h3>
+                </div>
+                <button type="button" class="close-status" id="confirm-close-top" aria-label="Close">&times;</button>
+            </div>
+            <div class="endorsement-modal-body">
+                <p class="endorsement-modal-desc" id="confirm-message">Are you sure?</p>
+            </div>
+            <div class="endorsement-modal-footer">
+                <button type="button" class="btn-popup secondary" id="confirm-cancel">Cancel</button>
+                <button type="button" class="btn-popup primary" id="confirm-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
+    
+    <script src="js/components/webview2-drag-polyfill.js"></script>
+
+    <script type="module" src="js/main.js?v=X.X.X"></script>
+    <script>
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            try { window.lucide.createIcons(); } catch (_) { }
+        }
+    </script>
+</body>
+
+</html>

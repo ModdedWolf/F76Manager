@@ -1,0 +1,66 @@
+
+html[data-theme="red-black"] .mods-toolbar,
+html[data-theme="red-black"] .mods-list-container,
+html[data-theme="red-black"] .mods-table-container,
+html[data-theme="red-black"] .mods-table th,
+html[data-theme="red-black"] .mod-row,
+html[data-theme="red-black"] .mod-row td,
+html[data-theme="red-black"] .mods-actions-dropdown,
+html[data-theme="red-black"] .bundle-menu-dropdown,
+html[data-theme="red-black"] .file-entry-context-menu,
+html[data-theme="red-black"] .presets-bar,
+html[data-theme="red-black"] .tweak-category,
+html[data-theme="red-black"] .settings-panel-card,
+html[data-theme="red-black"] .logs-container,
+html[data-theme="red-black"] .logs-tabs,
+html[data-theme="red-black"] .glass-panel-unified,
+html[data-theme="red-black"] .sync-popover {
+    background: #000000 !important;
+    border-color: var(--border-color) !important;
+}
+
+html[data-theme="red-black"] .mods-toolbar {
+    border-bottom-color: var(--border-color) !important;
+}
+
+html[data-theme="red-black"] .bundle-menu-item:hover:not(.bundle-menu-item--muted),
+html[data-theme="red-black"] .bundle-menu-item.bundle-menu-item--active:not(.bundle-menu-item--muted) {
+    background: rgba(var(--primary-rgb), 0.12) !important;
+    color: var(--primary-green) !important;
+}
+
+html[data-theme="red-black"] .bundle-menu-item.danger:hover:not(.bundle-menu-item--muted),
+html[data-theme="red-black"] .bundle-menu-item.danger.bundle-menu-item--active:not(.bundle-menu-item--muted) {
+    background: rgba(239, 68, 68, 0.15) !important;
+    color: #f87171 !important;
+}
+
+html[data-theme="red-black"] .nav-item,
+html[data-theme="red-black"] .nav-item .nav-label,
+html[data-theme="red-black"] .nav-item i {
+    color: var(--primary-green) !important;
+}
+
+html[data-theme="red-black"] .nav-item.active {
+    background-color: rgba(var(--primary-rgb), 0.12) !important;
+    box-shadow: inset 3px 0 0 var(--primary-green) !important;
+}
+
+html[data-theme="red-black"] .version-sidebar .tweaks-sidebar-item,
+html[data-theme="red-black"] .version-sidebar .tweaks-sidebar-item span,
+html[data-theme="red-black"] .version-sidebar .tweaks-sidebar-item i {
+    color: var(--primary-green) !important;
+}
+
+html[data-theme="red-black"] .rename-mod-modal,
+html[data-theme="red-black"] .rename-mod-tabs,
+html[data-theme="red-black"] .rename-mod-header,
+html[data-theme="red-black"] .rename-mod-input,
+html[data-theme="red-black"] .rename-mod-details {
+    background: #000000 !important;
+    border-color: var(--border-color) !important;
+}
+
+html[data-theme="red-black"] .rename-mod-tabs {
+    border-bottom-color: var(--border-color) !important;
+}

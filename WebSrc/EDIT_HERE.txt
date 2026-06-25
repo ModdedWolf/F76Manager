@@ -1,0 +1,76 @@
+WebSrc is the authoritative source for UI assets.
+
+deploy.ps1 syncs:
+  $rootDir\WebSrc  ->  $sourceDir\www  (mirror; orphans removed)
+
+Release builds embed WebSrc/** directly via F76ManagerApp.csproj — not www/.
+Use www/ only for F76MGR_USE_PHYSICAL_WWW=1 override next to the exe.
+
+deploy.ps1 by default auto-bumps the patch version in version.json before each build.
+Use deploy.ps1 -NoBump to rebuild the same version. After publish, deploy verifies
+the __F76_BOOT_UI_THEME marker is embedded in the exe (fails if WebSrc is stale).
+
+Do not hand-edit AppWrapper\F76ManagerApp\www files.
+Those files are overwritten on deploy.
+
+Debug builds also consume WebSrc via F76ManagerApp.csproj Content mapping.
+
+UI themes
+---------
+Built-in themes (Fallout, Vault-Tec, etc.):
+  - Edit WebSrc/css/themes/*.css, WebSrc/assets/themes/{id}.png, WebSrc/themes.manifest.json
+  - Run: python new-theme.py sync
+    (updates en-US.json theme labels from manifest "name", regenerates registry.js /
+     ThemeIds.cs, and packs WebSrc/bundled-themes/)
+  - Do not hand-edit WebSrc/locales/en-US.json theme_* keys — sync writes them from manifest.
+  - Rename display name only: change "name" in themes.manifest.json (keep "id"), then sync + deploy.
+
+Built-in theme logo (sidebar icon):
+  - The manager loads logos from WebSrc/assets/themes/{id}.png|.webp|.jpg (embedded in Release).
+    Dropping a .f76theme in bundled-themes alone does not change the sidebar until sync + deploy.
+  - Replace logo file:
+      python new-theme.py set-logo {id} path/to/logo.png
+    Or after exporting from Theme Creator:
+      python new-theme.py pull-logo {id} path/to/F76Manager-Theme-....f76theme
+    Or drop F76Manager-Theme-{Display Name}.f76theme in WebSrc/bundled-themes/ and run sync
+    (sync imports newer package logos into assets/themes/ before repacking).
+  - Then deploy.ps1 so Release embeds the updated asset.
+  - Built-in packages use the same names as Theme Creator:
+      F76Manager-Theme-{Display Name}.f76theme
+      (zip contains manifest.json + logo.png|.webp|.jpg)
+  - Runtime UI colors/logos still load from embedded www (css + assets)
+  - deploy.ps1 copies WebSrc -> www and bundled-themes -> Release/BundledThemes/
+
+Dev iteration without a full Release rebuild:
+  - Debug build: WebSrc is copied to output www/ and used automatically.
+  - Release + local www override: set env F76MGR_USE_PHYSICAL_WWW=1 and place a www/ folder
+    next to F76Manager.exe (same layout as AppWrapper/F76ManagerApp/www).
+
+User / community themes (.f76theme):
+  - Installed at {exe}/Themes/ (Settings → Import, or: python new-theme.py install-user path)
+  - deploy.ps1 preserves Release/Themes/ across deploys.
+
+Startup theme (no flash on launch):
+  - Saved uiTheme in Settings/settings.json is injected into js/user-themes-boot.js by the C# host
+    (__F76_BOOT_UI_THEME, __F76_BOOT_LOGO) before first paint. Do not rely on localStorage alone.
+  - Run sync after manifest logo changes so ThemeBootLogos.cs stays in sync.
+  *** Do NOT drop .f76theme files in WebSrc/ — the app never scans that folder at runtime. ***
+  WebSrc/bundled-themes/ is only for packaging built-in themes into the installer (sync output).
+
+  To use a custom .f76theme in the manager:
+    python new-theme.py install-user path/to/F76Manager-Theme-....f76theme
+    (copies to Release/Themes/, then restart F76Manager.exe)
+  Or: Settings -> Import theme, or copy manually into {install}\Themes\
+  After copying while the app is running: Settings -> Refresh themes (rescans Themes\).
+
+  Built-in vs user:
+    - Built-in = listed in themes.manifest.json (fallout, vault-tec, black-white, …)
+    - User = .f76theme in the install Themes\ folder only
+  - Copying a shipped/built-in .f76theme into Themes\ does NOT add a new theme unless
+    you change "id" in manifest.json to a unique id (not fallout, vault-tec, etc.).
+    Renaming the .f76theme file only changes the filename; id/displayName are inside the zip.
+
+  Create packages with F76ThemeCreator\Release\F76ThemeCreator.exe (or theme-studio.bat)
+  Export produces F76Manager-Theme-{name}.f76theme
+
+Do not add user theme CSS or JS under WebSrc.

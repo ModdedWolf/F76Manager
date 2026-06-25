@@ -1,0 +1,21 @@
+# Build outputs
+bin/
+obj/
+[Rr]elease/
+[Rr]elease_Secure/
+publish/
+
+AppWrapper/F76ManagerApp/www/
+
+# Generated app data / packages
+Release/
+*.zip
+
+# IDE / user files
+.vs/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+desktop.ini

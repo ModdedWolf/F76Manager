@@ -1,0 +1,57 @@
+[data-theme="red-black"] {
+    --bg-dark: #000000;
+    --bg-surface: #000000;
+    --bg-surface-light: #000000;
+    --primary-green: #c62828;
+    --primary-green-dim: rgba(198, 40, 40, 0.55);
+    --primary-rgb: 198, 40, 40;
+    --accent-amber: #ff8a65;
+    --text-main: #f5f5f5;
+    --text-muted: rgba(245, 245, 245, 0.55);
+    --border-color: rgba(198, 40, 40, 0.22);
+    --danger-red: #ef5350;
+    --success-green: #66bb6a;
+    --warning-yellow: #ffca28;
+    --on-primary: #ffffff;
+}
+
+[data-theme="red-black"] body,
+[data-theme="red-black"] .sidebar,
+[data-theme="red-black"] .top-bar,
+[data-theme="red-black"] .main-container {
+    background-color: var(--bg-dark);
+}
+
+[data-theme="red-black"] .content-area {
+    background-color: var(--bg-dark);
+    background-image:
+        radial-gradient(circle at 50% 50%, rgba(var(--primary-rgb), 0.06) 0%, transparent 80%),
+        linear-gradient(var(--bg-dark), var(--bg-dark));
+}
+
+html[data-theme="red-black"] body[data-ui-section="bundle"] .content-area,
+html[data-theme="red-black"] #content-area[data-active-section="bundle"] {
+    background-image:
+        radial-gradient(circle at 50% 42%, rgba(var(--primary-rgb), 0.14) 0%, transparent 68%),
+        linear-gradient(var(--bg-dark), var(--bg-dark));
+}
+
+[data-theme="red-black"] .sidebar {
+    border-right: 1px solid var(--border-color);
+}
+
+[data-theme="red-black"] .top-bar {
+    border-bottom: 1px solid var(--border-color);
+}
+
+[data-theme="red-black"] .action-card.primary,
+[data-theme="red-black"] .btn.primary:not(.secondary):not(.discord-card) {
+    background-color: var(--primary-green);
+    border-color: var(--primary-green);
+    color: var(--on-primary);
+}
+
+[data-theme="red-black"] .action-card.primary:hover {
+    background-color: #d32f2f;
+    border-color: #d32f2f;
+}

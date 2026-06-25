@@ -1,0 +1,16 @@
+[data-theme="black-white"] {
+    --bg-dark: #000000;
+    --bg-surface: #000000;
+    --bg-surface-light: #0a0a0a;
+    --primary-green: #ffffff;
+    --primary-green-dim: rgba(255, 255, 255, 0.7);
+    --primary-rgb: 255, 255, 255;
+    --accent-amber: #e0e0e0;
+    --text-main: #ffffff;
+    --text-muted: rgba(255, 255, 255, 0.55);
+    --border-color: rgba(255, 255, 255, 0.22);
+    --danger-red: #f44336;
+    --success-green: #bdbdbd;
+    --warning-yellow: #eeeeee;
+    --on-primary: #000000;
+}

@@ -1,0 +1,41 @@
+
+html[data-theme="black-white"] .mods-toolbar,
+html[data-theme="black-white"] .mods-list-container,
+html[data-theme="black-white"] .mods-table-container,
+html[data-theme="black-white"] .mods-table th,
+html[data-theme="black-white"] .mod-row,
+html[data-theme="black-white"] .mod-row td,
+html[data-theme="black-white"] .mods-actions-dropdown,
+html[data-theme="black-white"] .bundle-menu-dropdown,
+html[data-theme="black-white"] .file-entry-context-menu,
+html[data-theme="black-white"] .presets-bar,
+html[data-theme="black-white"] .tweak-category,
+html[data-theme="black-white"] .settings-panel-card,
+html[data-theme="black-white"] .logs-container,
+html[data-theme="black-white"] .logs-tabs,
+html[data-theme="black-white"] .glass-panel-unified,
+html[data-theme="black-white"] .sync-popover,
+html[data-theme="black-white"] .rename-mod-modal,
+html[data-theme="black-white"] .rename-mod-tabs,
+html[data-theme="black-white"] .rename-mod-header,
+html[data-theme="black-white"] .rename-mod-input,
+html[data-theme="black-white"] .rename-mod-details {
+    background: #000000 !important;
+    border-color: var(--border-color) !important;
+}
+
+html[data-theme="black-white"] .mods-toolbar {
+    border-bottom-color: var(--border-color) !important;
+}
+
+html[data-theme="black-white"] .bundle-menu-item:hover:not(.bundle-menu-item--muted),
+html[data-theme="black-white"] .bundle-menu-item.bundle-menu-item--active:not(.bundle-menu-item--muted) {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #ffffff !important;
+}
+
+html[data-theme="black-white"] .bundle-menu-item.danger:hover:not(.bundle-menu-item--muted),
+html[data-theme="black-white"] .bundle-menu-item.danger.bundle-menu-item--active:not(.bundle-menu-item--muted) {
+    background: rgba(239, 68, 68, 0.15) !important;
+    color: #f87171 !important;
+}

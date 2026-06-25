@@ -1,0 +1,16 @@
+[data-theme="vault-tec"] {
+    --bg-dark: #0a1628;
+    --bg-surface: #12203a;
+    --bg-surface-light: #1c3050;
+    --primary-green: #4fc3f7;
+    --primary-green-dim: rgba(79, 195, 247, 0.7);
+    --primary-rgb: 79, 195, 247;
+    --accent-amber: #ffd54f;
+    --text-main: #e3f2fd;
+    --text-muted: #90caf9;
+    --border-color: #1e3a5f;
+    --danger-red: #ef5350;
+    --success-green: #66bb6a;
+    --warning-yellow: #ffca28;
+    --on-primary: #0a1628;
+}

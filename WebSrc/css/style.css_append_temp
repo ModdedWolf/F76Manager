@@ -1,0 +1,28 @@
+
+/* FIX SCROLLING FOR MODS PAGE */
+.mods-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden; /* Prevent double scroll */
+}
+
+.mods-header.single-row {
+    flex-shrink: 0; /* Prevent header from shrinking */
+}
+
+.mods-table-container {
+    flex: 1;
+    overflow-y: auto; /* Enable scrolling for list only */
+    min-height: 0; /* Required for flex scrolling */
+    border-radius: 8px; /* Optional visual polish */
+}
+
+/* Ensure table header is sticky if inside the container */
+.mods-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: var(--bg-surface); /* Must match background */
+    box-shadow: 0 1px 0 var(--border-color);
+}
