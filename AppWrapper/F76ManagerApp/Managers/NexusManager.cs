@@ -25,10 +25,10 @@ public class NexusManager : IDisposable
     /// Nexus SSO/OAuth requires a registered application slug from support@nexusmods.com.
     /// Public builds must not prompt users for Personal API keys (Nexus API policy).
     /// </summary>
-    public const string ApplicationSlug = "f76manager";
+    public const string ApplicationSlug = "moddedwolfx-f76manager";
 
     /// <summary>Flip to true after Nexus Mods registers this application.</summary>
-    public const bool SsoEnabled = false;
+    public const bool SsoEnabled = true;
 
     /// <summary>Same slug Nexus issues for SSO browser authorize URLs.</summary>
     public const string? SsoApplicationSlug = ApplicationSlug;

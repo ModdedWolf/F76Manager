@@ -1,4 +1,6 @@
 {
-    "version": "X.X.X",
-    "notes": "Testing build for Nexus Mods API registration review."
+  "version": "1.0.0",
+  "notes": "",
+  "url": "https://github.com/ModdedWolf/F76Manager/releases/download/v1.0.0/F76Manager_Nexus.zip",
+  "exeHash": "15c38207ea828222d3701e1dfcd5cebba40d0f768373cec7f391dac583a28ec3"
 }

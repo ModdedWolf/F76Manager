@@ -16,6 +16,9 @@ Release/
 *.user
 *.suo
 
+# Developer tools (not part of the distributed source)
+Developer/F76MPublisher/
+
 # OS
 Thumbs.db
 desktop.ini

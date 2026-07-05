@@ -53,7 +53,7 @@ public partial class Form1 : Form, IMessageFilter
     private bool _webViewRecoveryAttempted = false;
     private bool _ipcServerStarted;
     private bool _ipcHandleCreatedHooked;
-    public const string CurrentVersion = "X.X.X";
+    public const string CurrentVersion = "1.0.0";
 
     public static string GetRunningProductVersion()
     {
