@@ -1,0 +1,140 @@
+body:not(.no-animations) .section-content {
+    animation: sectionEnter 0.28s ease-out both;
+}
+
+body:not(.no-animations) .action-card,
+body:not(.no-animations) .widget,
+body:not(.no-animations) .profile-card,
+body:not(.no-animations) .settings-panel-card,
+body:not(.no-animations) .tweak-item {
+    animation: staggerFadeUp 0.32s ease-out both;
+}
+
+body:not(.no-animations) .action-card:nth-child(1),
+body:not(.no-animations) .widget:nth-child(1),
+body:not(.no-animations) .profile-card:nth-child(1) { animation-delay: 0.02s; }
+body:not(.no-animations) .action-card:nth-child(2),
+body:not(.no-animations) .widget:nth-child(2),
+body:not(.no-animations) .profile-card:nth-child(2) { animation-delay: 0.05s; }
+body:not(.no-animations) .action-card:nth-child(3),
+body:not(.no-animations) .widget:nth-child(3),
+body:not(.no-animations) .profile-card:nth-child(3) { animation-delay: 0.08s; }
+body:not(.no-animations) .action-card:nth-child(4),
+body:not(.no-animations) .widget:nth-child(4),
+body:not(.no-animations) .profile-card:nth-child(4) { animation-delay: 0.11s; }
+body:not(.no-animations) .action-card:nth-child(5),
+body:not(.no-animations) .widget:nth-child(5),
+body:not(.no-animations) .profile-card:nth-child(5) { animation-delay: 0.14s; }
+body:not(.no-animations) .action-card:nth-child(6),
+body:not(.no-animations) .widget:nth-child(6),
+body:not(.no-animations) .profile-card:nth-child(6) { animation-delay: 0.17s; }
+
+body:not(.no-animations) .action-card,
+body:not(.no-animations) .widget,
+body:not(.no-animations) .profile-card {
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+body:not(.no-animations) .action-card:hover,
+body:not(.no-animations) .widget:hover,
+body:not(.no-animations) .profile-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+}
+
+body:not(.no-animations) .btn:active,
+body:not(.no-animations) .action-card:active,
+body:not(.no-animations) .btn-popup:active {
+    transform: scale(0.97);
+}
+
+body:not(.no-animations) .nav-item {
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+}
+
+body:not(.no-animations) .nav-item.active {
+    transition: background-color 0.22s ease, color 0.22s ease, border-color 0.22s ease;
+}
+
+body:not(.no-animations) .switch .slider {
+    transition: background-color 0.2s ease;
+}
+
+body:not(.no-animations) .switch .slider:before {
+    transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+body:not(.no-animations) .modal-overlay,
+body:not(.no-animations) .conflict-modal-overlay {
+    animation: modalBackdropIn 0.2s ease-out both;
+}
+
+body:not(.no-animations) .conflict-modal-content,
+body:not(.no-animations) .custom-modal,
+body:not(.no-animations) .endorsement-modal-content,
+body:not(.no-animations) #confirm-modal .endorsement-modal-content {
+    animation: modalPopIn 0.24s cubic-bezier(0.2, 0.9, 0.3, 1.05) both;
+}
+
+body:not(.no-animations) .status-banner {
+    animation: toastSlideIn 0.28s ease-out both;
+}
+
+@keyframes sectionEnter {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes staggerFadeUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes modalBackdropIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes modalPopIn {
+    from { opacity: 0; transform: scale(0.94) translateY(8px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes toastSlideIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body:not(.no-animations) *,
+    body:not(.no-animations) *::before,
+    body:not(.no-animations) *::after,
+    body:not(.no-animations) .animate-fade,
+    body:not(.no-animations) .sidebar,
+    body:not(.no-animations) .btn {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+body.no-animations *,
+body.no-animations *::before,
+body.no-animations *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+}
+body.no-animations {
+    scroll-behavior: auto !important;
+}
+
+body.no-animations :is(button, .btn, [class*="btn"], .icon-btn, .preset-chip, .preset-select,
+    .drag-handle, .mods-nexus-link, .bundle-staged-item, .action-card, .profile-card, .widget):is(:hover, :active),
+body.no-animations .mod-row:not(.dragging):hover,
+body.no-animations .endorsement-item:hover .heart-icon {
+    transform: none !important;
+}
+body.no-animations :is(.color-slider, .modern-slider, .tweak-range)::-webkit-slider-thumb:hover {
+    transform: none !important;
+}

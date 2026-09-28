@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>F76 Manager — Theme Creator</title>
+    <script src="js/user-themes-boot.js"></script>
+    <script>
+        (function () {
+            var k = 'f76_ui_theme', d = 'fallout';
+            var fallbackBuiltin = ['fallout', 'vault-tec', 'red-black', 'black-white'];
+            var builtin = (typeof window.__F76_BUILTIN_THEME_IDS !== 'undefined')
+                ? window.__F76_BUILTIN_THEME_IDS
+                : fallbackBuiltin;
+            var user = (typeof window.__F76_USER_THEME_IDS !== 'undefined') ? window.__F76_USER_THEME_IDS : [];
+            function allowed(id) {
+                return builtin.indexOf(id) !== -1 || user.indexOf(id) !== -1;
+            }
+            function applyTheme(id) {
+                document.documentElement.dataset.theme = id;
+                var css = window.__F76_USER_THEME_CSS && window.__F76_USER_THEME_CSS[id];
+                if (css) {
+                    var el = document.createElement('style');
+                    el.id = 'user-theme-' + id;
+                    el.textContent = css;
+                    document.head.appendChild(el);
+                }
+                try { localStorage.setItem(k, id); } catch (e) { }
+            }
+            var theme = null;
+            if (typeof window.__F76_BOOT_UI_THEME === 'string' && window.__F76_BOOT_UI_THEME && allowed(window.__F76_BOOT_UI_THEME)) {
+                theme = window.__F76_BOOT_UI_THEME;
+            } else {
+                try {
+                    var s = localStorage.getItem(k);
+                    if (s && allowed(s)) theme = s;
+                } catch (e) { }
+            }
+            applyTheme(theme || d);
+        })();
+    </script>
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="css/style.css?v=X.X.X">
+    <link rel="stylesheet" href="css/fonts/fonts.css?v=X.X.X">
+    <script src="js/vendor/lucide.min.js?v=X.X.X" onerror="window.lucide = window.lucide || { createIcons: function(){} };"></script>
+</head>
+<body class="theme-creator-body" data-ui-section="settings" oncontextmenu="return false">
+    <script>if (window.__F76_BOOT_UI_ANIMATIONS === false) document.body.classList.add('no-animations');</script>
+    <div id="theme-creator-root"></div>
+
+    <div id="confirm-modal" class="modal-overlay" role="presentation">
+        <div class="endorsement-modal-content" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+            <div class="endorsement-modal-header">
+                <div class="endorsement-modal-title">
+                    <i data-lucide="alert-triangle" id="confirm-icon" aria-hidden="true"></i>
+                    <h3 id="confirm-title">Confirmation</h3>
+                </div>
+                <button type="button" class="close-status" id="confirm-close-top" aria-label="Close">&times;</button>
+            </div>
+            <div class="endorsement-modal-body">
+                <p class="endorsement-modal-desc" id="confirm-message">Are you sure?</p>
+                <div id="confirm-prompt-wrap" class="confirm-prompt-wrap" hidden>
+                    <label id="confirm-prompt-label" class="confirm-prompt-label" for="confirm-prompt-input"></label>
+                    <input type="text" id="confirm-prompt-input" class="confirm-prompt-input" autocomplete="off" spellcheck="false">
+                </div>
+            </div>
+            <div class="endorsement-modal-footer">
+                <button type="button" class="btn-popup secondary" id="confirm-cancel">Cancel</button>
+                <button type="button" class="btn-popup primary" id="confirm-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/theme-creator.bundle.js?v=X.X.X"></script>
+</body>
+</html>
