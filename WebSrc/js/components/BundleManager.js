@@ -5,7 +5,17 @@ let _bundleIpcHandlerAttached = false;
 function getBundleFormatLabel(value) {
     return value === 'DDS'
         ? window._t('bundle_format_dds')
-        : window._t('bundle_format_general');
+        : value === 'Auto'
+            ? window._t('bundle_format_auto')
+            : window._t('bundle_format_general');
+}
+
+function showBundleStatus(type, text) {
+    if (window.app && typeof window.app.showBanner === 'function') {
+        window.app.showBanner({ type, text });
+        return;
+    }
+    console.warn('[Bundle]', type, text);
 }
 
 export class BundleManager {
@@ -575,7 +585,19 @@ export class BundleManager {
             sources.push({ key, path: this.resolveArchivePath(path), modRef: modRef || path });
         };
 
-        for (const mod of this.selectedMods) addSource(mod, mod);
+        for (const mod of this.selectedMods) {
+            addSource(mod, mod);
+            const base = String(mod || '').replace(/\.ba2$/i, '');
+            if (base && !/ - Textures$/i.test(base)) {
+                const texName = `${base} - Textures.ba2`;
+                const mods = this.data?.mods || window.app?.realData?.mods || [];
+                const hasTex = mods.some(m => {
+                    const n = String(m?.originalName || m?.name || '');
+                    return this.normalizeArchiveKey(n) === this.normalizeArchiveKey(texName);
+                });
+                if (hasTex) addSource(texName, texName);
+            }
+        }
         for (const file of this.externalFiles) addSource(file, file);
 
         return sources;
@@ -729,10 +751,7 @@ export class BundleManager {
 
         const payload = this.buildExtractPayload();
         if (!payload) {
-            window.chrome.webview.postMessage({
-                type: 'STATUS',
-                status: { type: 'error', text: window._t('bundle_nothing_to_extract') }
-            });
+            showBundleStatus('error', window._t('bundle_nothing_to_extract'));
             return;
         }
 
@@ -773,12 +792,7 @@ export class BundleManager {
             } else if (this.normalizeArchiveKey(this.inspectedBa2Path) !== this.normalizeArchiveKey(requestPath)) return;
             this.inspectorLoading = false;
             this.updateInspectorPanel({ preserveScroll: false });
-            if (window.chrome?.webview) {
-                window.chrome.webview.postMessage({
-                    type: 'STATUS',
-                    status: { type: 'error', text: window._t('inspector_load_timeout') }
-                });
-            }
+            showBundleStatus('error', window._t('inspector_load_timeout'));
         }, 60000);
     }
 
@@ -844,11 +858,8 @@ export class BundleManager {
                 this.initArchiveSelection(archiveKey, this.ba2Contents);
             }
             this.ensureDefaultExpandedDirs();
-            if (data.error && window.chrome?.webview) {
-                window.chrome.webview.postMessage({
-                    type: 'STATUS',
-                    status: { type: 'error', text: data.error }
-                });
+            if (data.error) {
+                showBundleStatus('error', data.error);
             }
             this.updateInspectorPanel({ preserveScroll: false });
             const select = document.getElementById('bundle-staged-ba2-select');
@@ -876,11 +887,8 @@ export class BundleManager {
             }
             this.ensureDefaultExpandedDirs();
             this.maybeAutoSwitchFormat(this.ba2Contents);
-            if (data.error && window.chrome?.webview) {
-                window.chrome.webview.postMessage({
-                    type: 'STATUS',
-                    status: { type: 'error', text: data.error }
-                });
+            if (data.error) {
+                showBundleStatus('error', data.error);
             }
             this.updateInspectorPanel({ preserveScroll: false });
             return;
@@ -1146,23 +1154,37 @@ export class BundleManager {
     }
 
     maybeAutoSwitchFormat(entries) {
-        const hasDds = (entries || []).some(e =>
-            String(e?.path || '').toLowerCase().endsWith('.dds')
-        );
-        if (!hasDds) return;
+        const list = entries || [];
+        if (list.length === 0) return;
+
+        const paths = list.map(e => String(e?.path || '').toLowerCase());
+        const hasDds = paths.some(p => p.endsWith('.dds'));
+        const allDds = hasDds && paths.every(p => p.endsWith('.dds'));
+        const hasNonDds = paths.some(p => p && !p.endsWith('.dds'));
 
         const formatSelect = document.getElementById('bundle-format-select');
-        if (!formatSelect || formatSelect.value === 'DDS') return;
+        if (!formatSelect) return;
 
-        formatSelect.value = 'DDS';
+        let next = formatSelect.value;
+        let statusKey = null;
+        if (allDds) {
+            next = 'DDS';
+            statusKey = 'bundle_format_auto_dds';
+        } else if (hasDds && hasNonDds) {
+            next = 'Auto';
+            statusKey = 'bundle_format_auto_mixed';
+        } else if (hasNonDds && formatSelect.value === 'DDS') {
+            next = 'Auto';
+            statusKey = 'bundle_format_auto_mixed';
+        }
+
+        if (next === formatSelect.value) return;
+        formatSelect.value = next;
         const typeSummary = document.getElementById('bundle-type-summary');
-        if (typeSummary) typeSummary.textContent = getBundleFormatLabel('DDS');
+        if (typeSummary) typeSummary.textContent = getBundleFormatLabel(next);
 
-        if (window.chrome?.webview) {
-            window.chrome.webview.postMessage({
-                type: 'STATUS',
-                status: { type: 'info', text: window._t('bundle_format_auto_dds') }
-            });
+        if (statusKey) {
+            showBundleStatus('info', window._t(statusKey));
         }
     }
 
@@ -1261,10 +1283,7 @@ export class BundleManager {
         if (!window.handleAddToBundle) {
             window.handleAddToBundle = (originalName) => {
                 this.selectedMods.add(originalName);
-                window.chrome.webview.postMessage({
-                    type: 'STATUS',
-                    status: { type: 'success', text: window._t('added_to_workspace_banner') }
-                });
+                showBundleStatus('success', window._t('added_to_workspace_banner'));
                 this.refresh();
             };
         }
@@ -1595,21 +1614,24 @@ export class BundleManager {
         if (!this.canCreateBundle()) return;
 
         if (window.chrome && window.chrome.webview) {
+            const formatSelect = document.getElementById('bundle-format-select');
+            const anyUninspected = this.collectBa2Sources().some(src => !this.ba2TotalPaths.has(src.key))
+                || [...this.selectedFolders].some(f => !this.ba2TotalPaths.has(this.normalizeFolderKey(f)));
+            if (anyUninspected && formatSelect) {
+                formatSelect.value = 'Auto';
+                const typeSummary = document.getElementById('bundle-type-summary');
+                if (typeSummary) typeSummary.textContent = getBundleFormatLabel('Auto');
+            }
+
             const payload = this.buildCreateBundlePayload(bundleName);
             if (payload.mods.length === 0 && payload.ba2Partial.length === 0 && payload.folders.length === 0 && payload.folderPartial.length === 0) {
-                window.chrome.webview.postMessage({
-                    type: 'STATUS',
-                    status: { type: 'error', text: window._t('bundle_nothing_to_pack') }
-                });
+                showBundleStatus('error', window._t('bundle_nothing_to_pack'));
                 return;
             }
 
             window.chrome.webview.postMessage(payload);
             
-            window.chrome.webview.postMessage({
-                type: 'STATUS',
-                status: { type: 'info', text: window._t('starting_bundle_banner', bundleName) }
-            });
+            showBundleStatus('info', window._t('starting_bundle_banner', bundleName));
 
             this.isCreating = false;
             this.isPickingInternal = false;

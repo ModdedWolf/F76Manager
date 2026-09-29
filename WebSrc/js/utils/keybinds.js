@@ -114,7 +114,7 @@ export function executeKeybindAction(id, app) {
             window.chrome?.webview?.postMessage({ type: 'LAUNCH_GAME' });
             break;
         case 'deploy':
-            window.chrome?.webview?.postMessage({ type: 'DEPLOY_ALL', force: false, mods: [] });
+            window.chrome?.webview?.postMessage({ type: 'DEPLOY_ALL', force: false, mods: [], presetScoped: true });
             break;
         case 'apply':
             window.chrome?.webview?.postMessage({ type: 'APPLY_CHANGES' });

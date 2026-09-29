@@ -1,16 +1,21 @@
 [data-theme="vault-tec"] {
-    --bg-dark: #0a1628;
+    --bg-dark: #081220;
     --bg-surface: #12203a;
-    --bg-surface-light: #1c3050;
-    --primary-green: #4fc3f7;
-    --primary-green-dim: rgba(79, 195, 247, 0.7);
-    --primary-rgb: 79, 195, 247;
-    --accent-amber: #ffd54f;
-    --text-main: #e3f2fd;
-    --text-muted: #90caf9;
-    --border-color: #1e3a5f;
-    --danger-red: #ef5350;
+    --bg-surface-light: #1a2d4a;
+    --bg-elevated: #1c3050;
+    --bg-inset: #0c1830;
+    --primary-green: #3a9ad9;
+    --primary-green-dim: rgba(58, 154, 217, 0.7);
+    --primary-rgb: 58, 154, 217;
+    --primary-hover: #5aaee6;
+    --accent-amber: #ffd23f;
+    --text-main: #e8f1fa;
+    --text-muted: #8fa3bf;
+    --border-color: #243a5c;
+    --danger-red: #e0564c;
+    --danger-red-soft: rgba(224, 86, 76, 0.18);
     --success-green: #66bb6a;
-    --warning-yellow: #ffca28;
-    --on-primary: #0a1628;
+    --warning-yellow: #ffd23f;
+    --on-primary: #081220;
+    --slider-track: #25537c;
 }

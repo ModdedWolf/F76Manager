@@ -45,6 +45,13 @@ $versionFile = "$sourceDir\version.json"
 $form1Path = "$sourceDir\Form1.cs"
 $rootDir = Resolve-Path "$scriptDir\..\.."
 
+function Invoke-WebSrcBundle {
+    param([string]$Configuration)
+    Write-Host "  Bundling WebSrc JavaScript..." -ForegroundColor Gray
+    & "$rootDir\WebSrc\bundle.ps1" -Configuration $Configuration
+    if ($LASTEXITCODE -ne 0) { throw "WebSrc JS bundle failed." }
+}
+
 Write-Host "--- F76 Manager Build ---" -ForegroundColor Cyan
 
 $newVer = $null
@@ -109,8 +116,8 @@ if ($DebugOnly) {
     exit 0
 }
 
-$keepFolders = @("Backups", "Bundles", "BundledThemes", "Disabled Mods", "Logs", "Profiles", "Settings", "Themes")
-$procs = @("F76Manager.exe", "F76ManagerApp.exe", "F76MUpdater.exe", "msedgewebview2.exe")
+$keepFolders = @("Backups", "Bundles", "BundledThemes", "Disabled Mods", "Logs", "Managed Staging", "Nexus", "Profiles", "Settings", "Themes")
+$procs = @("F76Manager.exe", "F76ManagerApp.exe", "F76MUpdater.exe")
 foreach ($p in $procs) {
     try { cmd /c "taskkill /F /IM $p /T 2>nul" } catch {}
 }
@@ -132,6 +139,7 @@ if (Test-Path $releaseDir) {
 
 $embedDir = "$sourceDir\www"
 New-Item -ItemType Directory -Path $embedDir -Force | Out-Null
+Invoke-WebSrcBundle -Configuration Release
 $mirrorDirs = @("js", "css", "assets", "locales")
 foreach ($subdir in $mirrorDirs) {
     $destSub = Join-Path $embedDir $subdir
@@ -148,12 +156,12 @@ Write-Host "  Web assets synced from WebSrc." -ForegroundColor Gray
 $bundledSrc = "$rootDir\WebSrc\bundled-themes"
 $bundledDest = "$releaseDir\BundledThemes"
 if (Test-Path $bundledSrc) {
-    $packages = Get-ChildItem -Path $bundledSrc -Filter "F76Manager-Theme-*.f76theme" -ErrorAction SilentlyContinue
+    $packages = Get-ChildItem -Path $bundledSrc -Filter "*.f76theme" -ErrorAction SilentlyContinue
     if ($packages.Count -gt 0) {
         New-Item -ItemType Directory -Path $bundledDest -Force | Out-Null
-        Get-ChildItem $bundledDest -Filter "F76Manager-Theme-*.f76theme" -ErrorAction SilentlyContinue |
+        Get-ChildItem $bundledDest -Filter "*.f76theme" -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
-        Copy-Item "$bundledSrc\F76Manager-Theme-*.f76theme" -Destination $bundledDest -Force
+        Copy-Item "$bundledSrc\*.f76theme" -Destination $bundledDest -Force
     }
 }
 

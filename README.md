@@ -51,6 +51,16 @@ cd AppWrapper\F76ManagerApp
 
 That syncs `WebSrc/`, publishes `F76Manager` (`win-x64`, self-contained), and puts release zips under `Release/`.
 
+## Sharing builds (Discord / antivirus)
+
+Release builds are an **unsigned** self-contained single-file `.exe`. Discord’s CDN and some antivirus tools often treat that shape like a packed dropper and may delete or block the file — this is a **false positive**, not malware in the project.
+
+**Prefer:**
+- Share the **Nexus Mods** page (or GitHub Releases), not a bare `.exe` in Discord
+- Or share `Release/F76Manager_Nexus.zip` instead of uploading `F76Manager.exe` alone
+
+**Durable fix:** Authenticode-sign the published exe (and keep a stable download URL) so SmartScreen/Discord reputation can accumulate. Signing is not part of `build.ps1` unless you have a certificate.
+
 ## Project layout
 
 ```

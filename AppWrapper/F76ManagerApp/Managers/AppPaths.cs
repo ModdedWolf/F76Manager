@@ -19,6 +19,25 @@ namespace F76ManagerApp.Managers
         public static string ProfilesFile => Path.Combine(ProfilesFolder, "profiles.json");
         public static string ModsMetadataFile => Path.Combine(SettingsFolder, "mods.json");
         public static string ManagedArtifactsFile => Path.Combine(SettingsFolder, "managed-artifacts.json");
+        public static string IniOverlaysFolder => Path.Combine(SettingsFolder, "IniOverlays");
+
+        public const string F76AddToCustomFileName = "F76-Manager-AddToCustom.ini";
+        public const string F76AddToPrefsFileName = "F76-Manager-AddToPrefs.ini";
+        public const string F76AddToFallout76FileName = "F76-Manager-AddToFallout76.ini";
+
+        private static readonly string[] LegacyF76AddToOverlayFileNames =
+        {
+            "F76AddToCustom.ini",
+            "F76AddToPrefs.ini",
+            "F76AddToFallout76.ini"
+        };
+
+        public static readonly string[] F76AddToOverlayFileNames =
+        {
+            F76AddToCustomFileName,
+            F76AddToPrefsFileName,
+            F76AddToFallout76FileName
+        };
 
         public static bool IsXbox { get; private set; } = false;
         public static string PlatformFolderName => IsXbox ? "Xbox" : "Steam";
@@ -32,13 +51,73 @@ namespace F76ManagerApp.Managers
         public static string IniPrefix => IsXbox ? "Project76" : "Fallout76";
         public static string CustomIniPath => Path.Combine(DocumentsPath, $"{IniPrefix}Custom.ini");
         public static string PrefsIniPath => Path.Combine(DocumentsPath, $"{IniPrefix}Prefs.ini");
+        public static string BaseGameIniPath => Path.Combine(DocumentsPath, $"{IniPrefix}.ini");
+
+        public static string GetF76AddToOverlayPath(string fileName) =>
+            Path.Combine(IniOverlaysFolder, Path.GetFileName(fileName));
+
+        public static bool IsF76AddToOverlayFileName(string? fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return false;
+            string name = Path.GetFileName(fileName);
+            foreach (var known in F76AddToOverlayFileNames)
+            {
+                if (name.Equals(known, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            foreach (var legacy in LegacyF76AddToOverlayFileNames)
+            {
+                if (name.Equals(legacy, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        public static string? GetF76AddToTargetPath(string overlayFileName)
+        {
+            string name = Path.GetFileName(overlayFileName ?? "");
+            if (name.Equals(F76AddToCustomFileName, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("F76AddToCustom.ini", StringComparison.OrdinalIgnoreCase))
+                return CustomIniPath;
+            if (name.Equals(F76AddToPrefsFileName, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("F76AddToPrefs.ini", StringComparison.OrdinalIgnoreCase))
+                return PrefsIniPath;
+            if (name.Equals(F76AddToFallout76FileName, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("F76AddToFallout76.ini", StringComparison.OrdinalIgnoreCase))
+                return BaseGameIniPath;
+            return null;
+        }
+
+        public static void MigrateLegacyF76AddToOverlayFiles()
+        {
+            try
+            {
+                if (!Directory.Exists(IniOverlaysFolder)) return;
+                for (int i = 0; i < LegacyF76AddToOverlayFileNames.Length; i++)
+                {
+                    string legacyPath = Path.Combine(IniOverlaysFolder, LegacyF76AddToOverlayFileNames[i]);
+                    string modernPath = Path.Combine(IniOverlaysFolder, F76AddToOverlayFileNames[i]);
+                    if (!File.Exists(legacyPath)) continue;
+                    if (File.Exists(modernPath))
+                    {
+                        File.Delete(legacyPath);
+                        continue;
+                    }
+                    File.Move(legacyPath, modernPath);
+                }
+            }
+            catch
+            {
+            }
+        }
 
         public static bool IsProtectedCoreIniFileName(string? fileName) =>
             !string.IsNullOrWhiteSpace(fileName) && (
                 fileName.Equals("Fallout76Custom.ini", StringComparison.OrdinalIgnoreCase) ||
                 fileName.Equals("Fallout76Prefs.ini", StringComparison.OrdinalIgnoreCase) ||
                 fileName.Equals("Project76Custom.ini", StringComparison.OrdinalIgnoreCase) ||
-                fileName.Equals("Project76Prefs.ini", StringComparison.OrdinalIgnoreCase));
+                fileName.Equals("Project76Prefs.ini", StringComparison.OrdinalIgnoreCase) ||
+                IsF76AddToOverlayFileName(fileName));
 
         public static bool IsProtectedCoreIniListKey(string? originalName)
         {

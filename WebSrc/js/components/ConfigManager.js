@@ -97,7 +97,7 @@ export class ConfigManager {
     _isDeletableConfig(originalName) {
         const original = String(originalName || '');
         const lower = original.toLowerCase();
-        if (!lower.endsWith('.ini') && !lower.endsWith('.json') && !lower.endsWith('.txt')) return false;
+        if (!lower.endsWith('.ini') && !lower.endsWith('.json') && !lower.endsWith('.txt') && !lower.endsWith('.toml')) return false;
         if (this._isProtectedCoreConfig(original)) return false;
         return true;
     }

@@ -20,36 +20,32 @@ export class IniEditorModal {
         const isLoading = this.loading[this.activeTab];
         const activeContent = isLoading ? 'Loading...' : this.contents[this.activeTab];
 
+        const customActive = this.activeTab === 'custom';
+
         return `
             <div id="ini-editor-overlay" class="modal-overlay active">
-                <div class="custom-modal polished ini-modal" style="width: 90vw; height: 85vh; max-width: 1200px; max-height: 800px; display: flex; flex-direction: column;">
-                    <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color);">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <i data-lucide="file-json" style="color: var(--primary-green);"></i>
-                            <h3 style="margin: 0; color: var(--text-main);">${translator.t('ini_editor_title')}</h3>
+                <div class="custom-modal ini-modal" role="dialog" aria-label="${translator.t('ini_editor_title')}">
+                    <div class="ini-editor-toprow">
+                        <div class="ini-editor-title">
+                            <i data-lucide="file-json"></i>
+                            <span>${translator.t('ini_editor_title')}</span>
                         </div>
-                        <button class="close-status" id="ini-modal-close-top">&times;</button>
-                    </div>
-                    
-                    <div class="logs-tabs" style="padding: 0; border-bottom: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
-                        <button class="log-tab ${this.activeTab === 'custom' ? 'active' : ''}" id="tab-custom" style="flex: 1; border-radius: 0; justify-content: center; padding: 12px;">
-                            ${translator.t('ini_tab_custom')}
-                        </button>
-                        <button class="log-tab ${this.activeTab === 'prefs' ? 'active' : ''}" id="tab-prefs" style="flex: 1; border-radius: 0; justify-content: center; padding: 12px;">
-                            ${translator.t('ini_tab_prefs')}
-                        </button>
+                        <div class="config-view-toggle" role="tablist">
+                            <button type="button" class="config-view-btn ${customActive ? 'active' : ''}" id="tab-custom" role="tab" aria-selected="${customActive}">${translator.t('ini_tab_custom')}</button>
+                            <button type="button" class="config-view-btn ${customActive ? '' : 'active'}" id="tab-prefs" role="tab" aria-selected="${!customActive}">${translator.t('ini_tab_prefs')}</button>
+                        </div>
+                        <div class="ini-editor-spacer"></div>
+                        <button type="button" class="close-status" id="ini-modal-close-top" aria-label="${translator.t('cancel')}">&times;</button>
                     </div>
 
-                    <div class="modal-body" style="flex: 1; padding: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; background: #0b0b0b;">
-                        <div id="ini-highlight-backdrop" 
-                            style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; padding: 15px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5; color: #d4d4d4; white-space: pre-wrap; word-wrap: break-word; pointer-events: none; overflow-y: auto;"></div>
-                        <textarea id="ini-editor-textarea" spellcheck="false" ${isLoading ? 'disabled' : ''} 
-                            style="flex: 1; width: 100%; resize: none; border: none; background: transparent; color: transparent; caret-color: #fff; padding: 15px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5; outline: none; opacity: ${isLoading ? 0.5 : 1}; z-index: 1; overflow-y: auto;"></textarea>
+                    <div class="ini-editor-wrap ${isLoading ? 'is-loading' : ''}">
+                        <div id="ini-highlight-backdrop"></div>
+                        <textarea id="ini-editor-textarea" spellcheck="false" ${isLoading ? 'disabled' : ''}></textarea>
                     </div>
 
-                    <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--border-color); background: var(--bg-card);">
-                        <button class="btn-popup secondary" id="ini-modal-cancel">${translator.t('discard_changes')}</button>
-                        <button class="btn-popup primary ${isLoading ? 'disabled' : ''}" id="ini-modal-save" ${isLoading ? 'disabled' : ''}>
+                    <div class="ini-editor-footer">
+                        <button type="button" class="btn-popup secondary" id="ini-modal-cancel">${translator.t('discard_changes')}</button>
+                        <button type="button" class="btn-popup primary ${isLoading ? 'disabled' : ''}" id="ini-modal-save" ${isLoading ? 'disabled' : ''}>
                             <i data-lucide="save"></i> ${translator.t('tweak_save_btn')}
                         </button>
                     </div>
@@ -68,11 +64,27 @@ export class IniEditorModal {
         window.chrome.webview.postMessage({ type: 'GET_INI_CONTENT', iniType: 'custom' });
         window.chrome.webview.postMessage({ type: 'GET_INI_CONTENT', iniType: 'prefs' });
 
+        if (!this.keyHandler) {
+            this.keyHandler = (e) => {
+                if (!this.isOpen) return;
+                if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && String(e.key).toLowerCase() === 's') {
+                    e.preventDefault();
+                    const saveBtn = document.getElementById('ini-modal-save');
+                    if (saveBtn && !saveBtn.disabled) saveBtn.click();
+                }
+            };
+            document.addEventListener('keydown', this.keyHandler);
+        }
+
         this.injectAndMount();
     }
 
     hide() {
         this.isOpen = false;
+        if (this.keyHandler) {
+            document.removeEventListener('keydown', this.keyHandler);
+            this.keyHandler = null;
+        }
         const overlay = document.getElementById('ini-editor-overlay');
         if (overlay) {
             overlay.remove();
@@ -165,17 +177,26 @@ export class IniEditorModal {
         const textarea = document.getElementById('ini-editor-textarea');
         if (!backdrop || !textarea) return;
 
-        let content = textarea.value;
-        
-        content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-        const highlighted = content.replace(/^([^=\s\n][^=\n]*=)/gm, (match) => {
-            const parts = match.split('=');
-            if (parts.length > 1) {
-                return `<span style="color: #6ed58a; font-weight: 500;">${parts[0]}</span>=`;
+        const highlighted = textarea.value.split('\n').map((line) => {
+            const trimmed = line.trimStart();
+            if (trimmed.startsWith(';') || trimmed.startsWith('#')) {
+                return `<span class="cfg-tok-comment">${esc(line)}</span>`;
             }
-            return match;
-        });
+            const section = line.match(/^(\s*)(\[[^\]]*\])(.*)$/);
+            if (section) {
+                return `${esc(section[1])}<span class="ini-tok-section">${esc(section[2])}</span>${esc(section[3])}`;
+            }
+            const eq = line.indexOf('=');
+            if (eq > 0) {
+                const key = line.slice(0, eq);
+                const value = line.slice(eq + 1);
+                const valueCls = /^\s*-?\d+(\.\d+)?\s*$/.test(value) ? 'cfg-tok-num' : 'cfg-tok-str';
+                return `<span class="cfg-tok-key">${esc(key)}</span><span class="cfg-tok-punct">=</span><span class="${valueCls}">${esc(value)}</span>`;
+            }
+            return esc(line);
+        }).join('\n');
 
         backdrop.innerHTML = highlighted + '\n';
     }

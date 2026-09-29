@@ -82,7 +82,7 @@ export class TweaksManager {
             npcshadowlights: true, tiledlighting: true, ao: true, blood: true,
             gridload: '5', cellloads: true, fastload: false,
             vsync: true, fpscap: '144',
-            fov: 90, fov1st: 90, fovPipboy: 90, motionblur: true, dof: true,
+            motionblur: true, dof: true,
             lensflare: true, extrablur: true, vatsblur: true, taa: 'TAA', aniso: '16x', water: 'High',
             lodsky: 10, leafanim: 3600, gamma: 10, glassshader: true, pbrshadows: true,
             corpsehighlight: 'Low', playernames: true, playerpings: true, conversationhistory: 4,
@@ -104,7 +104,7 @@ export class TweaksManager {
                 ...presetBase,
                 shadows: 'Ultra', shadowres: '4096', shadowfilter: 'High', volumquality: 'High',
                 texturequality: 'Ultra', treedist: 50000, lod: 100, decals: 'Ultra',
-                decalsperframe: 'High', fov: 100, fov1st: 100, fovPipboy: 100, lodsky: 20,
+                decalsperframe: 'High', lodsky: 20,
                 ping: true, bandwidth: true, fpscap: '144'
             },
             'tweak_preset_potato': {
@@ -114,7 +114,7 @@ export class TweaksManager {
                 texturequality: 'Low', treedist: 8000, lod: 10, decals: 'Low', decalsperframe: 'Low',
                 ssr: false, rainocclusion: false, npcshadowlights: false, tiledlighting: false,
                 ao: true, blood: false, gridload: '3', cellloads: false, fastload: true,
-                vsync: false, fpscap: '60', fov: 70, fov1st: 70, fovPipboy: 70,
+                vsync: false, fpscap: '60',
                 motionblur: false, dof: false, lensflare: false, extrablur: false, vatsblur: false, taa: 'None',
                 aniso: 'None', water: 'Low', lodsky: 5, leafanim: 2000, gamma: 10,
                 glassshader: false, pbrshadows: false, pipboyfx: true, ping: true, bandwidth: true
@@ -152,7 +152,7 @@ export class TweaksManager {
 
         return `
             <div class="tweaks-page animate-fade">
-                <div class="tweaks-toolbar" style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px;">
+                <div class="tweaks-toolbar" style="display: flex; justify-content: space-between; align-items: center; min-height: 48px; margin-bottom: 16px;">
                     <div class="presets-bar" style="margin-bottom: 0;">
                         <span class="presets-label">${window._t('quick_presets')}:</span>
                         ${Object.keys(this.presets).map(p => `
@@ -212,8 +212,37 @@ export class TweaksManager {
     }
 
     formatRangeDisplay(tweak, value) {
-        if (tweak.id === 'gamma') return (value / 10).toFixed(1);
-        return value;
+        const n = Number(value);
+        if (!Number.isFinite(n)) return '';
+        if (tweak.id === 'gamma') return (n / 10).toFixed(1);
+        return n;
+    }
+
+    getTweakDef(id) {
+        return this.categories.flatMap(c => c.tweaks).find(t => t.id === id);
+    }
+
+    sliderPosition(min, max, value) {
+        const n = Number(value);
+        const pos = Number.isFinite(n) ? Math.min(Math.max(n, min), max) : min;
+        const percent = max > min ? ((pos - min) / (max - min)) * 100 : 0;
+        return { pos, percent };
+    }
+
+    setRangeUi(id, value, { forceBox = false } = {}) {
+        const range = document.querySelector(`.tweak-range[data-id="${id}"]`);
+        if (range) {
+            const min = parseInt(range.min) || 0;
+            const max = parseInt(range.max) || 100;
+            const { pos, percent } = this.sliderPosition(min, max, value);
+            range.value = pos;
+            range.style.setProperty('--value', percent + '%');
+        }
+        const box = document.getElementById(`val-${id}`);
+        const tweakDef = this.getTweakDef(id);
+        if (box && tweakDef && (forceBox || document.activeElement !== box)) {
+            box.value = this.formatRangeDisplay(tweakDef, value);
+        }
     }
 
     renderTweak(tweak) {
@@ -228,10 +257,12 @@ export class TweaksManager {
                 </select>
             `;
         } else if (tweak.type === 'range') {
+            const { pos, percent } = this.sliderPosition(tweak.min, tweak.max, tweak.value);
+            const step = tweak.id === 'gamma' ? '0.1' : '1';
             control = `
                 <div class="range-control">
-                    <input type="range" min="${tweak.min}" max="${tweak.max}" value="${tweak.value}" class="tweak-range ${isPending ? 'pending' : ''}" data-id="${tweak.id}">
-                    <span class="range-value" id="val-${tweak.id}">${this.formatRangeDisplay(tweak, tweak.value)}</span>
+                    <input type="range" min="${tweak.min}" max="${tweak.max}" value="${pos}" style="--value: ${percent}%;" class="tweak-range ${isPending ? 'pending' : ''}" data-id="${tweak.id}">
+                    <input type="number" class="range-value-input" id="val-${tweak.id}" data-id="${tweak.id}" min="0" step="${step}" inputmode="decimal" value="${this.formatRangeDisplay(tweak, tweak.value)}" aria-label="${window._t(tweak.labelKey)}">
                 </div>
             `;
         } else {
@@ -260,7 +291,7 @@ export class TweaksManager {
     normalizeSettingValue(id, value) {
         const tweakDef = this.categories.flatMap(c => c.tweaks).find(t => t.id === id);
         if (!tweakDef || tweakDef.type === 'select' || tweakDef.type === 'range') {
-            if (id === 'gamma' && typeof value === 'number' && value < 2)
+            if (id === 'gamma' && typeof value === 'number')
                 return Math.round(value * 10);
             return value;
         }
@@ -325,7 +356,11 @@ export class TweaksManager {
                     return;
                 }
 
-                window.chrome.webview.postMessage({ type: 'UPDATE_SETTINGS_BATCH', settings: this.pendingChanges });
+                const settings = { ...this.pendingChanges };
+                if (settings.gamma !== undefined && Number.isFinite(Number(settings.gamma))) {
+                    settings.gamma = (Number(settings.gamma) / 10).toFixed(2);
+                }
+                window.chrome.webview.postMessage({ type: 'UPDATE_SETTINGS_BATCH', settings });
                 this.pendingChanges = {};
                 this.hidePendingBanner();
             };
@@ -360,26 +395,63 @@ export class TweaksManager {
             const updateSliderFill = (input) => {
                 const min = parseInt(input.min) || 0;
                 const max = parseInt(input.max) || 100;
-                const val = parseInt(input.value) || 0;
-                const percent = ((val - min) / (max - min)) * 100;
-                input.style.setProperty('--value', percent + '%');
+                input.style.setProperty('--value', this.sliderPosition(min, max, input.value).percent + '%');
             };
 
             updateSliderFill(el);
 
             el.addEventListener('input', (e) => {
                 const id = el.getAttribute('data-id');
-                const valEl = document.getElementById(`val-${id}`);
-                const tweakDef = this.categories.flatMap(c => c.tweaks).find(t => t.id === id);
-                if (valEl) valEl.textContent = tweakDef ? this.formatRangeDisplay(tweakDef, parseInt(e.target.value)) : e.target.value;
+                const box = document.getElementById(`val-${id}`);
+                const tweakDef = this.getTweakDef(id);
+                if (box && tweakDef) box.value = this.formatRangeDisplay(tweakDef, parseInt(e.target.value, 10));
                 updateSliderFill(e.target);
             });
 
             el.addEventListener('change', (e) => {
                 const id = el.getAttribute('data-id');
-                this.handleInputChange(id, parseInt(e.target.value));
+                const next = parseInt(e.target.value, 10);
+                const max = parseInt(el.max, 10) || 120;
+                const stored = Number(this.getStoredTweakValue(id));
+                const storedUi = id === 'gamma' && this.pendingChanges[id] === undefined ? Math.round(stored * 10) : stored;
+                if (Number.isFinite(storedUi) && storedUi > max && next >= max) {
+                    this.setRangeUi(id, storedUi, { forceBox: true });
+                    return;
+                }
+                this.handleInputChange(id, next);
             });
         });
+
+        root.querySelectorAll('.range-value-input').forEach(box => {
+            const commit = () => {
+                const id = box.getAttribute('data-id');
+                const tweakDef = this.getTweakDef(id);
+                if (!tweakDef) return;
+                const raw = parseFloat(String(box.value).replace(',', '.'));
+                if (!Number.isFinite(raw) || raw < 0) {
+                    const fallback = this.pendingChanges[id] !== undefined ? this.pendingChanges[id] : tweakDef.value;
+                    box.value = this.formatRangeDisplay(tweakDef, fallback);
+                    return;
+                }
+                const next = id === 'gamma' ? Math.round(raw * 10) : Math.round(raw);
+                this.setRangeUi(id, next, { forceBox: true });
+                this.handleInputChange(id, next);
+            };
+
+            box.addEventListener('change', commit);
+            box.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    box.blur();
+                }
+            });
+        });
+    }
+
+    getStoredTweakValue(id) {
+        if (this.pendingChanges[id] !== undefined) return this.pendingChanges[id];
+        const settings = window.app?.realData?.settings || this.data?.settings || {};
+        return settings[id];
     }
 
     handleInputChange(id, value) {
@@ -405,16 +477,8 @@ export class TweaksManager {
             const select = document.querySelector(`.tweak-select[data-id="${key}"]`);
             if (select) select.value = val;
 
-            const range = document.querySelector(`.tweak-range[data-id="${key}"]`);
-            if (range) {
-                range.value = val;
-                const valEl = document.getElementById(`val-${key}`);
-                const tweakDef = this.categories.flatMap(c => c.tweaks).find(t => t.id === key);
-                if (valEl) valEl.textContent = tweakDef ? this.formatRangeDisplay(tweakDef, val) : val;
-                const min = parseInt(range.min) || 0;
-                const max = parseInt(range.max) || 100;
-                const percent = ((val - min) / (max - min)) * 100;
-                range.style.setProperty('--value', percent + '%');
+            if (document.querySelector(`.tweak-range[data-id="${key}"]`)) {
+                this.setRangeUi(key, val);
             }
         });
     }
@@ -449,18 +513,9 @@ export class TweaksManager {
         document.querySelectorAll('.tweak-range').forEach(el => {
             const id = el.getAttribute('data-id');
             if (this.pendingChanges[id] === undefined && data.settings[id] !== undefined) {
-                 if (document.activeElement !== el) {
-                    let displayVal = this.normalizeSettingValue(id, data.settings[id]);
-                    el.value = displayVal;
-                    const valEl = document.getElementById(`val-${id}`);
-                    const tweakDef = this.categories.flatMap(c => c.tweaks).find(t => t.id === id);
-                    if (valEl) valEl.textContent = tweakDef ? this.formatRangeDisplay(tweakDef, displayVal) : displayVal;
-                    
-                    const min = parseInt(el.min) || 0;
-                    const max = parseInt(el.max) || 100;
-                    const val = parseInt(el.value) || 0;
-                    const percent = ((val - min) / (max - min)) * 100;
-                    el.style.setProperty('--value', percent + '%');
+                const box = document.getElementById(`val-${id}`);
+                if (document.activeElement !== el && document.activeElement !== box) {
+                    this.setRangeUi(id, this.normalizeSettingValue(id, data.settings[id]));
                 }
             }
         });

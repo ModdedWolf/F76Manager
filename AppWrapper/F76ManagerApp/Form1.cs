@@ -49,11 +49,11 @@ public partial class Form1 : Form, IMessageFilter
         Application.Exit();
     }
 
-    private WebView2 webView;
+    private WebView2? webView;
     private bool _webViewRecoveryAttempted = false;
     private bool _ipcServerStarted;
     private bool _ipcHandleCreatedHooked;
-    public const string CurrentVersion = "1.0.0";
+    public const string CurrentVersion = "1.1.0";
 
     public static string GetRunningProductVersion()
     {
@@ -78,13 +78,15 @@ public partial class Form1 : Form, IMessageFilter
         return CurrentVersion;
     }
     
-    private GameConfigManager _configManager;
-    private ModManager _modManager;
-    private ConflictManager _conflictManager;
-    private ThemePackageLoader _themePackageLoader;
-    private PlatformManager _platformManager;
-    private BundleManager _bundleManager;
-    private NexusManager _nexusManager;
+    private GameConfigManager _configManager = null!;
+    private ModManager _modManager = null!;
+    private ConflictManager _conflictManager = null!;
+    private ThemePackageLoader _themePackageLoader = null!;
+    private Task _themesLoadTask = Task.CompletedTask;
+    private volatile bool _themesReady;
+    private PlatformManager _platformManager = null!;
+    private BundleManager _bundleManager = null!;
+    private NexusManager _nexusManager = null!;
     private bool nexusLoggedIn = false;
 
     private sealed class PendingNexusImport
@@ -116,6 +118,8 @@ public partial class Form1 : Form, IMessageFilter
 
     private readonly Dictionary<string, CachedModUpdate> _modUpdateCache =
         new Dictionary<string, CachedModUpdate>(StringComparer.OrdinalIgnoreCase);
+
+    private int _fullModUpdateCheckRunning;
 
     private sealed class ImportedCollectionModEntry
     {
@@ -153,7 +157,7 @@ public partial class Form1 : Form, IMessageFilter
     private int _bulkUpdateCompleted;
     private int _bulkUpdateFailed;
 
-    private EndorsementManager _endorsementManager; 
+    private EndorsementManager _endorsementManager = null!;
     private string gamePath = "";
     private string documentsPath = "";
     private string localAppDataPath = "";
@@ -181,6 +185,7 @@ public partial class Form1 : Form, IMessageFilter
     private bool pipboyCrtUserConfigured = false;
     private bool pipboyPrefsIniScrubV1 = false;
     private bool gameIntegrityRepairV1 = false;
+    private bool looseConfigDeployRepairV1 = false;
     private string steamVolumQuality = "High", steamShadowRes = "2048", steamShadowFilter = "High";
     private string steamTextureQuality = "High", steamDecalsPerFrame = "High", steamGridLoad = "5", steamCorpseHighlight = "Low";
     private bool steamFocusShadows = true, steamRenderGrass = true, steamSsr = true, steamRainOcclusion = true;
@@ -222,11 +227,22 @@ public partial class Form1 : Form, IMessageFilter
     private string profilesFolderPath = AppPaths.ProfilesFolder;
 
     private bool minimizeToTray = false, uiAnimations = true, platformBadgeGlow = true;
+    private bool hideKofi = false;
+    private bool logsPopoutOpen = false;
+    private bool logsPopoutReopenOnLaunch = true;
+    private bool logsPopoutKeepOpen = false;
+    private bool _mainHiddenForLogsPopout = false;
+    private int logsPopoutX, logsPopoutY, logsPopoutW, logsPopoutH;
+    private bool logsPopoutMaximized = false;
+    private bool logsPopoutBoundsValid = false;
     private bool syncPlatforms = false, autoForceDeploy = false, virtualModMode = false;
     private bool configEditorSpellCheck = false;
     private bool confirmBeforeDeleteMod = false;
     private bool confirmBeforeRemoveOldModOnUpdate = false;
+    private bool updateModsInAllPresets = false;
     private string modGroups = "{}";
+    private string modPresetsJson = "";
+    private string activeModPreset = "Default";
     private string applicationLanguage = "en-US";
     private string uiTheme = "fallout";
     private string archiveKeyName = "auto";
@@ -249,9 +265,10 @@ public partial class Form1 : Form, IMessageFilter
         return Path.Combine(dataPath, "Strings");
     }
 
-    private void SyncAppPaths()
+    private void SyncAppPaths(bool quick = false)
     {
-        TryAutoPopulateArchiveExecutablePaths();
+        if (!quick)
+            TryAutoPopulateArchiveExecutablePaths();
         AppPaths.GamePath = gamePath;
         AppPaths.DocumentsPath = documentsPath;
         AppPaths.LocalAppDataPath = localAppDataPath;
@@ -261,8 +278,34 @@ public partial class Form1 : Form, IMessageFilter
         _modManager.VirtualModMode = virtualModMode;
         _modManager.SevenZipPath = sevenZipPath;
         _modManager.RarExtractorPath = rarExtractorPath;
-        _modManager.EnsureManagedStagingHydrated();
+        if (!quick)
+            _modManager.EnsureManagedStagingHydrated();
         EnsureTweakIniWatcher();
+    }
+
+    private void ApplyDefaultPathsIfEmpty()
+    {
+        if (string.IsNullOrWhiteSpace(documentsPath))
+            documentsPath = _platformManager.GetDefaultDocumentsPath() ?? "";
+        if (string.IsNullOrWhiteSpace(localAppDataPath))
+            localAppDataPath = _platformManager.GetDefaultLocalAppDataPath() ?? "";
+
+        if (string.IsNullOrWhiteSpace(gamePath))
+            gamePath = _platformManager.GetDefaultGamePath() ?? "";
+
+        if (string.IsNullOrWhiteSpace(stringsPath) && !string.IsNullOrWhiteSpace(gamePath))
+            stringsPath = Path.Combine(gamePath, "Data", "Strings");
+
+        if (string.IsNullOrWhiteSpace(xboxGamePath))
+            xboxGamePath = @"C:\XboxGames\Fallout 76\Content";
+        if (string.IsNullOrWhiteSpace(xboxDocsPath) && !string.IsNullOrWhiteSpace(documentsPath))
+            xboxDocsPath = documentsPath;
+        if (string.IsNullOrWhiteSpace(xboxLocalPath) && !string.IsNullOrWhiteSpace(localAppDataPath))
+            xboxLocalPath = localAppDataPath;
+        if (string.IsNullOrWhiteSpace(steamStringsPath) && !string.IsNullOrWhiteSpace(stringsPath))
+            steamStringsPath = stringsPath;
+        if (string.IsNullOrWhiteSpace(xboxStringsPath))
+            xboxStringsPath = GetDefaultStringsPathFromGamePath(xboxGamePath);
     }
 
     private void EnsureAllPrefsIniWritable()
@@ -325,144 +368,7 @@ public partial class Form1 : Form, IMessageFilter
     [StructLayout(LayoutKind.Sequential)]
     struct CHANGEFILTERSTRUCT { public uint cbSize; public uint ExtStatus; }
 
-    public string InitialNxmLink { get; set; }
-
-    public Form1()
-    {
-        InitializeComponent();
-        this.Load += async (s, e) => {
-             if (!string.IsNullOrEmpty(InitialNxmLink))
-             {
-                 await Task.Delay(2000);
-                 _ = HandleNxmLinkAsync(InitialNxmLink);
-             }
-        };
-        try {
-            if (!Directory.Exists(logFolderPath)) Directory.CreateDirectory(logFolderPath);
-            
-            _configManager = new GameConfigManager(LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)));
-            _modManager = new ModManager(_configManager, LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)));
-            _conflictManager = new ConflictManager(LogActivity);
-            _themePackageLoader = new ThemePackageLoader(LogActivity, LogError);
-            _themePackageLoader.Reload();
-            _platformManager = new PlatformManager();
-            _bundleManager = new BundleManager(LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)), _modManager.UpdateModMetadata, _modManager.ToggleMods, LogError);
-            
-            InitializeNexusManager(null);
-            
-            Task.Run(() => _nexusManager.RegisterNxmProtocol());
-
-            EnsureIpcServerStarted();
-
-            gamePath = _platformManager.GetDefaultGamePath() ?? "";
-            documentsPath = _platformManager.GetDefaultDocumentsPath() ?? "";
-            localAppDataPath = _platformManager.GetDefaultLocalAppDataPath() ?? "";
-            stringsPath = Path.Combine(gamePath, "Data", "Strings");
-
-            xboxGamePath =  @"C:\XboxGames\Fallout 76\Content";
-            xboxDocsPath = documentsPath;
-            xboxLocalPath = localAppDataPath;
-            steamStringsPath = stringsPath;
-            xboxStringsPath = GetDefaultStringsPathFromGamePath(xboxGamePath);
-
-            _endorsementManager = new EndorsementManager(
-                Path.Combine(settingsFolderPath, "endorsement.json"),
-                LogActivity,
-                () => SendMessageToWeb(JsonSerializer.Serialize(new { type = "SHOW_ENDORSEMENT" }))
-            );
-
-            System.Windows.Forms.Timer runtimeTimer = new System.Windows.Forms.Timer { Interval = 10000 };
-            runtimeTimer.Tick += (s, e) => _endorsementManager.Tick(10);
-            runtimeTimer.Start();
-
-            
-            try {
-                Directory.CreateDirectory(logFolderPath);
-                Directory.CreateDirectory(profilesFolderPath);
-                Directory.CreateDirectory(settingsFolderPath);
-            } catch (Exception ex) {
-                Debug.WriteLine($"[INIT] Failed to create startup directories: {ex.Message}");
-            }
-            
-            CleanupLogs();
-            LoadSettings();
-            SyncAppPaths();
-            EnsurePipboyCrtOnDefaultMigration();
-            EnsurePipboyPrefsIniScrubMigration();
-            EnsureGameIntegrityRepairMigration();
-            EnsureAllPrefsIniWritable();
-            LoadProfiles();
-            ReconcileActiveProfileEnabledMods();
-
-            LogActivity("===========================================");
-            LogActivity($"Fallout 76 Manager v{CurrentVersion} Initialized");
-            LogActivity($"• Game Path: {gamePath}");
-            LogActivity($"• INI Path:  {documentsPath}");
-            LogActivity($"• Admin Mode: {IsRunningAsAdmin()}");
-            LogActivity($"• UI Language: {applicationLanguage}");
-            LogActivity("===========================================");
-
-            this.Text = "Fallout 76 Manager";
-            this.BackColor = Color.FromArgb(18, 18, 18);
-            
-            if (windowWidth > 0 && windowHeight > 0) this.Size = new Size(windowWidth, windowHeight);
-            if (windowTop != -1 && windowLeft != -1) this.Location = new Point(windowLeft, windowTop);
-            if (windowMaximized) this.WindowState = FormWindowState.Maximized;
-            else this.StartPosition = FormStartPosition.CenterScreen;
-            
-            try {
-                string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Icon.ico");
-                if (File.Exists(iconPath)) this.Icon = new Icon(iconPath);
-                else {
-                    var exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                    if (exeIcon != null) this.Icon = exeIcon;
-                }
-            } catch (Exception ex) {
-                Debug.WriteLine($"[INIT] Failed to load app icon: {ex.Message}");
-            }
-
-            try { InitializeTrayIcon(); } catch (Exception ex) { Debug.WriteLine($"[INIT] Failed to initialize tray icon: {ex.Message}"); }
-            
-            this.AllowDrop = false; 
-            try { EnableDragDropMessages(this.Handle); } catch (Exception ex) { Debug.WriteLine($"[INIT] Failed to enable drag/drop message filter: {ex.Message}"); }
-
-            try {
-                int darkMode = 1;
-                DwmSetWindowAttribute(this.Handle, 20, ref darkMode, sizeof(int));
-            } catch (Exception ex) {
-                Debug.WriteLine($"[INIT] Failed to apply dark mode window attribute: {ex.Message}");
-            }
-
-            Application.AddMessageFilter(this);
-            try { InitializeWebView(); } catch (Exception ex) { Debug.WriteLine($"[INIT] Failed to initialize WebView: {ex.Message}"); }
-
-            MainInstance = this;
-            this.FormClosed += (_, _) => { if (ReferenceEquals(MainInstance, this)) MainInstance = null; };
-
-            this.FormClosing += Form1_FormClosing;
-            this.Load += Form1_Load;
-            Application.ApplicationExit += OnApplicationExit;
-        }
-        catch (Exception ex)
-        {
-            try { File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "FATAL_CRASH.txt"), ex.ToString()); } catch (Exception writeEx) { Debug.WriteLine($"[CRASH] Failed to write crash log: {writeEx.Message}"); }
-            throw; 
-        }
-    }
-
-    private void Form1_Load(object? sender, EventArgs e)
-    {
-        try
-        {
-            Security.Init(LogActivity, RequestGracefulExit);
-            Security.StartMonitoring();
-            LogActivity("Security monitor started.");
-        }
-        catch (Exception ex)
-        {
-            LogActivity($"[CRITICAL] Failed to start Security monitor: {ex.Message}");
-        }
-    }
+    public string InitialNxmLink { get; set; } = "";
 
     private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
     {
@@ -472,6 +378,19 @@ public partial class Form1 : Form, IMessageFilter
              this.Hide();
              trayIcon?.ShowBalloonTip(3000, "Fallout 76 Manager", "The application is still running in the system tray.", ToolTipIcon.Info);
              return;
+        }
+
+        if (!forceExitRequested
+            && logsPopoutKeepOpen
+            && e.CloseReason == CloseReason.UserClosing
+            && _logsPopout != null
+            && !_logsPopout.IsDisposed)
+        {
+            e.Cancel = true;
+            _mainHiddenForLogsPopout = true;
+            try { SaveSettings(); } catch { }
+            this.Hide();
+            return;
         }
 
         CleanupResources();
@@ -500,6 +419,14 @@ public partial class Form1 : Form, IMessageFilter
         }
 
         LogActivity("Shutting down...");
+        try
+        {
+            if (_logsPopout != null && !_logsPopout.IsDisposed)
+                CaptureLogsPopoutBounds(_logsPopout);
+        }
+        catch { }
+        CloseLogsPopout();
+        CloseThemeCreator();
         
         if (this.WindowState == FormWindowState.Maximized)
         {
@@ -527,7 +454,92 @@ public partial class Form1 : Form, IMessageFilter
     }
 
     [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int darkMode, int size);
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    private const int DWMWA_BORDER_COLOR = 34;
+    private const int DWMWA_CAPTION_COLOR = 35;
+    private const int DWMWA_TEXT_COLOR = 36;
+
+    private void ApplyWindowChrome(int captionColorRef, int textColorRef, int borderColorRef)
+        => ApplyWindowChromeToHandle(this.Handle, captionColorRef, textColorRef, borderColorRef);
+
+    internal void ApplyWindowChromeToHandle(IntPtr hwnd, int captionColorRef, int textColorRef, int borderColorRef)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return;
+            int darkMode = 1;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int));
+            DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref captionColorRef, sizeof(int));
+            DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, ref textColorRef, sizeof(int));
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref borderColorRef, sizeof(int));
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[CHROME] Failed to apply window chrome: {ex.Message}");
+        }
+    }
+
+    private static int HexToColorRef(string hex)
+    {
+        if (string.IsNullOrWhiteSpace(hex)) return 0;
+        hex = hex.Trim().TrimStart('#');
+        if (hex.Length == 3)
+            hex = string.Concat(hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]);
+        if (hex.Length < 6) return 0;
+        if (!byte.TryParse(hex.Substring(0, 2), System.Globalization.NumberStyles.HexNumber, null, out byte r)) return 0;
+        if (!byte.TryParse(hex.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out byte g)) return 0;
+        if (!byte.TryParse(hex.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out byte b)) return 0;
+        return (b << 16) | (g << 8) | r;
+    }
+
+    private void ApplyWindowChromeFromTheme(string themeId)
+        => ApplyWindowChromeFromThemeToHandle(this.Handle, themeId);
+
+    internal void ApplyWindowChromeFromThemeToHandle(IntPtr hwnd, string themeId)
+    {
+        string caption = "#121212", text = "#e0e0e0", border = "#333333";
+        switch ((themeId ?? "").Trim().ToLowerInvariant())
+        {
+            case "vault-tec":
+                caption = "#081220"; text = "#e8f1fa"; border = "#243a5c"; break;
+            case "red-black":
+                caption = "#0b0908"; text = "#e6ddd2"; border = "#3d1f18"; break;
+            case "black-white":
+                caption = "#000000"; text = "#cacaca"; border = "#383838"; break;
+            default:
+                caption = "#121212"; text = "#e0e0e0"; border = "#333333"; break;
+        }
+        ApplyWindowChromeToHandle(hwnd, HexToColorRef(caption), HexToColorRef(text), HexToColorRef(border));
+    }
+
+    internal void ApplyWindowChromeFromColorsToHandle(IntPtr hwnd, string caption, string text, string border)
+    {
+        if (string.IsNullOrWhiteSpace(caption)) return;
+        ApplyWindowChromeToHandle(hwnd, HexToColorRef(caption), HexToColorRef(text), HexToColorRef(border));
+    }
+
+    private void HandleSetWindowChrome(System.Text.Json.JsonElement root)
+    {
+        string caption = root.TryGetProperty("caption", out var c) ? (c.GetString() ?? "") : "";
+        string text = root.TryGetProperty("text", out var t) ? (t.GetString() ?? "") : "";
+        string border = root.TryGetProperty("border", out var b) ? (b.GetString() ?? "") : "";
+        if (string.IsNullOrWhiteSpace(caption)) return;
+        ApplyWindowChrome(HexToColorRef(caption), HexToColorRef(text), HexToColorRef(border));
+
+        string themeId = root.TryGetProperty("themeId", out var tid) ? (tid.GetString() ?? "") : "";
+        string css = root.TryGetProperty("css", out var cssEl) ? (cssEl.GetString() ?? "") : "";
+        _lastThemeSync = new ThemeSyncState
+        {
+            ThemeId = themeId,
+            Css = css,
+            Caption = caption,
+            Text = text,
+            Border = border,
+        };
+        NotifyLogsPopoutTheme();
+    }
 
     private void InitializeTrayIcon()
     {
@@ -605,6 +617,7 @@ public partial class Form1 : Form, IMessageFilter
     private void ShowMainWindow()
     {
         if (isShuttingDown) return;
+        _mainHiddenForLogsPopout = false;
         this.Show();
         this.WindowState = FormWindowState.Normal;
         this.Activate();
@@ -629,7 +642,13 @@ public partial class Form1 : Form, IMessageFilter
 
     private void LogActivity(string msg)
     {
-        try { File.AppendAllText(logActivityPath, $"[{DateTime.Now:T}] {msg}\n"); } catch (Exception ex) { Debug.WriteLine($"[LOG] Failed to write activity log: {ex.Message}"); }
+        string path = logActivityPath;
+        string line = $"[{DateTime.Now:T}] {msg}\n";
+        Task.Run(() =>
+        {
+            try { File.AppendAllText(path, line); }
+            catch (Exception ex) { Debug.WriteLine($"[LOG] Failed to write activity log: {ex.Message}"); }
+        });
     }
 
     private void LogError(string msg)
@@ -730,14 +749,15 @@ public partial class Form1 : Form, IMessageFilter
                                 {
                                     if (args.StartsWith("nxm://"))
                                     {
-                                        SendStatusMessage("info", "Received NXM Link from browser...");
                                         _ = HandleNxmLinkAsync(args);
+                                        _mainHiddenForLogsPopout = false;
                                         this.Show();
                                         this.WindowState = FormWindowState.Normal;
                                         this.Activate();
                                     }
                                     else if (args == "SHOW")
                                     {
+                                        _mainHiddenForLogsPopout = false;
                                         this.Show();
                                         this.WindowState = FormWindowState.Normal;
                                         this.Activate();

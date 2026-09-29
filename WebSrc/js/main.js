@@ -6,9 +6,10 @@ import { PipBoy } from './components/PipBoy.js';
 import { Profiles } from './components/Profiles.js';
 import { Logs } from './components/Logs.js';
 import { Settings } from './components/Settings.js';
+import { UpdateManager } from './components/UpdateManager.js';
 import { ConflictModal } from './components/ConflictModal.js';
 import { EndorsementModal } from './components/EndorsementModal.js';
-import { ModGroupsManager } from './components/ModGroupsManager.js';
+import { ModPresetsManager } from './components/ModGroupsManager.js';
 import { BundleManager } from './components/BundleManager.js';
 import { IniEditorModal } from './components/IniEditorModal.js';
 import { escapeAttr, escapeHtml } from './utils/htmlSafe.js';
@@ -21,144 +22,23 @@ import {
 } from './utils/keybinds.js';
 
 import { translator } from './Translations.js';
-import { applyUiTheme, registerUserThemesFromHost } from './utils/themeManager.js';
+import { applyUiTheme, registerUserThemesFromHost, unregisterUserTheme, updateThemePreview, endThemePreview } from './utils/themeManager.js';
+import { DEFAULT_UI_THEME } from './themes/registry.js';
+import { refreshSharpLogos } from './utils/logoSharpen.js';
 import {
     isPreviewPlaceholderSection,
     mountPreviewPlaceholder,
 } from './utils/previewPlaceholders.js';
+import { appConfirm, appPrompt, dismissAppConfirm, installAppConfirmGlobals } from './utils/appConfirm.js';
+import { installThemedSelectMenus } from './utils/themedSelectMenu.js';
 
 window._t = (key, ...args) => translator.t(key, ...args);
 window.translator = translator;
+installAppConfirmGlobals();
+installThemedSelectMenus();
 
-let _confirmPendingResolve = null;
+export { appConfirm, appPrompt };
 
-function _escapeConfirmHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
-
-function _formatConfirmMessageHtml(message) {
-    const raw = String(message ?? '');
-    const re = /["'«「]([^"'»」]+)["'»」]/g;
-    let last = 0;
-    let match;
-    const parts = [];
-    while ((match = re.exec(raw)) !== null) {
-        if (match.index > last) {
-            parts.push(_escapeConfirmHtml(raw.slice(last, match.index)));
-        }
-        parts.push(`<code>${_escapeConfirmHtml(match[1])}</code>`);
-        last = match.index + match[0].length;
-    }
-    if (last < raw.length) {
-        parts.push(_escapeConfirmHtml(raw.slice(last)));
-    }
-    return parts.join('').replace(/\n/g, '<br>');
-}
-
-export function appConfirm(options = {}) {
-    return new Promise((resolve) => {
-        const overlay = document.getElementById('confirm-modal');
-        const titleEl = document.getElementById('confirm-title');
-        const msgEl = document.getElementById('confirm-message');
-        const iconEl = document.getElementById('confirm-icon');
-        const okBtn = document.getElementById('confirm-ok');
-        const cancelBtn = document.getElementById('confirm-cancel');
-        const closeTopBtn = document.getElementById('confirm-close-top');
-        if (!overlay || !titleEl || !msgEl || !okBtn || !cancelBtn) {
-            console.warn('[appConfirm] #confirm-modal elements missing');
-            resolve(false);
-            return;
-        }
-
-        if (_confirmPendingResolve) {
-            _confirmPendingResolve(false);
-            _confirmPendingResolve = null;
-        }
-        _confirmPendingResolve = resolve;
-
-        const t = window._t;
-        const isDanger = !!options.danger;
-        titleEl.textContent = options.title ?? 'Confirmation';
-        msgEl.innerHTML = _formatConfirmMessageHtml(options.message ?? '');
-        msgEl.style.whiteSpace = 'normal';
-
-        okBtn.textContent = options.okText ?? 'OK';
-        cancelBtn.textContent = options.cancelText ?? (typeof t === 'function' ? t('cancel') : 'Cancel');
-        if (closeTopBtn) {
-            closeTopBtn.setAttribute('aria-label', cancelBtn.textContent);
-        }
-
-        if (iconEl) {
-            iconEl.setAttribute('data-lucide', isDanger ? 'trash-2' : 'help-circle');
-        }
-
-        const previousFocus = document.activeElement;
-
-        const cleanupListeners = () => {
-            okBtn.removeEventListener('click', onOk);
-            cancelBtn.removeEventListener('click', onCancel);
-            if (closeTopBtn) closeTopBtn.removeEventListener('click', onCancel);
-            overlay.removeEventListener('click', onOverlayClick);
-            document.removeEventListener('keydown', onKeydown);
-        };
-
-        const finish = (value) => {
-            if (_confirmPendingResolve !== resolve) return;
-            _confirmPendingResolve = null;
-            overlay.classList.remove('active');
-            cleanupListeners();
-            resolve(value);
-            try {
-                if (previousFocus && typeof previousFocus.focus === 'function') {
-                    previousFocus.focus();
-                }
-            } catch (_) { }
-        };
-
-        const onOk = () => finish(true);
-        const onCancel = () => finish(false);
-        const onOverlayClick = (e) => {
-            if (e.target === overlay) finish(false);
-        };
-        const onKeydown = (e) => {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                finish(false);
-            }
-        };
-
-        okBtn.addEventListener('click', onOk);
-        cancelBtn.addEventListener('click', onCancel);
-        if (closeTopBtn) closeTopBtn.addEventListener('click', onCancel);
-        overlay.addEventListener('click', onOverlayClick);
-        document.addEventListener('keydown', onKeydown);
-
-        overlay.classList.add('active');
-        if (window.lucide) {
-            try {
-                if (iconEl) {
-                    iconEl.parentElement?.querySelectorAll('svg').forEach((s) => s.remove());
-                }
-                window.lucide.createIcons();
-            } catch (_) { }
-        }
-        try {
-            okBtn.focus();
-        } catch (_) { }
-    });
-}
-
-window.appConfirm = appConfirm;
-
-/**
- * Shared cross-platform transfer trigger used by the Settings, Mods, and Configs action menus.
- * direction: 'to-other' (copy current platform's content to the other) or 'from-other' (import the other's).
- * scope: 'mods' or 'configs' — only changes the wording shown; the underlying copy is identical.
- */
 window.transferModsAcrossPlatforms = async (direction, scope = 'mods') => {
     const isConfigs = scope === 'configs';
     const current = window.app?.realData?.platform || 'current platform';
@@ -184,19 +64,33 @@ export class App {
         this.contentArea = null;
         this.notificationContainer = null;
         this.realData = null;
-        this.modGroups = new ModGroupsManager(this);
+        this.modGroups = new ModPresetsManager(this);
         this.conflictModal = new ConflictModal(this);
         this.endorsementModal = new EndorsementModal(this);
         this.iniEditor = new IniEditorModal(this);
         this.hasRenderedInitially = false;
+        this._translationsReady = false;
         this._userChoseSection = false;
         this._pendingUpdateData = null;
         this._updateDataFlushHandle = null;
         this._downloadBannerDismissTimer = null;
+        this._pendingPersistSection = null;
+        this._navigatePersistTimer = null;
+    }
+
+    bootMark(label) {
+        try {
+            const t = Math.round(performance.now());
+            if (t > 60000) return;
+            const msg = `[BOOT] ${label} t=${t}ms`;
+            console.log(msg);
+            window.chrome?.webview?.postMessage({ type: 'JS_LOG', message: msg });
+        } catch {  }
     }
 
     async init() {
         console.log("App initializing...");
+        this.bootMark('App.init start');
         this.sidebar = document.getElementById('sidebar');
         this.contentArea = document.getElementById('content-area');
         this.notificationContainer = document.getElementById('notification-container');
@@ -213,6 +107,19 @@ export class App {
         });
 
         this.setupKeyboardShortcuts();
+
+        window.addEventListener('beforeunload', () => {
+            if (this._navigatePersistTimer) {
+                clearTimeout(this._navigatePersistTimer);
+                this._navigatePersistTimer = null;
+            }
+            if (this._pendingPersistSection && window.chrome?.webview) {
+                window.chrome.webview.postMessage({
+                    type: 'NAVIGATE_TO',
+                    section: this._pendingPersistSection
+                });
+            }
+        });
 
         if (window.chrome && window.chrome.webview && !window.chrome.webview.shim) {
         } else {
@@ -246,6 +153,8 @@ export class App {
             return;
         }
 
+        this.restoreSectionChrome();
+
         if (window.chrome && window.chrome.webview) {
             this._pendingMessages = [];
             this._ready = false;
@@ -258,12 +167,16 @@ export class App {
                     return;
                 }
 
-                if (data.type === 'UPDATE_DATA') {
-                    if (data.userThemes) registerUserThemesFromHost(data.userThemes);
-                    if (data.managerSettings?.uiTheme) applyUiTheme(data.managerSettings.uiTheme);
+                if (data.type === 'LOGS_DATA') {
+                    this._applyLogsData(data.logs);
+                    return;
                 }
 
                 if (!this._ready) {
+                    if (data.type === 'UPDATE_DATA') {
+                        this._handleMessage(data);
+                        return;
+                    }
                     console.log(`[UI] Queuing early message: ${data.type || 'unknown'}`);
                     this._pendingMessages.push(data);
                     return;
@@ -272,11 +185,7 @@ export class App {
                 this._handleMessage(data);
             });
 
-            try {
-                await translator.init();
-            } catch (e) {
-                console.error("[Init] Translator failed:", e);
-            }
+            window.chrome.webview.postMessage({ type: 'GET_DATA' });
 
             this._ready = true;
             if (this._pendingMessages.length > 0) {
@@ -287,7 +196,16 @@ export class App {
             }
             this._pendingMessages = [];
 
-            window.chrome.webview.postMessage({ type: 'GET_DATA' });
+            translator.init().then(() => {
+                this._translationsReady = true;
+                this.bootMark('translator ready');
+                this.translateStaticElements();
+                this.finishInitialPaint();
+            }).catch(e => {
+                console.error("[Init] Translator failed:", e);
+                this._translationsReady = true;
+                this.finishInitialPaint();
+            });
 
             setTimeout(() => {
                 if (!this.realData) {
@@ -295,6 +213,34 @@ export class App {
                     window.chrome.webview.postMessage({ type: 'GET_DATA' });
                 }
             }, 3000);
+        } else {
+            document.documentElement.classList.remove('app-booting');
+            translator.init().then(() => {
+                this._translationsReady = true;
+                this.translateStaticElements();
+                this.finishInitialPaint();
+                if (!this.hasRenderedInitially) {
+                    this.navigateTo(this.rememberedSection() || 'dashboard', true, false);
+                    this.hasRenderedInitially = true;
+                }
+            }).catch(e => {
+                console.error("[Init] Translator failed:", e);
+                this._translationsReady = true;
+                if (!this.hasRenderedInitially) {
+                    this.navigateTo(this.rememberedSection() || 'dashboard', true, false);
+                    this.hasRenderedInitially = true;
+                }
+            });
+        }
+
+        const kofiLink = document.getElementById('kofi-link');
+        if (kofiLink) {
+            kofiLink.addEventListener('click', () => {
+                window.chrome?.webview?.postMessage({
+                    type: 'OPEN_IN_BROWSER',
+                    url: 'https://ko-fi.com/moddedwolf'
+                });
+            });
         }
 
         const platformToggle = document.getElementById('platform-toggle');
@@ -320,10 +266,9 @@ export class App {
 
         this.setupNavigation();
         this.setupEndorsementClick();
-        this.translateStaticElements();
 
-        if (!this.realData) {
-            this.navigateTo('dashboard', true, false);
+        if (window.__THEME_STUDIO_PREVIEW && !this.realData) {
+            this.navigateTo(window.__THEME_STUDIO_ACTIVE_SECTION || this.currentSection || 'dashboard', true, false);
         }
     }
 
@@ -347,16 +292,73 @@ export class App {
             return;
         }
 
+        if (data.type === 'THEME_PREVIEW') {
+            try {
+                updateThemePreview(data.css || '', data.logoUrl || '', data.layout || null);
+            } catch (e) {
+                console.warn('[THEME] preview apply failed', e);
+            }
+            return;
+        }
+
+        if (data.type === 'THEME_PREVIEW_END') {
+            try {
+                endThemePreview({ restore: data.restore !== false });
+            } catch (e) {
+                console.warn('[THEME] preview end failed', e);
+            }
+            return;
+        }
+
+        if (data.type === 'THEME_CREATOR_APPLIED') {
+            try {
+                endThemePreview({ restore: false });
+                const themeId = data.themeId;
+                if (themeId) {
+                    applyUiTheme(themeId);
+                    if (this.realData?.managerSettings) this.realData.managerSettings.uiTheme = themeId;
+                    this._lastHostUiTheme = themeId;
+                }
+                this.showBanner({
+                    type: 'success',
+                    text: window._t('theme_creator_save_success', data.displayName || themeId || ''),
+                });
+                if (this.currentSection === 'settings' && this.sections.settings) {
+                    this.replaceCurrentSectionContent();
+                }
+            } catch (e) {
+                console.warn('[THEME] creator applied failed', e);
+            }
+            return;
+        }
+
+        if (data.type === 'THEME_DELETE_RESULT') {
+            if (data.ok) {
+                const wasShowing = document.documentElement.dataset.theme === data.themeId;
+                unregisterUserTheme(data.themeId);
+                if (wasShowing) applyUiTheme(data.activeTheme || DEFAULT_UI_THEME);
+                if (this.realData?.managerSettings && data.activeTheme) {
+                    this.realData.managerSettings.uiTheme = data.activeTheme;
+                }
+                this.showBanner({
+                    type: 'success',
+                    text: window._t('theme_delete_success', data.displayName || data.themeId || ''),
+                });
+                if (this.currentSection === 'settings' && this.sections.settings) {
+                    this.replaceCurrentSectionContent();
+                }
+            } else {
+                this.showBanner({
+                    type: 'error',
+                    text: data.error || window._t('theme_delete_failed'),
+                });
+            }
+            return;
+        }
+
         if (data.type === 'THEME_RELOAD_RESULT') {
             const loaded = Array.isArray(data.loaded) ? data.loaded : [];
             const rejected = Array.isArray(data.rejected) ? data.rejected : [];
-            if (loaded.length) {
-                registerUserThemesFromHost(loaded.map((t) => ({
-                    id: t.id,
-                    displayName: t.displayName,
-                    logo: `user-theme-logo/${t.id}`,
-                })));
-            }
             if (loaded.length && !rejected.length) {
                 this.showBanner({
                     type: 'success',
@@ -402,6 +404,16 @@ export class App {
             if (data.type === 'STATUS') return;
         }
 
+        if (data.type === 'APP_UPDATE_STATUS') {
+            this.appUpdate = data;
+            this.syncUpdateNavBadge();
+            this.syncAppUpdateBanner(data);
+            if (this.currentSection === 'update') {
+                this.replaceCurrentSectionContent();
+            }
+            return;
+        }
+
         if (data.type === 'conflicts_found') {
             const isAutoOverride = this.realData?.managerSettings?.autoForceDeploy;
             
@@ -429,16 +441,9 @@ export class App {
             return;
         }
 
-        if (data.type === 'NEXUS_SEARCH_RESULT') {
-            if (this.currentSection === 'nexus' && this.sections['nexus']) {
-                this.sections['nexus'].handleSearchResult(data.data);
-            }
-            return;
-        }
-
-        if (data.type === 'NEXUS_FILES_RESULT') {
-            if (this.currentSection === 'nexus' && this.sections['nexus']) {
-                this.sections['nexus'].handleFilesResult(data.modId, data.data);
+        if (data.type === 'NEXUS_RESOLVE_MOD_LINK_RESULT') {
+            if (window.modsManager && typeof window.modsManager.handleNexusResolveModLinkResult === 'function') {
+                window.modsManager.handleNexusResolveModLinkResult(data);
             }
             return;
         }
@@ -468,14 +473,12 @@ export class App {
                 text: failed > 0
                     ? window._t(
                         'nexus_collection_complete_partial',
-                        'Collection "{0}" finished with {1} queued and {2} skipped/failed.',
                         label,
                         data.queued ?? 0,
                         failed
                     )
                     : window._t(
                         'nexus_collection_complete',
-                        'Collection "{0}" queued: {1} mod(s) downloading.',
                         label,
                         data.queued ?? 0
                     )
@@ -581,6 +584,25 @@ export class App {
             return;
         }
 
+        if (data.type === 'MOD_CONTENTS') {
+            if (window.modsManager && typeof window.modsManager.handleModContents === 'function') {
+                window.modsManager.handleModContents(data);
+            }
+            return;
+        }
+
+        if (data.type === 'MOD_FILES_ADDING' || data.type === 'MOD_FILES_ADDED') {
+            if (window.modsManager && typeof window.modsManager.handleModFilesAdded === 'function') {
+                window.modsManager.handleModFilesAdded(data);
+            }
+            return;
+        }
+
+        if (data.type === 'LOGS_DATA') {
+            this._applyLogsData(data.logs);
+            return;
+        }
+
         if (data.type === 'INTERFACE_COLORS') {
              return;
         }
@@ -590,7 +612,15 @@ export class App {
         }
 
         if (data.type === 'UPDATE_DATA') {
-            if (data.userThemes) registerUserThemesFromHost(data.userThemes);
+            if (data.userThemes) registerUserThemesFromHost(data.userThemes, { authoritative: true });
+            if (data.modsDeferred) {
+                const source = this._pendingUpdateData && !this._pendingUpdateData.modsDeferred
+                    ? this._pendingUpdateData
+                    : (this.realData && !this.realData.modsDeferred ? this.realData : null);
+                if (source) {
+                    data = { ...data, mods: source.mods, stats: source.stats, modsDeferred: false };
+                }
+            }
             this._pendingUpdateData = data;
             if (this._updateDataFlushHandle) return;
 
@@ -608,11 +638,22 @@ export class App {
         }
     }
 
+    _applyLogsData(logsPayload) {
+        if (!this.realData) return;
+        this.realData.logs = logsPayload || { activity: [], errors: [], errorCount: 0 };
+        const logsSection = this.sections?.logs;
+        if (logsSection && typeof logsSection.refreshView === 'function') {
+            logsSection.refreshView(this.realData, true);
+        }
+    }
+
     _applyUpdateData(data) {
-        if (data.userThemes) registerUserThemesFromHost(data.userThemes);
+        const firstData = !this.hasRenderedInitially;
+        const tApply = performance.now();
+        if (data.userThemes) registerUserThemesFromHost(data.userThemes, { authoritative: true });
         this.realData = data;
-        if (data.modGroups) {
-            this.modGroups.setGroups(data.modGroups);
+        if (data.modPresets || data.modGroups) {
+            this.modGroups.setFromHost(data.modPresets || data.modGroups, data.activeModPreset);
         }
 
         if (this.realData.managerSettings) {
@@ -620,11 +661,15 @@ export class App {
             if (ms.keybinds && !localStorage.getItem('f76_manager_keybinds')) {
                 syncKeybindsFromManagerSettings(ms);
             }
-            document.body.classList.toggle('no-animations', ms.uiAnimations === false);
-            document.body.classList.toggle('no-platform-glow', ms.platformBadgeGlow === false);
+            this.applyLiveUiSettings(ms);
 
             if (!window.__THEME_STUDIO_PREVIEW) {
-                applyUiTheme(ms.uiTheme);
+                const hostTheme = ms.uiTheme || DEFAULT_UI_THEME;
+                const prevHostTheme = this._lastHostUiTheme;
+                this._lastHostUiTheme = hostTheme;
+                if (prevHostTheme === undefined || prevHostTheme !== hostTheme) {
+                    applyUiTheme(hostTheme);
+                }
             }
 
             const newLang = ms.language || 'en-US';
@@ -643,6 +688,7 @@ export class App {
 
         this.syncProfileDropdown();
         this.syncPlatformUI();
+        document.documentElement.classList.remove('app-booting');
 
         if (window.__THEME_STUDIO_PREVIEW && isPreviewPlaceholderSection(this.currentSection) && !window.__THEME_STUDIO_PREVIEW_LIVE_MODS) {
             this.hasRenderedInitially = true;
@@ -659,16 +705,13 @@ export class App {
         }
 
         if (!this.hasRenderedInitially) {
-            const savedSection = this.realData?.lastSection;
-            let initialSection = 'dashboard';
-            if (this._userChoseSection && this.currentSection) {
-                initialSection = this.currentSection;
-            } else if (savedSection) {
-                initialSection = (savedSection === 'update' || !this.sections[savedSection]) ? 'dashboard' : savedSection;
-            } else if (this.currentSection) {
-                initialSection = this.currentSection;
+            const initialSection = this.pickInitialSection();
+            if (!this._translationsReady) {
+                this.highlightSection(initialSection);
+            } else {
+                this.navigateTo(initialSection, true, false, true);
+                this.hasRenderedInitially = true;
             }
-            this.navigateTo(initialSection, true, false, true);
         } else {
             const activeManager = this.sections[this.currentSection];
             if (activeManager && typeof activeManager.updateValues === 'function') {
@@ -680,7 +723,9 @@ export class App {
             this.syncPlatformUI();
         }
 
-        this.hasRenderedInitially = true;
+        if (this.hasRenderedInitially && (firstData || (data.mods?.length ?? 0) > 0)) {
+            this.bootMark(`UPDATE_DATA applied (first=${firstData}, mods=${data.mods?.length ?? 0}) render=${Math.round(performance.now() - tApply)}ms`);
+        }
     }
 
     translateStaticElements() {
@@ -693,6 +738,7 @@ export class App {
             'pipboy': 'pip_boy',
             'profiles': 'profiles',
             'logs': 'logs',
+            'update': 'update',
             'settings': 'settings'
         };
 
@@ -708,6 +754,7 @@ export class App {
         
         const laterLabel = document.getElementById('endorsement-later');
         if (laterLabel) laterLabel.textContent = window._t('maybe_later');
+        this.syncUpdateNavBadge();
     }
 
     syncTweaksPendingBanner() {
@@ -746,6 +793,40 @@ export class App {
         }
     }
 
+    clearBannerDismissTimer(bannerEl) {
+        if (!bannerEl) return;
+        const id = bannerEl._bannerDismissTimer;
+        if (id) {
+            clearTimeout(id);
+            bannerEl._bannerDismissTimer = null;
+        }
+    }
+
+    scheduleBannerAutoDismiss(bannerEl, status, displayText) {
+        if (!bannerEl || !status) return;
+        this.clearBannerDismissTimer(bannerEl);
+
+        const sticky = status.sticky === true;
+        const hasActions = Array.isArray(status.actions) && status.actions.length > 0;
+        if (sticky || hasActions) return;
+
+        let ms = 0;
+        if (status.type === 'success') ms = 5000;
+        else if (status.type === 'info') ms = 20000;
+        else if (status.type === 'warning') ms = 8000;
+        else if (status.type === 'error') ms = 12000;
+        if (ms <= 0) return;
+
+        bannerEl._bannerDismissTimer = setTimeout(() => {
+            bannerEl._bannerDismissTimer = null;
+            if (bannerEl.parentElement) bannerEl.remove();
+        }, ms);
+
+        if (status.type === 'info') {
+            this.scheduleDownloadInfoDismissIfComplete(bannerEl, displayText);
+        }
+    }
+
     scheduleDownloadInfoDismissIfComplete(infoBannerEl, displayText) {
         this.clearDownloadBannerDismissTimer();
         const text = (displayText || '').toString();
@@ -760,7 +841,6 @@ export class App {
     showCollectionProgressBanner(percent, current, total, done = false) {
         const text = window._t(
             'nexus_collection_download_progress',
-            'Collection download {0}% ({1}/{2})',
             percent ?? 0,
             current ?? 0,
             total ?? 0
@@ -780,13 +860,14 @@ export class App {
 
         let displayText = status.text;
         if (status.key) {
-            const hasArgs = status.args && Array.isArray(status.args) && status.args.length > 0;
-            if (hasArgs) {
-                displayText = window._t(status.key, ...status.args);
-            } else if (status.text) {
-                displayText = status.text;
-            } else {
-                displayText = window._t(status.key);
+            const args = Array.isArray(status.args) ? status.args : [];
+            const translated = window._t(status.key, ...args);
+            const found = !!translated && translated !== status.key;
+            const hasUnfilledPlaceholder = /\{\d+\}/.test(translated || '');
+            if (found && !hasUnfilledPlaceholder) {
+                displayText = translated;
+            } else if (!status.text) {
+                displayText = translated;
             }
             console.log(`[UI] Translated banner: '${status.key}' -> '${displayText}'`);
         }
@@ -801,7 +882,6 @@ export class App {
             const isCollection = status.progressId === 'collection-import';
             const isNexusDownload = status.progressId === 'nexus-download';
 
-            // When a single download finishes/cancels, just remove its banner and stop.
             if (isNexusDownload && status.done) {
                 const ex = this.notificationContainer.querySelector('[data-progress-id="nexus-download"]');
                 if (ex) ex.remove();
@@ -858,7 +938,7 @@ export class App {
             if (existing) {
                 const span = existing.querySelector('span');
                 if (span) span.textContent = displayText;
-                this.scheduleDownloadInfoDismissIfComplete(existing, displayText);
+                this.scheduleBannerAutoDismiss(existing, status, displayText);
                 return;
             }
         }
@@ -914,20 +994,8 @@ export class App {
         if (tweaksPending) this.notificationContainer.appendChild(tweaksPending);
         progressBanners.forEach(el => this.notificationContainer.appendChild(el));
         this.notificationContainer.appendChild(banner);
-        if (status.type === 'info') {
-            this.scheduleDownloadInfoDismissIfComplete(banner, displayText);
-        }
         lucide.createIcons();
-
-        if (status.type === 'success') {
-            setTimeout(() => {
-                if (banner.parentElement) banner.remove();
-            }, 5000);
-        } else if (status.type === 'info') {
-            setTimeout(() => {
-                if (banner.parentElement) banner.remove();
-            }, 20000);
-        }
+        this.scheduleBannerAutoDismiss(banner, status, displayText);
     }
 
 
@@ -982,6 +1050,7 @@ export class App {
         if (toggleBtn) {
             toggleBtn.addEventListener('click', () => {
                 this.sidebar.classList.toggle('collapsed');
+                refreshSharpLogos();
             });
         }
     }
@@ -1005,36 +1074,104 @@ export class App {
             .join(' ');
     }
 
+    rememberedSection() {
+        try {
+            const saved = sessionStorage.getItem('f76_ui_section');
+            if (saved && this.sections[saved]) return saved;
+        } catch {  }
+        return '';
+    }
+
+    rememberSection(sectionId) {
+        if (!sectionId || !this.sections[sectionId]) return;
+        try { sessionStorage.setItem('f76_ui_section', sectionId); } catch {  }
+    }
+
+    restoreSectionChrome() {
+        const id = this.rememberedSection();
+        if (!id) return;
+        this.highlightSection(id);
+    }
+
+    applyLiveUiSettings(ms = this.realData?.managerSettings || {}) {
+        const overrides = this._liveSettingOverrides || {};
+        const pick = (key) => (key in overrides ? overrides[key] : ms[key]);
+        document.body.classList.toggle('no-animations', pick('uiAnimations') === false);
+        document.body.classList.toggle('no-platform-glow', pick('platformBadgeGlow') === false);
+        const kofiLink = document.getElementById('kofi-link');
+        if (kofiLink) kofiLink.hidden = !!pick('hideKofi');
+    }
+
+    highlightSection(sectionId) {
+        if (!sectionId || !this.sections[sectionId]) return;
+        this.currentSection = sectionId;
+        document.querySelectorAll('[data-section]').forEach(link => {
+            link.classList.toggle('active', link.getAttribute('data-section') === sectionId);
+        });
+        const titleEl = document.getElementById('section-title');
+        if (titleEl) titleEl.textContent = this.formatSectionTitle(sectionId);
+        try {
+            document.body.dataset.uiSection = sectionId;
+            if (this.contentArea) {
+                this.contentArea.dataset.activeSection = sectionId;
+                this.contentArea.classList.toggle('logs-active', sectionId === 'logs');
+            }
+        } catch {  }
+    }
+
+    pickInitialSection() {
+        if (this._userChoseSection && this.currentSection && this.sections[this.currentSection]) {
+            return this.currentSection;
+        }
+        const savedSection = this.realData?.lastSection;
+        if (savedSection && this.sections[savedSection]) return savedSection;
+        return this.rememberedSection() || 'dashboard';
+    }
+
+    finishInitialPaint() {
+        if (!this._translationsReady || this.hasRenderedInitially || !this.realData) return;
+        this.navigateTo(this.pickInitialSection(), true, false, true);
+        this.hasRenderedInitially = true;
+    }
+
     navigateTo(sectionId, force = false, persist = true, keepNotifications = false) {
         if (!force && this.currentSection === sectionId && this.contentArea.innerHTML !== '') {
+            if (sectionId === 'update') this.sections.update?.updateValues?.(this.realData);
             return;
         }
 
-        this.currentSection = sectionId;
-        try {
-            document.body.dataset.uiSection = sectionId;
-            if (this.contentArea) this.contentArea.dataset.activeSection = sectionId;
-        } catch (_) { }
-        if (this.contentArea) {
-            this.contentArea.classList.toggle('logs-active', sectionId === 'logs');
+        if (!this._translationsReady && !window.__THEME_STUDIO_PREVIEW) {
+            if (persist) this._userChoseSection = true;
+            this.highlightSection(sectionId);
+            this.rememberSection(sectionId);
+            return;
         }
+
+        if (this.currentSection === 'settings' && sectionId !== 'settings'
+            && this._liveSettingOverrides && Object.keys(this._liveSettingOverrides).length) {
+            this._liveSettingOverrides = {};
+            this.applyLiveUiSettings();
+        }
+
+        this.sections.mods?._closeModsActionsMenu?.();
+        this.highlightSection(sectionId);
+        this.rememberSection(sectionId);
 
         if (this.notificationContainer && !keepNotifications) this.notificationContainer.innerHTML = '';
 
         if (persist) {
             this._userChoseSection = true;
             if (window.chrome && window.chrome.webview && !window.__THEME_STUDIO_PREVIEW) {
-                window.chrome.webview.postMessage({ type: 'NAVIGATE_TO', section: sectionId });
+                this._pendingPersistSection = sectionId;
+                clearTimeout(this._navigatePersistTimer);
+                this._navigatePersistTimer = setTimeout(() => {
+                    if (!this._pendingPersistSection) return;
+                    window.chrome.webview.postMessage({
+                        type: 'NAVIGATE_TO',
+                        section: this._pendingPersistSection
+                    });
+                }, 400);
             }
-        }
-
-        document.querySelectorAll('[data-section]').forEach(link => {
-            link.classList.toggle('active', link.getAttribute('data-section') === sectionId);
-        });
-
-        const titleEl = document.getElementById('section-title');
-        if (titleEl) {
-            titleEl.textContent = this.formatSectionTitle(sectionId);
         }
 
         if (sectionId === 'tweaks' && window.chrome?.webview && !window.__THEME_STUDIO_PREVIEW) {
@@ -1053,6 +1190,7 @@ export class App {
             }
 
             const payload = this.realData ?? { mods: [], modGroups: {}, managerSettings: {} };
+            this._beginSectionEnter(sectionId);
             this.contentArea.classList.add('content-refreshing');
             try {
                 this.contentArea.innerHTML = `<div class="section-content">${section.render(payload)}</div>`;
@@ -1092,6 +1230,22 @@ export class App {
         }
     }
 
+    _beginSectionEnter(sectionId) {
+        const isNewSection = this._lastRenderedSection !== sectionId;
+        this._lastRenderedSection = sectionId;
+        if (!isNewSection || !this.contentArea) return;
+        clearTimeout(this._sectionEnterTimer);
+        this.contentArea.classList.add('section-entering');
+        this._sectionEnterTimer = setTimeout(() => {
+            this.contentArea?.classList.remove('section-entering');
+        }, 700);
+    }
+
+    _cancelSectionEnter() {
+        clearTimeout(this._sectionEnterTimer);
+        this.contentArea?.classList.remove('section-entering');
+    }
+
     refreshCurrentSection() {
         if (this.replaceCurrentSectionContent()) return;
         this.navigateTo(this.currentSection, true, false);
@@ -1104,6 +1258,8 @@ export class App {
         }
         const section = this.sections[this.currentSection];
         if (!section || !this.contentArea || !this.realData) return false;
+        this.sections.mods?._closeModsActionsMenu?.();
+        this._cancelSectionEnter();
         try {
             document.body.dataset.uiSection = this.currentSection;
             this.contentArea.dataset.activeSection = this.currentSection;
@@ -1133,6 +1289,55 @@ export class App {
         if (dropdown.innerHTML !== nextHtml) {
             dropdown.innerHTML = nextHtml;
         }
+    }
+
+    syncUpdateNavBadge() {
+        const badge = document.getElementById('update-nav-badge');
+        if (!badge) return;
+        const show = !!this.appUpdate?.updateAvailable;
+        badge.hidden = !show;
+        if (show) badge.textContent = window._t('update_badge');
+    }
+
+    cancelAppUpdate() {
+        this._appUpdateCancelRequested = true;
+        window.chrome?.webview?.postMessage({ type: 'CANCEL_APP_UPDATE' });
+        this.notificationContainer?.querySelector('[data-progress-id="app-update"]')?.remove();
+        if (this.currentSection === 'update') this.replaceCurrentSectionContent();
+    }
+
+    syncAppUpdateBanner(status) {
+        if (!this.notificationContainer) return;
+        const phase = status?.phase;
+        let el = this.notificationContainer.querySelector('[data-progress-id="app-update"]');
+        if (phase !== 'downloading' && phase !== 'preparing') {
+            this._appUpdateCancelRequested = false;
+            if (el) el.remove();
+            return;
+        }
+        if (this._appUpdateCancelRequested) return;
+
+        const text = phase === 'preparing'
+            ? window._t('update_preparing')
+            : window._t('update_installing', status.percent ?? 0);
+
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'status-banner info animate-fade';
+            el.setAttribute('data-progress-id', 'app-update');
+            el.innerHTML = `
+                <i data-lucide="download"></i>
+                <span></span>
+                <button type="button" class="status-banner-action cancel-download">${escapeHtml(window._t('update_cancel'))}</button>
+                <button class="close-status">&times;</button>
+            `;
+            el.querySelector('.cancel-download').onclick = () => this.cancelAppUpdate();
+            el.querySelector('.close-status').onclick = () => this.cancelAppUpdate();
+            this.notificationContainer.appendChild(el);
+            if (window.lucide) lucide.createIcons();
+        }
+        const span = el.querySelector('span');
+        if (span) span.textContent = text;
     }
 
     syncPlatformUI() {
@@ -1199,6 +1404,7 @@ export class App {
 }
 
 window.app = new App();
+window.app.bootMark('app.bundle.js evaluated');
 window.app.registerSection('dashboard', new Dashboard());
 window.app.registerSection('mods', new ModsManager(window.app.modGroups));
 window.app.registerSection('config', new ConfigManager());
@@ -1207,6 +1413,7 @@ window.app.registerSection('tweaks', new TweaksManager());
 window.app.registerSection('pipboy', new PipBoy());
 window.app.registerSection('profiles', new Profiles());
 window.app.registerSection('logs', new Logs());
+window.app.registerSection('update', new UpdateManager());
 window.app.registerSection('settings', new Settings());
 
 window.modsManager = window.app.sections?.mods;

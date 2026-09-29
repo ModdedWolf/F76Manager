@@ -15,7 +15,7 @@ const OVERLAY_ID = 'badge-color-overlay';
 
 export function isConfigListEntry(mod) {
     const original = String(mod?.originalName || '').toLowerCase();
-    return original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt');
+    return original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt') || original.endsWith('.toml');
 }
 
 export function filterModsTabEntries(mods) {

@@ -21,16 +21,10 @@ public class NexusManager : IDisposable
     private const int GAME_ID = 2590;
     private const string APP_NAME = "F76Manager";
 
-    /// <summary>
-    /// Nexus SSO/OAuth requires a registered application slug from support@nexusmods.com.
-    /// Public builds must not prompt users for Personal API keys (Nexus API policy).
-    /// </summary>
     public const string ApplicationSlug = "moddedwolfx-f76manager";
 
-    /// <summary>Flip to true after Nexus Mods registers this application.</summary>
     public const bool SsoEnabled = true;
 
-    /// <summary>Same slug Nexus issues for SSO browser authorize URLs.</summary>
     public const string? SsoApplicationSlug = ApplicationSlug;
 
     public static bool IsSsoAvailable =>
@@ -137,6 +131,7 @@ public class NexusManager : IDisposable
             {
                 return await response.Content.ReadAsStringAsync();
             }
+            _logger($"[NEXUS_ERR] Details request for mod {modId} failed: HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
             return JsonSerializer.Serialize(new { error = "Mod not found" });
         }
         catch (Exception ex)
@@ -157,12 +152,35 @@ public class NexusManager : IDisposable
             {
                 return await response.Content.ReadAsStringAsync();
             }
+            _logger($"[NEXUS_ERR] Files request for mod {modId} failed: HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
             return JsonSerializer.Serialize(new { error = "Files not found" });
         }
         catch (Exception ex)
         {
             return JsonSerializer.Serialize(new { error = ex.Message });
         }
+    }
+
+    private static readonly TimeSpan ModFilesCacheTtl = TimeSpan.FromMinutes(5);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, (DateTime FetchedUtc, string Json)> _modFilesCache = new();
+
+    private async Task<string> GetModFilesCached(long modId)
+    {
+        if (_modFilesCache.TryGetValue(modId, out var cached) && DateTime.UtcNow - cached.FetchedUtc < ModFilesCacheTtl)
+            return cached.Json;
+
+        string json = await GetModFiles(modId);
+        bool isError = false;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            isError = doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("error", out _);
+        }
+        catch { isError = true; }
+
+        if (!isError)
+            _modFilesCache[modId] = (DateTime.UtcNow, json);
+        return json;
     }
 
     public sealed class DownloadProgressOptions
@@ -442,7 +460,7 @@ public class NexusManager : IDisposable
         return 0;
     }
 
-    private sealed record ModFileCandidate(long FileId, string Version, long Uploaded, string FileName, int CategoryId);
+    private sealed record ModFileCandidate(long FileId, string Version, long Uploaded, string FileName, int CategoryId, string Name = "", string CategoryName = "");
 
     private static List<ModFileCandidate> ParseModFileCandidates(JsonElement filesArray)
     {
@@ -462,9 +480,13 @@ public class NexusManager : IDisposable
             if (file.TryGetProperty("file_name", out var fn)) fileName = fn.GetString() ?? "";
             else if (file.TryGetProperty("name", out var n)) fileName = n.GetString() ?? "";
             int categoryId = 0;
-            if (file.TryGetProperty("category_id", out var cat)) categoryId = cat.GetInt32();
+            if (file.TryGetProperty("category_id", out var cat) && cat.ValueKind == JsonValueKind.Number) categoryId = cat.GetInt32();
+            string displayName = "";
+            if (file.TryGetProperty("name", out var dn) && dn.ValueKind == JsonValueKind.String) displayName = dn.GetString() ?? "";
+            string categoryName = "";
+            if (file.TryGetProperty("category_name", out var cn) && cn.ValueKind == JsonValueKind.String) categoryName = cn.GetString() ?? "";
 
-            candidates.Add(new ModFileCandidate(fileId, version, uploaded, fileName, categoryId));
+            candidates.Add(new ModFileCandidate(fileId, version, uploaded, fileName, categoryId, displayName, categoryName));
         }
         return candidates;
     }
@@ -482,6 +504,101 @@ public class NexusManager : IDisposable
         var mainFiles = candidates.Where(c => c.CategoryId == 1).ToList();
         var pool = mainFiles.Count > 0 ? mainFiles : candidates;
         return pool.OrderByDescending(c => c.Uploaded).ThenByDescending(c => c.FileId).First();
+    }
+
+    private sealed record ModFileUpdateLink(long OldFileId, long NewFileId, long Uploaded);
+
+    private static Dictionary<long, List<ModFileUpdateLink>> ParseFileUpdates(JsonElement root)
+    {
+        var map = new Dictionary<long, List<ModFileUpdateLink>>();
+        if (root.ValueKind != JsonValueKind.Object) return map;
+        if (!root.TryGetProperty("file_updates", out var updates) || updates.ValueKind != JsonValueKind.Array) return map;
+
+        foreach (var u in updates.EnumerateArray())
+        {
+            if (!u.TryGetProperty("old_file_id", out var o) || o.ValueKind != JsonValueKind.Number) continue;
+            if (!u.TryGetProperty("new_file_id", out var n) || n.ValueKind != JsonValueKind.Number) continue;
+            long oldId = o.GetInt64();
+            long newId = n.GetInt64();
+            if (oldId <= 0 || newId <= 0 || oldId == newId) continue;
+            long uploaded = 0;
+            if (u.TryGetProperty("uploaded_timestamp", out var ts) && ts.ValueKind == JsonValueKind.Number) uploaded = ts.GetInt64();
+
+            if (!map.TryGetValue(oldId, out var list))
+            {
+                list = new List<ModFileUpdateLink>();
+                map[oldId] = list;
+            }
+            list.Add(new ModFileUpdateLink(oldId, newId, uploaded));
+        }
+        return map;
+    }
+
+    private static bool IsInactiveFileCategory(ModFileCandidate file)
+    {
+        if (file.CategoryId == 4 || file.CategoryId == 6 || file.CategoryId == 7) return true;
+        string name = (file.CategoryName ?? "").Trim();
+        return name.Equals("OLD_VERSION", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("ARCHIVED", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("DELETED", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static ModFileCandidate? ResolveUpdateTarget(
+        IReadOnlyList<ModFileCandidate> candidates,
+        Dictionary<long, List<ModFileUpdateLink>> fileUpdates,
+        long installedFileId,
+        out bool ambiguous)
+    {
+        ambiguous = false;
+        var byId = new Dictionary<long, ModFileCandidate>();
+        foreach (var c in candidates) byId[c.FileId] = c;
+
+        long current = installedFileId;
+        long lastListed = byId.ContainsKey(installedFileId) ? installedFileId : 0;
+        var visited = new HashSet<long> { current };
+        while (fileUpdates.TryGetValue(current, out var links) && links.Count > 0)
+        {
+            var next = links.OrderByDescending(l => l.Uploaded).ThenByDescending(l => l.NewFileId).First();
+            if (!visited.Add(next.NewFileId)) break;
+            current = next.NewFileId;
+            if (byId.ContainsKey(current)) lastListed = current;
+        }
+
+        if (lastListed > 0 && lastListed != installedFileId)
+            return byId[lastListed];
+
+        byId.TryGetValue(installedFileId, out var installed);
+        if (installed != null && !IsInactiveFileCategory(installed))
+            return installed;
+
+        var active = candidates.Where(c => !IsInactiveFileCategory(c)).ToList();
+
+        if (installed != null && !string.IsNullOrWhiteSpace(installed.Name))
+        {
+            var sameName = active
+                .Where(c => string.Equals(c.Name.Trim(), installed.Name.Trim(), StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(c => c.Uploaded).ThenByDescending(c => c.FileId)
+                .FirstOrDefault();
+            if (sameName != null) return sameName;
+        }
+
+        var mainFiles = active.Where(c => c.CategoryId == 1).ToList();
+        if (mainFiles.Count == 1) return mainFiles[0];
+
+        ambiguous = true;
+        return null;
+    }
+
+    private static (ModFileCandidate? Target, bool HasUpdate, bool Ambiguous) EvaluateFileUpdate(
+        IReadOnlyList<ModFileCandidate> candidates,
+        Dictionary<long, List<ModFileUpdateLink>> fileUpdates,
+        long installedFileId,
+        string? installedVersion)
+    {
+        var target = ResolveUpdateTarget(candidates, fileUpdates, installedFileId, out bool ambiguous);
+        if (target == null) return (null, false, ambiguous);
+        if (target.FileId != installedFileId) return (target, true, false);
+        return (target, IsNewerVersion(target.Version, installedVersion), false);
     }
 
     public static void OpenModInBrowser(long modId, long fileId = 0, bool triggerModManagerDownload = true)
@@ -529,6 +646,12 @@ public class NexusManager : IDisposable
                 return _cachedIsPremium ?? false;
             }
 
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                _logger("[NEXUS] Session is no longer authorized.");
+                return false;
+            }
+
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             var root = doc.RootElement;
             bool premium = ReadPremiumFlag(root);
@@ -555,6 +678,24 @@ public class NexusManager : IDisposable
             }
         }
         return false;
+    }
+
+    public async Task<bool> ValidateSessionAsync()
+    {
+        if (!IsAuthenticated) return false;
+
+        try
+        {
+            var response = await _client.GetAsync($"{BASE_URL}/users/validate.json");
+            if (response.IsSuccessStatusCode) return true;
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized) return false;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger($"[NEXUS] Session validation skipped (network): {ex.Message}");
+            return true;
+        }
     }
 
     public async void HandleNxmLink(string url)
@@ -922,10 +1063,9 @@ public class NexusManager : IDisposable
             using (var detailsDoc = JsonDocument.Parse(detailsJson))
             {
                 var root = detailsDoc.RootElement;
-                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _))
-                    return info;
+                bool detailsFailed = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _);
 
-                if (root.TryGetProperty("name", out var nameProp))
+                if (!detailsFailed && root.TryGetProperty("name", out var nameProp))
                     info.ModName = nameProp.GetString() ?? "";
                 if (root.TryGetProperty("author", out var authorProp))
                     info.Author = authorProp.GetString() ?? "";
@@ -1009,6 +1149,107 @@ public class NexusManager : IDisposable
         return info;
     }
 
+    public sealed class ModLinkResolveResult
+    {
+        public bool Ok { get; set; }
+        public string? Error { get; set; }
+        public long NexusModId { get; set; }
+        public long? NexusFileId { get; set; }
+        public string NexusFileVersion { get; set; } = "";
+        public string FileName { get; set; } = "";
+        public long? NexusFileUploaded { get; set; }
+        public string Url { get; set; } = "";
+        public bool HasUpdate { get; set; }
+    }
+
+    public async Task<ModLinkResolveResult> ResolveModLinkAsync(long nexusModId, long? currentFileId = null, string? currentVersion = null)
+    {
+        var result = new ModLinkResolveResult
+        {
+            NexusModId = nexusModId,
+            Url = $"https://www.nexusmods.com/{GAME_DOMAIN}/mods/{nexusModId}"
+        };
+
+        if (nexusModId <= 0)
+        {
+            result.Error = "Invalid Nexus mod ID";
+            return result;
+        }
+
+        try
+        {
+            string filesJson = await GetModFiles(nexusModId);
+            using var doc = JsonDocument.Parse(filesJson);
+            var root = doc.RootElement;
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var errProp))
+            {
+                result.Error = errProp.GetString() ?? "Files not found";
+                return result;
+            }
+
+            JsonElement filesArray;
+            if (root.ValueKind == JsonValueKind.Array)
+                filesArray = root;
+            else if (root.TryGetProperty("files", out var filesProp) && filesProp.ValueKind == JsonValueKind.Array)
+                filesArray = filesProp;
+            else
+            {
+                result.Error = "Unexpected files response";
+                return result;
+            }
+
+            var candidates = ParseModFileCandidates(filesArray);
+            if (candidates.Count == 0)
+            {
+                result.Error = "No files on Nexus";
+                return result;
+            }
+
+            ModFileCandidate? preferred;
+            if (currentFileId.HasValue && currentFileId.Value > 0)
+            {
+                var (target, hasUpdate, _) = EvaluateFileUpdate(candidates, ParseFileUpdates(root), currentFileId.Value, currentVersion);
+                if (target == null)
+                {
+                    result.Error = $"Couldn't match file ID {currentFileId.Value} to a current file on this mod. Check the file ID on the mod's Files tab.";
+                    return result;
+                }
+                preferred = target;
+                result.HasUpdate = hasUpdate;
+            }
+            else
+            {
+                var activeMains = candidates.Where(c => c.CategoryId == 1 && !IsInactiveFileCategory(c)).ToList();
+                if (activeMains.Count > 1)
+                {
+                    result.Error = "This mod has several main files. Enter the file ID of the one you installed, then fetch again.";
+                    return result;
+                }
+                preferred = SelectPreferredModFile(candidates);
+                if (preferred == null)
+                {
+                    result.Error = "No files on Nexus";
+                    return result;
+                }
+                result.HasUpdate = true;
+            }
+
+            result.Ok = true;
+            result.NexusFileId = preferred.FileId;
+            result.NexusFileVersion = preferred.Version ?? "";
+            result.FileName = preferred.FileName ?? "";
+            result.NexusFileUploaded = preferred.Uploaded > 0 ? preferred.Uploaded : null;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.Error = ex.Message;
+            _logger($"[NEXUS] ResolveModLink failed for {nexusModId}: {ex.Message}");
+            return result;
+        }
+    }
+
     public sealed class ModUpdateCheckResult
     {
         public string OriginalName { get; set; } = "";
@@ -1041,7 +1282,7 @@ public class NexusManager : IDisposable
 
         try
         {
-            string filesJson = await GetModFiles(nexusModId);
+            string filesJson = await GetModFilesCached(nexusModId);
             using var doc = JsonDocument.Parse(filesJson);
             var root = doc.RootElement;
 
@@ -1077,7 +1318,181 @@ public class NexusManager : IDisposable
                 return result;
             }
 
-            var latest = SelectPreferredModFile(candidates);
+            result.IsUnverifiedLink = false;
+
+            var fileUpdates = ParseFileUpdates(root);
+            var (target, hasUpdate, ambiguous) = EvaluateFileUpdate(candidates, fileUpdates, installedFileId.Value, installedVersion);
+            if (target == null)
+            {
+                if (ambiguous)
+                    _logger($"[NEXUS] Update check for mod {nexusModId} ({originalName}): installed file {installedFileId.Value} has no update chain and multiple main files exist; skipping.");
+                result.HasUpdate = false;
+                return result;
+            }
+
+            result.LatestFileId = target.FileId;
+            result.LatestVersion = target.Version;
+            result.LatestFileName = target.FileName;
+            result.LatestUploaded = target.Uploaded > 0 ? target.Uploaded : null;
+            result.HasUpdate = hasUpdate;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.Error = ex.Message;
+            return result;
+        }
+    }
+
+    public const long AppNexusModId = 3674;
+
+    public sealed class AppUpdateInfo
+    {
+        public bool LoggedIn { get; set; }
+        public bool Premium { get; set; }
+        public bool UpdateAvailable { get; set; }
+        public string CurrentVersion { get; set; } = "";
+        public string LatestVersion { get; set; } = "";
+        public long? LatestFileId { get; set; }
+        public string LatestFileName { get; set; } = "";
+        public string Changelog { get; set; } = "";
+        public string? Error { get; set; }
+    }
+
+    public sealed class AppPackageDownloadResult
+    {
+        public bool Ok { get; set; }
+        public bool NeedsBrowser { get; set; }
+        public string? LocalPath { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public static bool IsNewerVersion(string? latest, string? current)
+    {
+        if (!TryParseAppVersion(latest, out var remote)) return false;
+        if (!TryParseAppVersion(current, out var local)) return false;
+        return remote > local;
+    }
+
+    private static bool TryParseAppVersion(string? raw, out Version version)
+    {
+        version = new Version(0, 0);
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        var match = System.Text.RegularExpressions.Regex.Match(raw.Trim(), @"\d+\.\d+(?:\.\d+)?(?:\.\d+)?");
+        if (!match.Success) return false;
+        string text = match.Value;
+        if (text.Count(c => c == '.') == 1) text += ".0";
+        return Version.TryParse(text, out version!);
+    }
+
+    private static string ReadFileChangelog(JsonElement filesArray, long fileId)
+    {
+        foreach (var file in filesArray.EnumerateArray())
+        {
+            long id = 0;
+            if (file.TryGetProperty("file_id", out var fid) && fid.ValueKind == JsonValueKind.Number)
+                id = fid.GetInt64();
+            else if (file.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.Number)
+                id = idProp.GetInt64();
+            if (id != fileId) continue;
+
+            foreach (var name in new[] { "changelog_html", "changelog" })
+            {
+                if (!file.TryGetProperty(name, out var prop) || prop.ValueKind != JsonValueKind.String)
+                    continue;
+                string text = prop.GetString() ?? "";
+                if (!string.IsNullOrWhiteSpace(text)) return text.Trim();
+            }
+            return "";
+        }
+        return "";
+    }
+
+    private async Task<string> ReadVersionChangelogAsync(long modId, string version)
+    {
+        if (!IsAuthenticated || string.IsNullOrWhiteSpace(version)) return "";
+
+        try
+        {
+            string url = $"{BASE_URL}/games/{GAME_DOMAIN}/mods/{modId}/changelogs.json";
+            var response = await _client.GetAsync(url);
+            if (!response.IsSuccessStatusCode) return "";
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return "";
+
+            string wanted = version.Trim().TrimStart('v', 'V');
+            foreach (var entry in doc.RootElement.EnumerateObject())
+            {
+                string key = entry.Name.Trim().TrimStart('v', 'V');
+                if (!string.Equals(key, wanted, StringComparison.OrdinalIgnoreCase)) continue;
+                return FormatChangelogValue(entry.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger($"[APP-UPDATE] Changelog lookup failed: {ex.Message}");
+        }
+
+        return "";
+    }
+
+    private static string FormatChangelogValue(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+            return (value.GetString() ?? "").Trim();
+
+        if (value.ValueKind != JsonValueKind.Array) return "";
+
+        var lines = new List<string>();
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String) continue;
+            string line = (item.GetString() ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(line)) lines.Add(line);
+        }
+        return string.Join("\n", lines);
+    }
+
+    public async Task<AppUpdateInfo> CheckAppUpdateAsync(string currentVersion)
+    {
+        var result = new AppUpdateInfo
+        {
+            LoggedIn = IsAuthenticated,
+            CurrentVersion = currentVersion ?? ""
+        };
+
+        if (!IsAuthenticated)
+        {
+            result.Error = "not_logged_in";
+            return result;
+        }
+
+        try
+        {
+            result.Premium = await IsPremiumUserAsync();
+            string filesJson = await GetModFiles(AppNexusModId);
+            using var doc = JsonDocument.Parse(filesJson);
+            var root = doc.RootElement;
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var errProp))
+            {
+                result.Error = errProp.GetString() ?? "Files not found";
+                return result;
+            }
+
+            JsonElement filesArray;
+            if (root.ValueKind == JsonValueKind.Array)
+                filesArray = root;
+            else if (root.TryGetProperty("files", out var filesProp) && filesProp.ValueKind == JsonValueKind.Array)
+                filesArray = filesProp;
+            else
+            {
+                result.Error = "Unexpected files response";
+                return result;
+            }
+
+            var latest = SelectPreferredModFile(ParseModFileCandidates(filesArray));
             if (latest == null)
             {
                 result.Error = "No files on Nexus";
@@ -1085,40 +1500,114 @@ public class NexusManager : IDisposable
             }
 
             result.LatestFileId = latest.FileId;
-            result.LatestVersion = latest.Version;
-            result.LatestFileName = latest.FileName;
-            result.LatestUploaded = latest.Uploaded > 0 ? latest.Uploaded : null;
-
-            var remoteInstalled = candidates.FirstOrDefault(c => c.FileId == installedFileId.Value);
-            if (remoteInstalled == null)
-            {
-                result.IsUnverifiedLink = false;
-                result.HasUpdate = latest.FileId != installedFileId.Value;
-                return result;
-            }
-
-            result.IsUnverifiedLink = false;
-
-            long installedTs = installedUploaded.HasValue && installedUploaded.Value > 0
-                ? installedUploaded.Value
-                : remoteInstalled.Uploaded > 0 ? remoteInstalled.Uploaded : 0;
-
-            string latestVer = (latest.Version ?? "").Trim();
-            string localVer = (installedVersion ?? "").Trim();
-
-            bool versionChanged = !string.IsNullOrWhiteSpace(latestVer) &&
-                                  !string.IsNullOrWhiteSpace(localVer) &&
-                                  !string.Equals(latestVer, localVer, StringComparison.OrdinalIgnoreCase);
-
-            bool uploadNewer = latest.Uploaded > 0 &&
-                               installedTs > 0 &&
-                               latest.Uploaded > installedTs;
-
-            result.HasUpdate = versionChanged || uploadNewer;
+            result.LatestVersion = latest.Version ?? "";
+            result.LatestFileName = latest.FileName ?? "";
+            result.UpdateAvailable = IsNewerVersion(result.LatestVersion, result.CurrentVersion);
+            result.Changelog = ReadFileChangelog(filesArray, latest.FileId);
+            if (string.IsNullOrWhiteSpace(result.Changelog))
+                result.Changelog = await ReadVersionChangelogAsync(AppNexusModId, result.LatestVersion);
             return result;
         }
         catch (Exception ex)
         {
+            result.Error = ex.Message;
+            _logger($"[APP-UPDATE] Check failed: {ex.Message}");
+            return result;
+        }
+    }
+
+    public async Task<AppPackageDownloadResult> DownloadFileToAsync(
+        long modId,
+        long fileId,
+        string destPath,
+        Action<int>? onPercent = null,
+        CancellationToken cancellationToken = default,
+        string? nxmKey = null,
+        string? nxmExpires = null)
+    {
+        var result = new AppPackageDownloadResult();
+        bool hasNxmAuth = !string.IsNullOrEmpty(nxmKey) && !string.IsNullOrEmpty(nxmExpires);
+        if (!IsAuthenticated && !hasNxmAuth)
+        {
+            result.Error = "not_logged_in";
+            return result;
+        }
+
+        if (!hasNxmAuth && !await IsPremiumUserAsync())
+        {
+            result.NeedsBrowser = true;
+            result.Error = "premium";
+            return result;
+        }
+
+        try
+        {
+            string linkUrl = $"{BASE_URL}/games/{GAME_DOMAIN}/mods/{modId}/files/{fileId}/download_link.json";
+            if (hasNxmAuth)
+                linkUrl += $"?key={Uri.EscapeDataString(nxmKey!)}&expires={Uri.EscapeDataString(nxmExpires!)}";
+            var linkResponse = await _client.GetAsync(linkUrl, cancellationToken);
+            if (!linkResponse.IsSuccessStatusCode)
+            {
+                string errContent = await linkResponse.Content.ReadAsStringAsync(cancellationToken);
+                _logger($"[APP-UPDATE] Link request failed ({linkResponse.StatusCode}): {errContent}");
+                if (linkResponse.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    result.NeedsBrowser = true;
+                    result.Error = "premium";
+                    return result;
+                }
+
+                result.Error = $"Failed to retrieve download link. HTTP {linkResponse.StatusCode}";
+                return result;
+            }
+
+            string linkJson = await linkResponse.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(linkJson);
+            string? downloadUri = null;
+            if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+                downloadUri = doc.RootElement[0].GetProperty("URI").GetString();
+
+            if (string.IsNullOrWhiteSpace(downloadUri))
+            {
+                result.Error = "No valid download URI found.";
+                return result;
+            }
+
+            string? dir = Path.GetDirectoryName(destPath);
+            if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
+
+            using var response = await _client.GetAsync(downloadUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            long? contentLength = response.Content.Headers.ContentLength;
+            int lastReported = -1;
+
+            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var dest = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            byte[] buffer = new byte[81920];
+            long totalRead = 0;
+            int read;
+            while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                await dest.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                totalRead += read;
+                if (onPercent == null || !contentLength.HasValue || contentLength.Value <= 0) continue;
+                int percent = (int)Math.Min(100, (totalRead * 100L) / contentLength.Value);
+                if (percent != lastReported && (percent == 100 || percent - lastReported >= 5))
+                {
+                    lastReported = percent;
+                    onPercent(percent);
+                }
+            }
+
+            onPercent?.Invoke(100);
+            result.Ok = true;
+            result.LocalPath = destPath;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger($"[APP-UPDATE] Download failed: {ex.Message}");
+            try { if (File.Exists(destPath)) File.Delete(destPath); } catch { }
             result.Error = ex.Message;
             return result;
         }

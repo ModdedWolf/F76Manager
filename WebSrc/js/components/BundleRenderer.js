@@ -646,7 +646,7 @@ export const BundleRenderer = {
             return this.renderInternalPicker(manager, data);
         }
 
-        const formatLabel = window._t('bundle_format_general');
+        const formatLabel = window._t('bundle_format_auto');
         const canCreate = manager.canCreateBundle();
         const canSelectArchive = manager.canUseArchiveSelection();
         const canExtract = manager.canExtractSelection();
@@ -712,7 +712,8 @@ export const BundleRenderer = {
                             <label class="bundle-field-group">
                                 <span class="bundle-field-label">${window._t('bundle_format')}</span>
                                 <select id="bundle-format-select" class="bundle-field">
-                                    <option value="General" selected>${window._t('bundle_format_general')}</option>
+                                    <option value="Auto" selected>${window._t('bundle_format_auto')}</option>
+                                    <option value="General">${window._t('bundle_format_general')}</option>
                                     <option value="DDS">${window._t('bundle_format_dds')}</option>
                                 </select>
                             </label>

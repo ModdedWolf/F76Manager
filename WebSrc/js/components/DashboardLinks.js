@@ -6,8 +6,8 @@ const MAX_LINKS = 4;
 const END_TARGET = '__end__';
 
 const KNOWN_FAVICONS = {
-    'nukacrypt.com': 'https://nukacrypt.com/static/img/sfcrypt.png',
-    'nukaknights.com': 'https://nukaknights.com/cms/templates/nukaknights/android-chrome-192x192.png'
+    'nukacrypt.com': 'assets/nukacrypt.png',
+    'nukaknights.com': 'assets/nukaknights.png'
 };
 
 const DEFAULT_LINKS = [
@@ -55,13 +55,8 @@ export function faviconCandidates(pageUrl) {
     try {
         const parsed = new URL(pageUrl);
         const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-        const urls = [];
-        if (KNOWN_FAVICONS[host]) urls.push(KNOWN_FAVICONS[host]);
-        urls.push(`${parsed.origin}/apple-touch-icon.png`);
-        urls.push(`${parsed.origin}/android-chrome-192x192.png`);
-        urls.push(`https://www.google.com/s2/favicons?sz=128&domain=${encodeURIComponent(host)}`);
-        urls.push(`${parsed.origin}/favicon.ico`);
-        return urls.filter((url, index) => urls.indexOf(url) === index);
+        const local = KNOWN_FAVICONS[host];
+        return local ? [local] : [];
     } catch {
         return [];
     }
@@ -213,14 +208,18 @@ export class DashboardLinks {
         const initial = customIcon || candidates[0] || '';
         const letter = escapeHtml((name.trim().charAt(0) || '?').toUpperCase());
         const iconTitle = escapeAttr(label('user_links_icon', 'Choose icon'));
+        const iconMarkup = initial
+            ? `<img class="user-link-favicon" alt="" draggable="false" src="${escapeAttr(initial)}" ${customIcon ? 'data-custom="1"' : `data-candidates="${escapeAttr(candidates.join('|'))}" data-candidate-index="0"`}>
+                    <span class="user-link-favicon-letter" hidden>${letter}</span>`
+            : `<img class="user-link-favicon" alt="" draggable="false" hidden>
+                    <span class="user-link-favicon-letter">${letter}</span>`;
         return `
             <div class="user-link-slot" data-id="${escapeAttr(link.id)}" draggable="true" title="${escapeAttr(label('user_links_reorder', 'Drag to reorder'))}">
                 <span class="user-link-grip">
                     <i data-lucide="grip-vertical"></i>
                 </span>
                 <button type="button" class="user-link-favicon-wrap" data-edit-id="${escapeAttr(link.id)}" title="${iconTitle}">
-                    <img class="user-link-favicon" alt="" draggable="false" src="${escapeAttr(initial)}" ${customIcon ? 'data-custom="1"' : `data-candidates="${escapeAttr(candidates.join('|'))}" data-candidate-index="0"`}>
-                    <span class="user-link-favicon-letter" hidden>${letter}</span>
+                    ${iconMarkup}
                 </button>
                 <a class="external-link user-link-copy" draggable="false" href="${safeUrl}" data-url="${safeUrl}" title="${safeUrl}">
                     <span class="user-link-name">${safeName}</span>

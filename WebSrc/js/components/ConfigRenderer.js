@@ -1,11 +1,24 @@
 import { escapeAttr, escapeHtml, escapeJsSingleQuoted } from '../utils/htmlSafe.js';
 
 export const ConfigRenderer = {
+    _isProtectedCoreIni(originalName) {
+        const n = String(originalName || '').replace(/\\/g, '/');
+        if (/^CoreIni\//i.test(n)) return true;
+        const base = n.split('/').pop() || '';
+        if (/^F76-Manager-AddTo(Custom|Prefs|Fallout76)\.ini$/i.test(base)) return true;
+        if (/^F76AddTo(Custom|Prefs|Fallout76)\.ini$/i.test(base)) return true;
+        return /^(Fallout76|Project76)(Custom|Prefs)\.ini$/i.test(base);
+    },
+
     render(manager, data) {
         const mods = data?.mods ?? [];
         let filtered = mods.filter(m => {
             const original = String(m?.originalName || '').toLowerCase();
-            return original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt');
+            if (!(original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt') || original.endsWith('.toml'))) return false;
+            if (ConfigRenderer._isProtectedCoreIni(m.originalName)) return true;
+            const mgr = window.app?.modGroups;
+            if (mgr && !mgr.shouldShowMod(m.originalName)) return false;
+            return true;
         });
 
         const tConfigPlaceholder = String(window._t?.('search_config_placeholder') ?? '');
@@ -57,6 +70,10 @@ export const ConfigRenderer = {
             return 0;
         });
 
+        const activePreset = window.app?.modGroups?.getActiveName?.()
+            ?? data?.activeModPreset
+            ?? 'Default';
+
         return `
             <div class="mods-page config-page animate-fade">
                 <div class="mods-toolbar config-toolbar">
@@ -67,6 +84,10 @@ export const ConfigRenderer = {
                             <button type="button" class="search-clear" id="config-search-clear" title="${escapeAttr(window._t('clear_search'))}" aria-label="${escapeAttr(window._t('clear_search'))}">
                                 <i data-lucide="x"></i>
                             </button>
+                        </div>
+
+                        <div class="preset-active-label" title="${escapeAttr((window._t?.('active_mod_preset', activePreset)) || activePreset)}">
+                            ${escapeHtml(activePreset)}
                         </div>
                     </div>
                     <div class="tool-buttons mods-toolbar-actions">
@@ -83,6 +104,7 @@ export const ConfigRenderer = {
                                     <i data-lucide="archive"></i>
                                     <span>${escapeHtml(window._t?.('backup_configs') ?? 'Backup Configs')}</span>
                                 </button>
+                                <div class="mods-actions-divider" role="separator"></div>
                                 <button type="button" class="mods-actions-item" id="config-action-transfer-to-other">
                                     <i data-lucide="arrow-right-left"></i>
                                     <span>${escapeHtml(window._t?.('transfer_configs_to_other') ?? 'Copy Configs To Other Platform')}</span>
@@ -91,6 +113,7 @@ export const ConfigRenderer = {
                                     <i data-lucide="arrow-right-left"></i>
                                     <span>${escapeHtml(window._t?.('transfer_configs_from_other') ?? 'Import Configs From Other Platform')}</span>
                                 </button>
+                                <div class="mods-actions-divider" role="separator"></div>
                                 <button type="button" class="mods-actions-item" id="config-action-badge-color">
                                     <i data-lucide="palette"></i>
                                     <span>${escapeHtml(window._t?.('edit_badge_color') ?? 'Edit Badge Color')}</span>
@@ -138,9 +161,17 @@ export const ConfigRenderer = {
         const origPath = mod.originalName || '';
         const originalName = mod.originalName || '';
         const isCoreIni = /^CoreIni\//i.test(originalName);
-        const displayName = (mod.name || origPath || '')
-            .replace(/^Disabled\//, '')
-            .replace(/^CoreIni\//i, '');
+        const displayName = (() => {
+            const raw = String(mod.name || origPath || '')
+                .replace(/^Disabled\//i, '')
+                .replace(/^CoreIni\//i, '');
+            const pathOnly = String(origPath || '')
+                .replace(/^Disabled\//i, '')
+                .replace(/^CoreIni\//i, '');
+            if (pathOnly.includes('/') && !/^CoreIni\//i.test(originalName))
+                return pathOnly;
+            return raw;
+        })();
         const searchText = (displayName + ' ' + (mod.originalName || '')).toLowerCase();
         const safeOriginalNameAttr = escapeAttr(originalName);
         const safeDisplayName = escapeHtml(displayName);
@@ -176,7 +207,7 @@ export const ConfigRenderer = {
                             <i data-lucide="edit-3"></i>
                         </button>
                         ${isCoreIni ? '' : `
-                            <button class="btn-icon btn-delete-mod" title="Delete" data-name="${safeOriginalNameAttr}" onclick="window.nuclearDelete(this); event.stopPropagation();" onpointerdown="event.stopPropagation();" onmousedown="event.stopPropagation();" style="position: relative; z-index: 50; color: #ef4444;">
+                            <button class="btn-icon btn-delete-mod" title="Delete" data-name="${safeOriginalNameAttr}" onclick="window.nuclearDelete(this); event.stopPropagation();" onpointerdown="event.stopPropagation();" onmousedown="event.stopPropagation();" style="position: relative; z-index: 50; color: var(--danger-red);">
                                 <i data-lucide="trash-2"></i>
                             </button>
                         `}
@@ -189,7 +220,7 @@ export const ConfigRenderer = {
     renderEmpty() {
         return `
             <div class="empty-state-container polished" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 16px; text-align: center; padding: 48px;">
-                <div class="empty-state-icon" style="width: 80px; height: 80px; background: rgba(184, 197, 164, 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
+                <div class="empty-state-icon" style="width: 80px; height: 80px; background: rgba(var(--primary-rgb), 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
                     <i data-lucide="file-text" style="width: 40px; height: 40px; color: var(--primary-green);"></i>
                 </div>
                 <h3>No config files found</h3>

@@ -1,13 +1,17 @@
 .notification-container {
     position: fixed;
-    top: 20px;
+    top: auto;
+    bottom: 24px;
     right: 20px;
     left: auto;
     width: auto;
     min-width: 300px;
     max-width: 400px;
+    max-height: min(40vh, 320px);
+    overflow-x: hidden;
+    overflow-y: auto;
     display: flex;
-    flex-direction: column;
+    flex-direction: column-reverse;
     gap: 12px;
     z-index: 100000;
     pointer-events: none;
@@ -55,9 +59,9 @@
 
 .status-banner.error {
     background-color: rgba(255, 0, 0, 0.2);
-    border-color: #ff4d4d;
-    color: #ff4d4d;
-    border-left: 5px solid #ff0000;
+    border-color: var(--danger-red);
+    color: var(--danger-red);
+    border-left: 5px solid var(--danger-red);
 }
 
 .status-banner.info {
@@ -199,6 +203,11 @@ h3,
     );
 }
 
+.logo[data-sharp="1"] {
+    object-fit: fill;
+    object-position: 0 0;
+}
+
 .sidebar.collapsed .logo-container {
     padding-left: 0;
 }
@@ -206,6 +215,7 @@ h3,
 .sidebar.collapsed .logo {
     left: 50%;
     margin-left: calc(var(--logo-collapsed-margin, -22px) + var(--logo-collapsed-offset-x, 0px));
+    margin-left: round(calc(var(--logo-collapsed-margin, -22px) + var(--logo-collapsed-offset-x, 0px)), 1px);
     transform: scale(var(--logo-collapsed-scale, var(--logo-scale, 1)));
     transform-origin: center bottom;
 }
@@ -297,7 +307,7 @@ h3,
 
 .endorsement-item:hover {
     opacity: 1;
-    color: #ff5252;
+    color: var(--danger-red);
     background: rgba(255, 82, 82, 0.1);
 }
 
@@ -307,7 +317,7 @@ h3,
 
 .endorsement-item:hover .heart-icon {
     transform: scale(1.2);
-    fill: #ff5252;
+    fill: var(--danger-red);
 }
 
 .endorsement-later {
@@ -434,8 +444,8 @@ h3,
     overflow: hidden;
 }
 
-.content-area .section-content,
-.content-area .section-content * {
+.content-area:not(.section-entering) .section-content,
+.content-area:not(.section-entering) .section-content * {
     animation: none !important;
 }
 
@@ -470,6 +480,34 @@ h3,
     align-items: center;
     gap: 16px;
     align-self: stretch;
+}
+
+.kofi-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+.kofi-link[hidden] {
+    display: none !important;
+}
+
+.kofi-link img {
+    height: 32px;
+    width: auto;
+    display: block;
+    pointer-events: none;
+}
+
+.kofi-link:hover {
+    background: var(--bg-surface-light);
 }
 
 .version-badge {
@@ -514,7 +552,6 @@ h3,
     animation: platformPulseXbox 3s ease-in-out infinite;
 }
 
-/* Slow pulsing glow: blue on Steam, green on Xbox. */
 @keyframes platformPulseSteam {
     0%, 100% { box-shadow: 0 0 0 0 rgba(102, 192, 244, 0); }
     50% { box-shadow: 0 0 12px 2px rgba(102, 192, 244, 0.7); }
@@ -525,7 +562,14 @@ h3,
     50% { box-shadow: 0 0 12px 2px rgba(16, 197, 12, 0.7); }
 }
 
-/* Setting: disable the platform badge pulsing glow (Steam/Xbox only). */
+body:not(.no-platform-glow) .platform-badge.steam {
+    animation: platformPulseSteam 3s ease-in-out infinite !important;
+}
+
+body:not(.no-platform-glow) .platform-badge.xbox {
+    animation: platformPulseXbox 3s ease-in-out infinite !important;
+}
+
 .no-platform-glow .platform-badge.steam,
 .no-platform-glow .platform-badge.xbox {
     animation: none;
@@ -559,7 +603,6 @@ h3,
 .settings-page,
 .tweaks-page,
 .profiles-page,
-.logs-page,
 .bundle-wizard.workspace-view {
     flex: 1;
     display: flex;
@@ -658,7 +701,7 @@ h3,
 }
 
 .conflict-modal-title i {
-    color: #ff5252;
+    color: var(--danger-red);
     width: 28px;
     height: 28px;
     filter: drop-shadow(0 0 10px rgba(255, 82, 82, 0.4));
@@ -758,7 +801,7 @@ h3,
 }
 
 .btn-popup.primary {
-    background: #ff5252;
+    background: var(--danger-red);
     color: #fff;
     border: none;
     box-shadow: 0 8px 24px rgba(255, 82, 82, 0.3);
@@ -988,11 +1031,22 @@ h3,
     gap: 16px;
 }
 
+#confirm-modal.modal-overlay:not(.active) {
+    pointer-events: none !important;
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+}
+
 #confirm-modal.modal-overlay.active {
     z-index: 9999;
     background: rgba(0, 0, 0, 0.75);
     backdrop-filter: blur(8px);
     padding: 40px;
+    pointer-events: auto;
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
 }
 
 #confirm-modal .endorsement-modal-content {
@@ -1012,6 +1066,43 @@ h3,
     background: rgba(var(--primary-rgb), 0.08);
     padding: 2px 8px;
     border-radius: 4px;
+}
+
+#confirm-modal .confirm-prompt-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+#confirm-modal .confirm-prompt-wrap[hidden] {
+    display: none !important;
+}
+
+#confirm-modal .confirm-prompt-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+#confirm-modal .confirm-prompt-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(var(--primary-rgb), 0.2);
+    background: rgba(0, 0, 0, 0.45);
+    color: var(--text-main);
+    font-size: 0.95rem;
+    font-weight: 600;
+    outline: none;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.25);
+}
+
+#confirm-modal .confirm-prompt-input:focus {
+    border-color: var(--primary-green);
+    box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.25);
+}
     border: 1px solid rgba(var(--primary-rgb), 0.15);
     word-break: break-all;
 }

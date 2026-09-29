@@ -20,7 +20,7 @@
 }
 
 .log-line.error {
-    color: #ff8a80;
+    color: var(--danger-red);
 }
 
 .log-ts {
@@ -61,15 +61,15 @@
 .endorsement-widget {
     margin: 20px 16px;
     padding: 1px;
-    background: linear-gradient(135deg, rgba(184, 197, 164, 0.2) 0%, transparent 100%);
+    background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.2) 0%, transparent 100%);
     border-radius: 12px;
     animation: fadeIn 0.5s ease-out;
 }
 
 .endorsement-card {
-    background: rgba(20, 20, 20, 0.6);
+    background: color-mix(in srgb, var(--bg-surface) 60%, transparent);
     backdrop-filter: blur(10px);
-    border: 1px solid rgba(184, 197, 164, 0.1);
+    border: 1px solid rgba(var(--primary-rgb), 0.1);
     border-radius: 11px;
     padding: 16px;
     display: flex;
@@ -123,13 +123,13 @@
     background: var(--primary-green);
     color: #000;
     border: none;
-    box-shadow: 0 4px 12px rgba(184, 197, 164, 0.2);
+    box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.2);
 }
 
 .endorse-btn.main:hover {
     transform: translateY(-1px);
     filter: brightness(1.1);
-    box-shadow: 0 6px 15px rgba(184, 197, 164, 0.3);
+    box-shadow: 0 6px 15px rgba(var(--primary-rgb), 0.3);
 }
 
 .endorse-btn.ghost {
@@ -163,8 +163,8 @@
     gap: 8px;
     padding: 0 20px;
     height: 38px;
-    background: rgba(184, 197, 164, 0.08);
-    border: 2px dashed rgba(184, 197, 164, 0.4);
+    background: rgba(var(--primary-rgb), 0.08);
+    border: 2px dashed rgba(var(--primary-rgb), 0.4);
     border-radius: 8px;
     color: var(--primary-green);
     font-size: 0.85rem;
@@ -174,14 +174,14 @@
 }
 
 .drop-zone-box:hover {
-    background: rgba(184, 197, 164, 0.15);
+    background: rgba(var(--primary-rgb), 0.15);
     border-color: var(--primary-green);
 }
 
 .drop-zone-box.drag-over {
-    background: rgba(184, 197, 164, 0.25);
+    background: rgba(var(--primary-rgb), 0.25);
     border-color: var(--primary-green);
-    box-shadow: 0 0 20px rgba(184, 197, 164, 0.3);
+    box-shadow: 0 0 20px rgba(var(--primary-rgb), 0.3);
     transform: scale(1.02);
 }
 
@@ -191,9 +191,9 @@
 }
 
 .mods-page.drag-over {
-    background: rgba(184, 197, 164, 0.03) !important;
-    box-shadow: inset 0 0 40px rgba(184, 197, 164, 0.1) !important;
-    outline: 2px dashed rgba(184, 197, 164, 0.3);
+    background: rgba(var(--primary-rgb), 0.03) !important;
+    box-shadow: inset 0 0 40px rgba(var(--primary-rgb), 0.1) !important;
+    outline: 2px dashed rgba(var(--primary-rgb), 0.3);
     outline-offset: -10px;
     border-radius: 12px;
 }

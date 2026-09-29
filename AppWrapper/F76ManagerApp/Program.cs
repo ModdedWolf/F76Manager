@@ -1,7 +1,9 @@
+// Modded Wolf Was Here!!
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Diagnostics;
+using Microsoft.Web.WebView2.Core;
 
 namespace F76ManagerApp;
 
@@ -27,24 +29,25 @@ static class Program
 
         if (!createdNew)
         {
-            try {
-                using (var client = new System.IO.Pipes.NamedPipeClientStream(".", "F76ManagerPipe", System.IO.Pipes.PipeDirection.Out))
+            string message = args != null && args.Length > 0 && args[0].StartsWith("nxm://") ? args[0] : "SHOW";
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (true)
+            {
+                try
                 {
-                    client.Connect(1000);
-                    using (var writer = new StreamWriter(client))
-                    {
-                        if (args != null && args.Length > 0 && args[0].StartsWith("nxm://"))
-                        {
-                            writer.Write(args[0]);
-                        }
-                        else
-                        {
-                            writer.Write("SHOW");
-                        }
-                        writer.Flush();
-                    }
+                    using var client = new System.IO.Pipes.NamedPipeClientStream(".", "F76ManagerPipe", System.IO.Pipes.PipeDirection.Out);
+                    client.Connect(2000);
+                    using var writer = new StreamWriter(client);
+                    writer.Write(message);
+                    writer.Flush();
+                    break;
                 }
-            } catch { }
+                catch
+                {
+                    if (DateTime.UtcNow >= deadline) break;
+                    Thread.Sleep(250);
+                }
+            }
 
             Process current = Process.GetCurrentProcess();
             foreach (Process process in Process.GetProcessesByName(current.ProcessName))
@@ -66,7 +69,11 @@ static class Program
             return;
         }
 
+        StartupTrace.BeginSession(Form1.CurrentVersion);
+        StartupTrace.Mark("Main: single-instance mutex acquired");
+
         ApplicationConfiguration.Initialize();
+        StartupTrace.Mark("Main: ApplicationConfiguration.Initialize done");
         
         Application.ApplicationExit += (s, e) => {
             if (_mutex != null) {
@@ -76,12 +83,26 @@ static class Program
             }
         };
 
-        var form = new Form1();
+        var webViewEnvironment = BeginPrewarmWebViewEnvironment();
+        StartupTrace.Mark("Main: WebView2 environment prewarm started");
+        var form = new Form1(webViewEnvironment);
+        StartupTrace.Mark("Main: Form1 constructed");
         if (args != null && args.Length > 0 && args[0].StartsWith("nxm://"))
         {
              form.InitialNxmLink = args[0];
         }
 
         Application.Run(form);
-    }    
+    }
+
+    private static Task<CoreWebView2Environment> BeginPrewarmWebViewEnvironment()
+    {
+        try
+        {
+            Directory.CreateDirectory(Form1.GetDefaultWebViewUserDataFolder());
+        }
+        catch { }
+
+        return CoreWebView2Environment.CreateAsync(null, Form1.GetDefaultWebViewUserDataFolder(), null);
+    }
 }

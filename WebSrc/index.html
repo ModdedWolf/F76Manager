@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="app-booting">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fallout 76 Manager</title>
+    <style>.app-booting .top-bar-right { visibility: hidden; }</style>
     <script src="js/user-themes-boot.js"></script>
     <script>
         (function () {
@@ -47,6 +48,7 @@
 </head>
 
 <body oncontextmenu="return false">
+    <script>if (window.__F76_BOOT_UI_ANIMATIONS === false) document.body.classList.add('no-animations');</script>
     <script>
         if (window.f76_ipc) {
             window.chrome = window.chrome || {};
@@ -129,6 +131,11 @@
                     <i data-lucide="settings"></i>
                     <span class="nav-label">Settings</span>
                 </a>
+                <a href="#update" class="nav-item" data-section="update">
+                    <i data-lucide="download"></i>
+                    <span class="nav-label">Update</span>
+                    <span id="update-nav-badge" class="update-nav-badge" hidden>New</span>
+                </a>
 
                 <div id="endorsement-container" class="endorsement-container hidden">
                     <a href="#" class="nav-item endorsement-item" id="endorsement-nav-item">
@@ -149,16 +156,15 @@
                 </div>
 
                 <div class="top-bar-right">
+                    <button type="button" id="kofi-link" class="kofi-link" title="Ko-fi" aria-label="Ko-fi">
+                        <img src="assets/kofi.png" alt="">
+                    </button>
                     <div id="platform-toggle" class="platform-badge steam" style="cursor: pointer;">
                         <i data-lucide="gamepad-2"></i>
                         <span>Steam</span>
                     </div>
                     <div class="profile-selector">
-                        <select id="profile-dropdown">
-                            <option value="default">Default Profile</option>
-                            <option value="test">Testing</option>
-                            <option value="ultra">Ultra PC</option>
-                        </select>
+                        <select id="profile-dropdown"></select>
                     </div>
                 </div>
             </header>
@@ -183,6 +189,10 @@
             </div>
             <div class="endorsement-modal-body">
                 <p class="endorsement-modal-desc" id="confirm-message">Are you sure?</p>
+                <div id="confirm-prompt-wrap" class="confirm-prompt-wrap" hidden>
+                    <label id="confirm-prompt-label" class="confirm-prompt-label" for="confirm-prompt-input"></label>
+                    <input type="text" id="confirm-prompt-input" class="confirm-prompt-input" autocomplete="off" spellcheck="false">
+                </div>
             </div>
             <div class="endorsement-modal-footer">
                 <button type="button" class="btn-popup secondary" id="confirm-cancel">Cancel</button>
@@ -194,7 +204,7 @@
     
     <script src="js/components/webview2-drag-polyfill.js"></script>
 
-    <script type="module" src="js/main.js?v=X.X.X"></script>
+    <script src="js/app.bundle.js?v=X.X.X"></script>
     <script>
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             try { window.lucide.createIcons(); } catch (_) { }

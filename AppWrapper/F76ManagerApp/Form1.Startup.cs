@@ -48,6 +48,23 @@ public partial class Form1
 
         TryApplySavedWindowBounds();
 
+        _themePackageLoader = new ThemePackageLoader(LogActivity, LogError);
+        _themesLoadTask = Task.Run(() =>
+        {
+            try
+            {
+                _themePackageLoader.Reload();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[THEMES] Early load failed: {ex.Message}");
+            }
+            finally
+            {
+                _themesReady = true;
+            }
+        });
+
         PrepareWebViewShell();
 
 
@@ -96,6 +113,7 @@ public partial class Form1
 
         if (string.IsNullOrEmpty(InitialNxmLink)) return;
 
+        LogActivity("[NEXUS] App launched from an NXM link; waiting for startup to finish.");
 
 
         while (!_applicationReady && !IsDisposed)
@@ -128,11 +146,15 @@ public partial class Form1
 
         {
 
+            StartupTrace.Mark("Form1.Load fired (window handle created)");
+
             await Task.Yield();
 
 
 
             await InitializeWebViewFromAttemptList(startIndex: 0).ConfigureAwait(true);
+
+            StartupTrace.Mark("WebView2 initialized + navigation started");
 
 
 
@@ -200,13 +222,39 @@ public partial class Form1
 
         _applicationReady = true;
 
+        StartupTrace.Mark("Application ready (essentials loaded)");
+
+        try
+        {
+            if (logsPopoutOpen)
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (webView?.CoreWebView2 != null)
+                        TryRestoreLogsPopout();
+                    else
+                    {
+                        BeginInvoke(new Action(TryRestoreLogsPopout));
+                    }
+                }));
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[LOGS] Schedule restore failed: {ex.Message}");
+        }
+
         _modListWarmTask = Task.Run(() =>
 
         {
 
+            StartupTrace.Mark("GetModsList warm: start (background)");
+
             try { _modManager.GetModsList(); }
 
             catch (Exception ex) { LogError($"[INIT] Mod list warm failed: {ex.Message}"); }
+
+            StartupTrace.Mark("GetModsList warm: done");
 
         });
 
@@ -356,6 +404,8 @@ public partial class Form1
 
                 catch (Exception ex) { LogError($"[INIT] Background dashboard refresh failed: {ex.Message}"); }
 
+                StartupTrace.Mark("Hydration: full mod list UPDATE_DATA sent");
+
             });
 
         });
@@ -368,15 +418,23 @@ public partial class Form1
 
     {
 
+        StartupTrace.Mark("Essentials: start");
+
         _configManager = new GameConfigManager(LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)));
 
         _modManager = new ModManager(_configManager, LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)));
 
         _conflictManager = new ConflictManager(LogActivity);
 
-        _themePackageLoader = new ThemePackageLoader(LogActivity, LogError);
-
-        Task.Run(() => { try { _themePackageLoader.Reload(); } catch { } });
+        try
+        {
+            await _themesLoadTask.ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            LogError($"[THEMES] Wait for early load failed: {ex.Message}");
+        }
+        _themesReady = true;
 
         _platformManager = new PlatformManager();
 
@@ -436,17 +494,29 @@ public partial class Form1
 
 
 
+        StartupTrace.Mark("Essentials: managers constructed");
+
         await LoadSettingsAsync().ConfigureAwait(true);
 
-
+        StartupTrace.Mark("Essentials: settings loaded");
 
         ApplyDefaultPathsIfEmpty();
 
+        StartupTrace.Mark("Essentials: default paths resolved");
+
         LoadProfiles();
+
+        StartupTrace.Mark("Essentials: profiles loaded");
 
         SyncAppPaths(quick: true);
 
+        StartupTrace.Mark("Essentials: SyncAppPaths(quick) done");
+
+        await RunVirtualModModeStartupSelfHealAsync().ConfigureAwait(true);
+
         RestoreNexusSession();
+
+        StartupTrace.Mark("Essentials: Nexus session restored");
 
 
 
@@ -455,30 +525,53 @@ public partial class Form1
 
 
         try
-
         {
-
-            int darkMode = 1;
-
-            DwmSetWindowAttribute(this.Handle, 20, ref darkMode, sizeof(int));
-
+            ApplyWindowChromeFromTheme(uiTheme);
         }
-
         catch (Exception ex)
-
         {
-
-            Debug.WriteLine($"[INIT] Failed to apply dark mode window attribute: {ex.Message}");
-
+            Debug.WriteLine($"[INIT] Failed to apply window chrome: {ex.Message}");
         }
-
-
 
         Application.AddMessageFilter(this);
 
     }
 
 
+
+    private async Task RunVirtualModModeStartupSelfHealAsync()
+    {
+        try
+        {
+            if (!virtualModMode && !_modManager.HasStagedFiles()) return;
+
+            if (IsGameRunning() || (virtualModMode && _modManager.HasPendingManagedArtifacts()))
+            {
+                LogActivity("[STARTUP] VMM self-heal skipped (game running or runtime session pending).");
+                return;
+            }
+
+            if (virtualModMode)
+            {
+                int moved = await Task.Run(() => _modManager.MoveLiveModsIntoStaging()).ConfigureAwait(true);
+                if (moved > 0)
+                    LogActivity($"[STARTUP] VMM self-heal moved {moved} leftover live file(s) into staging.");
+            }
+            else
+            {
+                int moved = await Task.Run(() => _modManager.MoveStagedModsToLive()).ConfigureAwait(true);
+                if (moved > 0)
+                {
+                    await Task.Run(() => _modManager.RedeployDirect()).ConfigureAwait(true);
+                    LogActivity($"[STARTUP] Direct-mode self-heal moved {moved} staged file(s) back to the game and redeployed.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"[STARTUP] VMM self-heal failed: {ex.Message}");
+        }
+    }
 
     private void InitializeStartupEssentials()
 
@@ -531,6 +624,8 @@ public partial class Form1
                     EnsurePipboyPrefsIniScrubMigration();
 
                     EnsureGameIntegrityRepairMigration();
+
+                    EnsureLooseConfigDeployRepairMigration();
 
                     EnsureAllPrefsIniWritable();
 

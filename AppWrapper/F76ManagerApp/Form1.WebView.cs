@@ -23,12 +23,14 @@ public partial class Form1
 
     private List<WebViewAttempt> BuildWebViewAttempts()
     {
+        var cacheRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Cache_v2");
         var tempRoot = Path.Combine(Path.GetTempPath(), "F76Manager_WebView2");
+        try { Directory.CreateDirectory(cacheRoot); } catch { }
         try { Directory.CreateDirectory(tempRoot); } catch { }
 
         return new List<WebViewAttempt>
         {
-            new WebViewAttempt("default", Path.Combine(tempRoot, "profile_default"), null),
+            new WebViewAttempt("default", Path.Combine(cacheRoot, "profile_default"), null),
 
             new WebViewAttempt("disable_gpu", Path.Combine(tempRoot, "profile_disable_gpu"), "--disable-gpu --disable-gpu-compositing"),
 
@@ -40,23 +42,49 @@ public partial class Form1
         };
     }
 
-    private async Task InitializeWebViewWithAttempt(WebViewAttempt attempt)
+    private async Task<CoreWebView2Environment> CreateWebViewEnvironmentAsync(WebViewAttempt attempt)
     {
-        webView = new WebView2();
-        webView.Dock = DockStyle.Fill;
-        this.Controls.Add(webView);
-
-        this.Text = "Fallout 76 Manager";
-
         CoreWebView2EnvironmentOptions? options = null;
         if (!string.IsNullOrWhiteSpace(attempt.BrowserArgs))
-        {
             options = new CoreWebView2EnvironmentOptions(attempt.BrowserArgs);
+
+        if (attempt.Name == "default" && options == null && _prewarmedWebViewEnvironment != null)
+        {
+            try
+            {
+                return await _prewarmedWebViewEnvironment.ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                try { LogActivity($"[WEBVIEW] Prewarmed environment failed, creating fresh: {ex.Message}"); } catch { }
+            }
         }
-        var env = await CoreWebView2Environment.CreateAsync(null, attempt.UserDataFolder, options);
-        await webView.EnsureCoreWebView2Async(env);
+
+        return await CoreWebView2Environment.CreateAsync(null, attempt.UserDataFolder, options);
+    }
+
+    private async Task InitializeWebViewWithAttempt(WebViewAttempt attempt)
+    {
+        PrepareWebViewShell();
+        this.Text = "Fallout 76 Manager";
+
+        var env = await CreateWebViewEnvironmentAsync(attempt);
+        StartupTrace.Mark($"WebView2: environment ready ({attempt.Name})");
+        await webView!.EnsureCoreWebView2Async(env);
+        StartupTrace.Mark("WebView2: CoreWebView2 ready");
         try { LogActivity("[WEBVIEW] CoreWebView2 initialized."); } catch { }
         try { LogActivity($"[WEBVIEW] Attempt={attempt.Name} UserDataFolder={attempt.UserDataFolder} Args={attempt.BrowserArgs}"); } catch { }
+
+        if (!_webViewHandlersAttached)
+        {
+            AttachWebViewCoreHandlersAndNavigate();
+            _webViewHandlersAttached = true;
+        }
+    }
+
+    private void AttachWebViewCoreHandlersAndNavigate()
+    {
+        if (webView?.CoreWebView2 == null) return;
 
         webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -67,6 +95,7 @@ public partial class Form1
         };
         webView.CoreWebView2.DOMContentLoaded += (s, e) =>
         {
+            StartupTrace.Mark("WebView2: DOMContentLoaded");
             try { LogActivity("[WEBVIEW] DOMContentLoaded."); } catch { }
         };
 
@@ -108,6 +137,7 @@ public partial class Form1
                     this.Invoke(() =>
                     {
                         try { if (webView != null) { this.Controls.Remove(webView); webView.Dispose(); } } catch { }
+                        _webViewHandlersAttached = false;
                         _ = InitializeWebViewFromAttemptList(startIndex: 1);
                     });
                 }
@@ -182,6 +212,7 @@ public partial class Form1
                     this.Invoke(() =>
                     {
                         try { if (webView != null) { this.Controls.Remove(webView); webView.Dispose(); } } catch { }
+                        _webViewHandlersAttached = false;
                     });
                 }
                 catch { }
@@ -226,13 +257,28 @@ public partial class Form1
         }
     }
 
+    private void KickoffPostShellStartup()
+    {
+        _ = StartStartupEssentialsOnceAsync();
+        ScheduleDeferredStartup();
+    }
+
     private void CoreWebView2_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
         if (e.IsSuccess)
         {
+            StartupTrace.Mark($"WebView2: NavigationCompleted (appReady={_applicationReady})");
             LogActivity("[WEBVIEW] Navigation Completed. Sending initial data...");
-            RefreshConflictCount();
-            SendDataToWeb(); 
+            if (_applicationReady)
+            {
+                SendDataToWeb(deferHeavyWork: true, deferModScan: false);
+                TryRestoreLogsPopout();
+            }
+            else
+            {
+                _pendingGetDataRequest = true;
+            }
+            ScheduleDeferredStartup();
             ApplyDeepUIPI();
             return;
         }
@@ -312,142 +358,159 @@ public partial class Form1
     private void CoreWebView2_WebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
         string uri = e.Request.Uri;
-        bool shouldLog = false;
-        try
-        {
-            if (uri.StartsWith("https://f76manager.app/", StringComparison.OrdinalIgnoreCase))
-            {
-                var p = uri.Substring("https://f76manager.app/".Length);
-                var qi = p.IndexOf('?');
-                if (qi >= 0) p = p.Substring(0, qi);
-                p = string.IsNullOrWhiteSpace(p) ? "index.html" : p;
-                shouldLog =
-                    p.Equals("index.html", StringComparison.OrdinalIgnoreCase) ||
-                    p.Equals("js/main.js", StringComparison.OrdinalIgnoreCase) ||
-                    p.Equals("css/style.css", StringComparison.OrdinalIgnoreCase) ||
-                    p.StartsWith("js/components/", StringComparison.OrdinalIgnoreCase);
-            }
-        }
-        catch { }
-        
+
         if (uri.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
         {
             if (IsModFile(uri))
             {
-                e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(null, 204, "No Content", "");
+                e.Response = webView!.CoreWebView2.Environment.CreateWebResourceResponse(null, 204, "No Content", "");
                 if (lastSection == "mods") HandleModImportUri(uri);
                 return;
             }
         }
-        if (uri.StartsWith("https://f76manager.app/", StringComparison.OrdinalIgnoreCase))
+
+        if (webView?.CoreWebView2 != null)
+            ServeAppResource(webView.CoreWebView2, e, kickoffStartup: true);
+    }
+
+    internal void ServeAppResource(CoreWebView2 core, CoreWebView2WebResourceRequestedEventArgs e, bool kickoffStartup)
+    {
+        string uri = e.Request.Uri;
+        if (!uri.StartsWith("https://f76manager.app/", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        bool shouldLog = false;
+        try
         {
-            string path = uri.Substring("https://f76manager.app/".Length);
-            if (string.IsNullOrEmpty(path)) path = "index.html";
-            
-            int queryIndex = path.IndexOf('?');
-            if (queryIndex >= 0) path = path.Substring(0, queryIndex);
+            var p = uri.Substring("https://f76manager.app/".Length);
+            var qi = p.IndexOf('?');
+            if (qi >= 0) p = p.Substring(0, qi);
+            p = string.IsNullOrWhiteSpace(p) ? "index.html" : p;
+            shouldLog =
+                p.Equals("index.html", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("logs-popout.html", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("theme-creator.html", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("js/app.bundle.js", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("js/logs-popout.bundle.js", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("js/theme-creator.bundle.js", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("css/style.css", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { }
 
-            if (path.Equals("js/user-themes-boot.js", StringComparison.OrdinalIgnoreCase))
+        string path = uri.Substring("https://f76manager.app/".Length);
+        if (string.IsNullOrEmpty(path)) path = "index.html";
+
+        int queryIndex = path.IndexOf('?');
+        if (queryIndex >= 0) path = path.Substring(0, queryIndex);
+
+        if (path.Equals("js/user-themes-boot.js", StringComparison.OrdinalIgnoreCase))
+        {
+            var deferral = e.GetDeferral();
+            _ = ServeUserThemesBootAsync(core, e, deferral);
+            return;
+        }
+
+        if (path.StartsWith("user-theme-logo/", StringComparison.OrdinalIgnoreCase))
+        {
+            var logoPath = _themePackageLoader.ResolveLogoPhysicalPath(path);
+            if (logoPath != null && File.Exists(logoPath)
+                && TryOpenFileAsMemoryStream(logoPath, out var logoMs) && logoMs != null)
             {
-                var js = System.Text.Encoding.UTF8.GetBytes(BuildUserThemesBootScript());
-                var bootMs = new MemoryStream(js);
-                e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(
-                    bootMs, 200, "OK", VirtualHostResponseHeaders("application/javascript"));
+                e.Response = core.Environment.CreateWebResourceResponse(
+                    logoMs, 200, "OK", VirtualHostResponseHeaders(GetContentType(logoPath)));
                 return;
             }
+            e.Response = core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
+            return;
+        }
 
-            if (path.StartsWith("user-theme-logo/", StringComparison.OrdinalIgnoreCase))
-            {
-                var logoPath = _themePackageLoader.ResolveLogoPhysicalPath(path);
-                if (logoPath != null && File.Exists(logoPath))
-                {
-                    var fs = File.OpenRead(logoPath);
-                    e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(
-                        fs, 200, "OK", VirtualHostResponseHeaders(GetContentType(logoPath)));
-                    return;
-                }
-                e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
-                return;
-            }
+        string resourceName = "F76ManagerApp.www." + path.Replace('/', '.').Replace('\\', '.');
 
-            string resourceName = "F76ManagerApp.www." + path.Replace('/', '.').Replace('\\', '.');
-            
-            if (path.Equals("favicon.ico", StringComparison.OrdinalIgnoreCase))
-            {
-                resourceName = "F76ManagerApp.www.assets.Icon.png";
-            }
+        if (path.Equals("favicon.ico", StringComparison.OrdinalIgnoreCase))
+        {
+            resourceName = "F76ManagerApp.www.assets.Icon.png";
+        }
 
-            var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-            var allResources = assembly.GetManifestResourceNames();
-            var match = allResources.FirstOrDefault(r => r.Equals(resourceName, StringComparison.OrdinalIgnoreCase));
+        var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+        var allResources = assembly.GetManifestResourceNames();
+        var match = allResources.FirstOrDefault(r => r.Equals(resourceName, StringComparison.OrdinalIgnoreCase));
 
-            string physicalPath = Path.Combine(AppPaths.SettingsFolder, "..", "www", path.Replace('/', Path.DirectorySeparatorChar));
+        string physicalPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "www", path.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(physicalPath))
+            physicalPath = Path.Combine(AppPaths.SettingsFolder, "..", "www", path.Replace('/', Path.DirectorySeparatorChar));
 
-            bool preferPhysicalEnv = string.Equals(
-                Environment.GetEnvironmentVariable("F76MGR_USE_PHYSICAL_WWW"),
-                "1",
-                StringComparison.OrdinalIgnoreCase
-            );
+        bool preferPhysicalEnv = string.Equals(
+            Environment.GetEnvironmentVariable("F76MGR_USE_PHYSICAL_WWW"),
+            "1",
+            StringComparison.OrdinalIgnoreCase
+        );
 #if DEBUG
-            // Debug builds copy WebSrc → output/www for fast iteration; prefer disk when present so UI/CSS changes apply without relying on embedded resources.
-            bool preferPhysical = preferPhysicalEnv || File.Exists(physicalPath);
+        bool preferPhysical = preferPhysicalEnv || File.Exists(physicalPath);
 #else
-            bool preferPhysical = preferPhysicalEnv;
+        bool preferPhysical = preferPhysicalEnv;
 #endif
 
-            if (shouldLog)
-            {
-                LogActivity($"[WEBVIEW_RESOURCE] {path} preferPhysical={preferPhysical} embeddedMatch={(match != null)} physicalExists={File.Exists(physicalPath)}");
-            }
+        if (shouldLog)
+        {
+            LogActivity($"[WEBVIEW_RESOURCE] {path} preferPhysical={preferPhysical} embeddedMatch={(match != null)} physicalExists={File.Exists(physicalPath)}");
+        }
 
-            if (!preferPhysical && match != null)
+        if (kickoffStartup && path.Equals("index.html", StringComparison.OrdinalIgnoreCase))
+        {
+            StartupTrace.Mark("WebView2: index.html requested -> kicking off essentials");
+            KickoffPostShellStartup();
+        }
+        else if (shouldLog)
+        {
+            StartupTrace.Mark($"WebView2: resource requested {path}");
+        }
+
+        if (!preferPhysical && match != null)
+        {
+            using (var stream = assembly.GetManifestResourceStream(match))
             {
-                using (var stream = assembly.GetManifestResourceStream(match))
+                if (stream != null)
                 {
-                    if (stream != null)
-                    {
-                        var ms = new MemoryStream();
-                        stream.CopyTo(ms);
-                        ms.Position = 0;
-                        string contentType = resourceName.EndsWith(".png") ? "image/png" : GetContentType(path);
-                        e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(ms, 200, "OK", VirtualHostResponseHeaders(contentType));
-                        return;
-                    }
+                    var ms = new MemoryStream();
+                    stream.CopyTo(ms);
+                    ms.Position = 0;
+                    string contentType = resourceName.EndsWith(".png") ? "image/png" : GetContentType(path);
+                    e.Response = core.Environment.CreateWebResourceResponse(ms, 200, "OK", VirtualHostResponseHeaders(contentType));
+                    return;
                 }
             }
+        }
 
-            bool canUsePhysical = (preferPhysical || match == null) && File.Exists(physicalPath);
+        bool canUsePhysical = (preferPhysical || match == null) && File.Exists(physicalPath);
 
-            if (canUsePhysical)
+        if (canUsePhysical && TryOpenFileAsMemoryStream(physicalPath, out var physicalMs) && physicalMs != null)
+        {
+            string contentType = GetContentType(physicalPath);
+            e.Response = core.Environment.CreateWebResourceResponse(physicalMs, 200, "OK", VirtualHostResponseHeaders(contentType));
+            if (shouldLog) LogActivity($"[WEBVIEW_RESOURCE] Served physical: {path}");
+        }
+        else if (match != null)
+        {
+            using (var stream = assembly.GetManifestResourceStream(match))
             {
-                var fs = File.OpenRead(physicalPath);
-                string contentType = GetContentType(physicalPath);
-                e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(fs, 200, "OK", VirtualHostResponseHeaders(contentType));
-                if (shouldLog) LogActivity($"[WEBVIEW_RESOURCE] Served physical: {path}");
-            }
-            else if (match != null)
-            {
-                using (var stream = assembly.GetManifestResourceStream(match))
+                if (stream != null)
                 {
-                    if (stream != null)
-                    {
-                        var ms = new MemoryStream();
-                        stream.CopyTo(ms);
-                        ms.Position = 0;
-                        string contentType = resourceName.EndsWith(".png") ? "image/png" : GetContentType(path);
-                        e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(ms, 200, "OK", VirtualHostResponseHeaders(contentType));
-                        if (shouldLog) LogActivity($"[WEBVIEW_RESOURCE] Served embedded: {path}");
-                    }
+                    var ms = new MemoryStream();
+                    stream.CopyTo(ms);
+                    ms.Position = 0;
+                    string contentType = resourceName.EndsWith(".png") ? "image/png" : GetContentType(path);
+                    e.Response = core.Environment.CreateWebResourceResponse(ms, 200, "OK", VirtualHostResponseHeaders(contentType));
+                    if (shouldLog) LogActivity($"[WEBVIEW_RESOURCE] Served embedded: {path}");
                 }
             }
-            else
+        }
+        else
+        {
+            if (!path.EndsWith("favicon.ico", StringComparison.OrdinalIgnoreCase))
             {
-                if (!path.EndsWith("favicon.ico", StringComparison.OrdinalIgnoreCase))
-                {
-                    LogActivity($"[RESOURCE_FAIL] 404 Not Found: {uri}");
-                }
-                e.Response = webView.CoreWebView2.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
+                LogActivity($"[RESOURCE_FAIL] 404 Not Found: {uri}");
             }
+            e.Response = core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
         }
     }
 
@@ -461,7 +524,9 @@ public partial class Form1
             ".js" => "application/javascript",
             ".json" => "application/json",
             ".png" => "image/png",
-            ".jpg" => "image/jpeg",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".webp" => "image/webp",
+            ".gif" => "image/gif",
             ".svg" => "image/svg+xml",
             ".woff2" => "font/woff2",
             _ => "application/octet-stream"
@@ -472,9 +537,65 @@ public partial class Form1
     {
         return contentType switch
         {
-            "text/css" or "application/javascript" or "text/html" or "image/png" or "image/jpeg" or "image/webp" =>
+            "text/css" or "application/javascript" or "text/html" or "image/png" or "image/jpeg" or "image/webp" or "image/gif" =>
                 $"Content-Type: {contentType}\r\nCache-Control: no-store\r\nPragma: no-cache",
             _ => $"Content-Type: {contentType}",
         };
+    }
+
+    private static bool TryOpenFileAsMemoryStream(string path, out MemoryStream? ms)
+    {
+        ms = null;
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            ms = new MemoryStream();
+            fs.CopyTo(ms);
+            ms.Position = 0;
+            return true;
+        }
+        catch
+        {
+            ms?.Dispose();
+            ms = null;
+            return false;
+        }
+    }
+
+    private async Task ServeUserThemesBootAsync(
+        CoreWebView2 core,
+        CoreWebView2WebResourceRequestedEventArgs e,
+        CoreWebView2Deferral deferral)
+    {
+        try
+        {
+            try { await _themesLoadTask.ConfigureAwait(true); }
+            catch {  }
+            _themesReady = true;
+
+            if (!_settingsApplied)
+                TryPeekUiThemeFromSettings();
+
+            var js = System.Text.Encoding.UTF8.GetBytes(BuildUserThemesBootScript());
+            var bootMs = new MemoryStream(js);
+            e.Response = core.Environment.CreateWebResourceResponse(
+                bootMs, 200, "OK", VirtualHostResponseHeaders("application/javascript"));
+        }
+        catch (Exception ex)
+        {
+            try { LogError($"[THEMES] Boot script failed: {ex.Message}"); } catch { }
+            try
+            {
+                var fallback = System.Text.Encoding.UTF8.GetBytes(
+                    "window.__F76_BOOT_UI_THEME=\"fallout\";window.__F76_USER_THEME_IDS=[];window.__F76_USER_THEME_CSS={};window.__F76_BOOT_UI_ANIMATIONS=true;");
+                e.Response = core.Environment.CreateWebResourceResponse(
+                    new MemoryStream(fallback), 200, "OK", VirtualHostResponseHeaders("application/javascript"));
+            }
+            catch { }
+        }
+        finally
+        {
+            try { deferral.Complete(); } catch { }
+        }
     }
 }

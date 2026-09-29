@@ -154,9 +154,8 @@ public static class Security
                 }
             }
         }
-        catch (Exception ex)
+        catch
         {
-            _secLogger?.Invoke($"[SECURITY] Parent process check failed: {ex.GetType().Name} - {ex.Message}");
         }
 
         return false;
@@ -171,9 +170,8 @@ public static class Security
             var parentId = (uint)results.Cast<ManagementObject>().First()["ParentProcessId"];
             return Process.GetProcessById((int)parentId);
         }
-        catch (Exception ex)
+        catch
         {
-            _secLogger?.Invoke($"[SECURITY] Failed to resolve parent process: {ex.GetType().Name} - {ex.Message}");
             return null;
         }
     }

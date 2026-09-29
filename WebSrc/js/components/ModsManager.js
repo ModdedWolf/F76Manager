@@ -3,24 +3,51 @@ import { ModsDndHandler } from './ModsDndHandler.js';
 import { escapeAttr } from '../utils/htmlSafe.js';
 import { applyStylesheet as applyModTypeBadgeStylesheet } from '../utils/modTypeBadgeTheme.js';
 import { openTabBadgeColorModal } from '../utils/badgeColorModal.js';
+import { JsonTreeEditor } from '../utils/jsonTreeEditor.js';
 
 let _modsGlobalEventsAttached = false;
+let _deleteModInFlight = false;
+let _deleteModInFlightTimer = null;
+let _pendingDeleteName = null;
+
+function clearDeleteModInFlight() {
+    _deleteModInFlight = false;
+    _pendingDeleteName = null;
+    if (_deleteModInFlightTimer) {
+        clearTimeout(_deleteModInFlightTimer);
+        _deleteModInFlightTimer = null;
+    }
+}
 
 async function deleteModWithConfirmation(name) {
-    if (!name) return;
-    const confirmEnabled = !!(window.app?.realData?.managerSettings?.confirmBeforeDeleteMod);
-    if (confirmEnabled) {
-        const ok = await window.appConfirm({
-            title: 'Confirmation',
-            message: window._t('delete_mod_confirm', name),
-            okText: window._t('delete'),
-            cancelText: window._t('cancel'),
-            danger: true
-        });
-        if (!ok) return;
+    if (!name || _deleteModInFlight) return;
+    _deleteModInFlight = true;
+    _pendingDeleteName = name;
+    try {
+        const confirmEnabled = !!(window.app?.realData?.managerSettings?.confirmBeforeDeleteMod);
+        if (confirmEnabled) {
+            const ok = await window.appConfirm({
+                title: 'Confirmation',
+                message: window._t('delete_mod_confirm', name),
+                okText: window._t('delete'),
+                cancelText: window._t('cancel'),
+                danger: true
+            });
+            if (!ok) {
+                clearDeleteModInFlight();
+                return;
+            }
+        }
+        console.log(`[MODS] Deleting mod: ${name}`);
+        window.chrome?.webview?.postMessage?.({ type: 'DELETE_MOD', name });
+        if (_deleteModInFlightTimer) clearTimeout(_deleteModInFlightTimer);
+        _deleteModInFlightTimer = setTimeout(() => {
+            clearDeleteModInFlight();
+        }, 8000);
+    } catch (err) {
+        console.error('[MODS] Delete failed to start:', err);
+        clearDeleteModInFlight();
     }
-    console.log(`[MODS] Deleting mod: ${name}`);
-    window.chrome.webview.postMessage({ type: 'DELETE_MOD', name });
 }
 
 export class ModsManager {
@@ -30,7 +57,8 @@ export class ModsManager {
         localStorage.removeItem('mods_sort_field');
         localStorage.removeItem('mods_sort_order');
         this.lastSearchTerm = '';
-        this.currentPreset = 'all';
+        this.currentPreset = this.modGroupsManager?.getActiveName?.() || 'Default';
+        this.expandedLooseKeys = new Set();
         this.renameModalKeyHandler = null;
         this._pendingModDetailsByFileKey = new Map();
         this._modUpdatesByName = new Map();
@@ -49,6 +77,107 @@ export class ModsManager {
         const sb = Math.max(0, ta.offsetWidth - ta.clientWidth);
         bd.style.paddingRight = `${16 + sb}px`;
         bd.scrollTop = ta.scrollTop;
+    }
+
+    _renderConfigHighlight(text, isJson) {
+        const raw = String(text ?? '');
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        if (!isJson) {
+            return esc(raw).replace(/^([^=\s\n][^=\n]*=)/gm, (match) => {
+                const parts = match.split('=');
+                if (parts.length > 1) {
+                    return `<span style="color: #6ed58a; font-weight: 500;">${parts[0]}</span>=`;
+                }
+                return match;
+            });
+        }
+
+        const tok = (cls, s) => `<span class="cfg-tok-${cls}">${esc(s)}</span>`;
+        const numRe = /-?(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/y;
+        const wordRe = /[A-Za-z_$][\w$]*/y;
+        const n = raw.length;
+        let out = '';
+        let i = 0;
+        let lineStart = true;
+
+        while (i < n) {
+            const c = raw[i];
+            if (c === '\n') {
+                out += '\n';
+                lineStart = true;
+                i++;
+                continue;
+            }
+            if (lineStart && (c === ' ' || c === '\t')) {
+                while (i < n && (raw[i] === ' ' || raw[i] === '\t')) {
+                    if (raw[i] === '\t') {
+                        out += '<span class="cfg-indent">\t</span>';
+                        i++;
+                    } else if (raw[i + 1] === ' ') {
+                        out += '<span class="cfg-indent">  </span>';
+                        i += 2;
+                    } else {
+                        out += ' ';
+                        i++;
+                    }
+                }
+                lineStart = false;
+                continue;
+            }
+            lineStart = false;
+
+            if (c === '"') {
+                let j = i + 1;
+                while (j < n && raw[j] !== '"' && raw[j] !== '\n') j += raw[j] === '\\' ? 2 : 1;
+                if (j < n && raw[j] === '"') j++;
+                const s = raw.slice(i, j);
+                let k = j;
+                while (k < n && (raw[k] === ' ' || raw[k] === '\t')) k++;
+                out += tok(raw[k] === ':' ? 'key' : 'str', s);
+                i = j;
+                continue;
+            }
+            if (c === '/' && raw[i + 1] === '/') {
+                let j = raw.indexOf('\n', i);
+                if (j < 0) j = n;
+                out += tok('comment', raw.slice(i, j));
+                i = j;
+                continue;
+            }
+            if (c === '/' && raw[i + 1] === '*') {
+                let j = raw.indexOf('*/', i + 2);
+                j = j < 0 ? n : j + 2;
+                out += raw.slice(i, j).split('\n').map((part) => tok('comment', part)).join('\n');
+                i = j;
+                continue;
+            }
+            if (c === '-' || (c >= '0' && c <= '9')) {
+                numRe.lastIndex = i;
+                const m = numRe.exec(raw);
+                if (m && m[0] !== '-') {
+                    out += tok('num', m[0]);
+                    i += m[0].length;
+                    continue;
+                }
+            }
+            if (/[A-Za-z_$]/.test(c)) {
+                wordRe.lastIndex = i;
+                const w = wordRe.exec(raw)[0];
+                if (w === 'true' || w === 'false') out += tok('bool', w);
+                else if (w === 'null') out += tok('null', w);
+                else out += esc(w);
+                i += w.length;
+                continue;
+            }
+            if ('{}[],:'.includes(c)) {
+                out += tok('punct', c);
+                i++;
+                continue;
+            }
+            out += esc(c);
+            i++;
+        }
+        return out;
     }
 
     _setupConfigEditorLayout(overlay) {
@@ -226,11 +355,14 @@ export class ModsManager {
     requestModUpdateCheck() {
         const loggedIn = window.app?.realData?.managerSettings?.nexusLoggedIn;
         if (!loggedIn) return;
+        const now = Date.now();
+        if (this._lastModUpdateCheckAt && (now - this._lastModUpdateCheckAt) < 12000) return;
         if (this._modUpdateCheckInFlight) {
             this._modUpdateCheckPending = true;
             return;
         }
         this._modUpdateCheckInFlight = true;
+        this._lastModUpdateCheckAt = now;
         window.chrome.webview.postMessage({ type: 'CHECK_MOD_UPDATES' });
     }
 
@@ -277,6 +409,23 @@ export class ModsManager {
         }
     }
 
+    handleNexusResolveModLinkResult(payload) {
+        const pending = this._pendingNexusResolve;
+        this._pendingNexusResolve = null;
+        if (pending && typeof pending.apply === 'function') {
+            pending.apply(payload || {});
+            return;
+        }
+        if (payload?.ok) {
+            window.app?.showBanner?.({
+                type: 'success',
+                text: window._t('rename_mod_nexus_fetch_ok') || 'Nexus file data ready.'
+            });
+        } else if (payload?.error) {
+            window.app?.showBanner?.({ type: 'error', text: String(payload.error) });
+        }
+    }
+
     getAvailableUpdateCount() {
         let count = 0;
         for (const [, cached] of this._modUpdatesByName) {
@@ -297,8 +446,47 @@ export class ModsManager {
     _closeModsActionsMenu() {
         const dropdown = document.getElementById('mods-actions-dropdown');
         const trigger = document.getElementById('btn-mods-actions');
-        if (dropdown) dropdown.hidden = true;
+        const wrap = trigger?.closest('.mods-actions-menu-wrap');
+        if (dropdown) {
+            dropdown.hidden = true;
+            dropdown.classList.remove('mods-actions-dropdown--fixed');
+            dropdown.style.top = '';
+            dropdown.style.left = '';
+            dropdown.style.maxHeight = '';
+            if (wrap && dropdown.parentElement !== wrap) {
+                wrap.appendChild(dropdown);
+            } else if (!wrap && dropdown.parentElement === document.body) {
+                dropdown.remove();
+            }
+        }
         if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        this._modsActionsMenuIgnoreOutside = false;
+    }
+
+    _positionModsActionsMenu(trigger, menu) {
+        if (!trigger || !menu) return;
+        if (menu.parentElement !== document.body) {
+            document.body.appendChild(menu);
+        }
+        menu.classList.add('mods-actions-dropdown--fixed');
+        menu.hidden = false;
+        const prevVis = menu.style.visibility;
+        menu.style.visibility = 'hidden';
+        const maxH = Math.min(window.innerHeight * 0.7, 480);
+        menu.style.maxHeight = `${Math.round(maxH)}px`;
+        const menuW = menu.offsetWidth || 220;
+        const menuH = Math.min(menu.scrollHeight || maxH, maxH);
+        menu.style.visibility = prevVis || '';
+
+        const r = trigger.getBoundingClientRect();
+        let top = r.bottom + 6;
+        let left = r.right - menuW;
+        if (top + menuH > window.innerHeight - 8) top = Math.max(8, r.top - menuH - 6);
+        if (left < 8) left = 8;
+        if (left + menuW > window.innerWidth - 8) left = window.innerWidth - menuW - 8;
+
+        menu.style.top = `${Math.round(top)}px`;
+        menu.style.left = `${Math.round(left)}px`;
     }
 
     _mountModsActionsMenu() {
@@ -313,24 +501,36 @@ export class ModsManager {
         this._modsActionsMenuAbort = new AbortController();
         const { signal } = this._modsActionsMenuAbort;
 
-        dropdown.hidden = true;
-        trigger.setAttribute('aria-expanded', 'false');
+        this._closeModsActionsMenu();
 
         trigger.addEventListener('click', (e) => {
+            e.preventDefault();
             e.stopPropagation();
             const open = dropdown.hidden;
-            dropdown.hidden = !open;
-            trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-            if (open && window.lucide) window.lucide.createIcons();
-        }, { signal });
-
-        document.addEventListener('click', (e) => {
-            if (!document.getElementById('btn-mods-actions')) return;
-            if (!e.target.closest('.mods-actions-menu-wrap')) {
+            if (open) {
+                this._modsActionsMenuIgnoreOutside = true;
+                this._positionModsActionsMenu(trigger, dropdown);
+                trigger.setAttribute('aria-expanded', 'true');
+                if (window.lucide) window.lucide.createIcons();
+                queueMicrotask(() => { this._modsActionsMenuIgnoreOutside = false; });
+            } else {
                 this._closeModsActionsMenu();
             }
         }, { signal });
 
+        document.addEventListener('click', (e) => {
+            if (!document.getElementById('btn-mods-actions')) {
+                this._closeModsActionsMenu();
+                return;
+            }
+            if (this._modsActionsMenuIgnoreOutside) return;
+            const inside =
+                e.target.closest('.mods-actions-menu-wrap') ||
+                e.target.closest('#mods-actions-dropdown');
+            if (!inside) this._closeModsActionsMenu();
+        }, { signal });
+
+        window.addEventListener('resize', () => this._closeModsActionsMenu(), { signal });
         const btnAddMod = document.getElementById('mods-action-add-mod');
         if (btnAddMod) {
             btnAddMod.addEventListener('click', (e) => {
@@ -352,6 +552,81 @@ export class ModsManager {
             this._closeModsActionsMenu();
             if (window.chrome?.webview?.postMessage) {
                 window.chrome.webview.postMessage({ type: 'BACKUP_MODS' });
+            }
+        }, { signal });
+
+        document.getElementById('mods-action-preset-rename')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            const oldName = this.modGroupsManager.getActiveName();
+            const next = await window.appPrompt({
+                title: window._t('preset_rename') || 'Rename preset',
+                promptLabel: window._t('preset_rename_prompt') || 'Rename preset:',
+                defaultValue: oldName,
+                okText: window._t('save') || 'Save'
+            });
+            if (!next || next.trim() === oldName) return;
+            if (this.modGroupsManager.renamePreset(oldName, next.trim())) {
+                this.currentPreset = next.trim();
+                this.refreshUI();
+            }
+        }, { signal });
+
+        document.getElementById('mods-action-preset-new')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            const name = await window.appPrompt({
+                title: window._t('new_preset') || 'New…',
+                promptLabel: window._t('new_preset_prompt') || 'Enter new preset name:',
+                okText: window._t('create') || 'Create'
+            });
+            if (name && this.modGroupsManager.createPreset(name.trim())) {
+                this.currentPreset = name.trim();
+                this.refreshUI();
+            }
+        }, { signal });
+
+        document.getElementById('mods-action-preset-duplicate')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            const created = this.modGroupsManager.duplicatePreset(this.modGroupsManager.getActiveName());
+            if (created) {
+                this.currentPreset = created;
+                this.refreshUI();
+            }
+        }, { signal });
+
+        document.getElementById('mods-action-preset-export')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            this.modGroupsManager.exportActive();
+        }, { signal });
+
+        document.getElementById('mods-action-preset-import')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            this.modGroupsManager.importPreset();
+        }, { signal });
+
+        document.getElementById('mods-action-preset-delete')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            const name = this.modGroupsManager.getActiveName();
+            if (this.modGroupsManager.isDefaultPreset?.(name)) {
+                window.app?.showBanner?.({ type: 'warning', text: window._t('cannot_delete_default_preset') });
+                return;
+            }
+            const ok = await window.appConfirm({
+                title: window._t('delete_preset') || 'Delete Preset',
+                message: window._t('delete_preset_confirm', name),
+                okText: window._t('delete'),
+                cancelText: window._t('cancel'),
+                danger: true
+            });
+            if (ok) {
+                this.modGroupsManager.deletePreset(name);
+                this.currentPreset = this.modGroupsManager.getActiveName();
+                this.refreshUI();
             }
         }, { signal });
 
@@ -478,18 +753,6 @@ export class ModsManager {
 
     initGlobalHandlers() {
         if (!_modsGlobalEventsAttached) {
-            document.body.addEventListener('click', async (e) => {
-                const deleteBtn = e.target.closest('.btn-delete-mod');
-                if (deleteBtn) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const name = deleteBtn.dataset.name;
-                    if (name) {
-                        await deleteModWithConfirmation(name);
-                    }
-                    return;
-                }
-            });
             _modsGlobalEventsAttached = true;
         }
 
@@ -498,10 +761,23 @@ export class ModsManager {
                 await deleteModWithConfirmation(name);
             };
         }
+
+        if (!window.toggleLooseModExpand) {
+            window.toggleLooseModExpand = (el) => {
+                const name = el?.getAttribute?.('data-name') || el?.dataset?.name;
+                if (!name) return;
+                const mgr = window.app?.sections?.mods || this;
+                if (!mgr.expandedLooseKeys) mgr.expandedLooseKeys = new Set();
+                if (mgr.expandedLooseKeys.has(name)) mgr.expandedLooseKeys.delete(name);
+                else mgr.expandedLooseKeys.add(name);
+                if (typeof mgr.refreshUI === 'function') mgr.refreshUI();
+            };
+        }
         
         if (!window.nuclearDelete) {
             window.nuclearDelete = async (el) => {
-                const name = el.getAttribute('data-name');
+                const name = el?.getAttribute?.('data-name') || el?.dataset?.name;
+                if (!name) return;
                 const msg = `[NUCLEAR] Deleting: ${name}`;
                 console.log(msg);
                 if (window.logToScreen) window.logToScreen(msg);
@@ -511,8 +787,10 @@ export class ModsManager {
 
         if (!window.nuclearEdit) {
             window.nuclearEdit = (el) => {
-                const name = el.getAttribute('data-name');
-                const openTab = el.getAttribute('data-open-tab') || 'general';
+                const btn = el?.closest?.('.btn-edit-mod') || el;
+                const name = btn?.getAttribute?.('data-name') || btn?.dataset?.name;
+                if (!name) return;
+                const openTab = btn.getAttribute?.('data-open-tab') || 'general';
                 console.log("[NUCLEAR] Edit requested for:", name, "tab:", openTab);
                 this.showRenameModal(name, openTab);
             };
@@ -520,6 +798,10 @@ export class ModsManager {
 
         if (!window.nuclearModUpdate) {
             window.nuclearModUpdate = (el) => {
+                if (!el || el.disabled || el.classList.contains('btn-mod-state-off') || el.classList.contains('btn-mod-update-none')) {
+                    window.app?.showBanner?.({ type: 'info', text: window._t('mod_already_up_to_date') || 'This mod is already up to date.' });
+                    return;
+                }
                 if (this._bulkUpdateInProgress) {
                     window.app?.showBanner?.({ type: 'warning', text: window._t('bulk_update_in_progress') });
                     return;
@@ -530,6 +812,13 @@ export class ModsManager {
                 const fileName = el.getAttribute('data-file-name') || 'mod_update';
                 const fileVersion = el.getAttribute('data-file-version') || '';
                 const fileUploadedRaw = el.getAttribute('data-file-uploaded');
+                if (!modId || !fileId) {
+                    window.app?.showBanner?.({
+                        type: 'warning',
+                        text: window._t('mod_update_unavailable') || 'This mod is not linked to Nexus or no update file is available.'
+                    });
+                    return;
+                }
                 const payload = {
                     type: 'UPDATE_MOD_FROM_NEXUS',
                     originalName,
@@ -557,6 +846,26 @@ export class ModsManager {
                     name: modName, 
                     enabled: isEnabled 
                 });
+
+                try {
+                    const mgr = window.app?.modGroups || window.modsManager?.modGroupsManager;
+                    const preset = mgr?.getActive?.();
+                    if (preset) {
+                        const norm = (n) => (mgr?.constructor?.normalizeModKey
+                            ? mgr.constructor.normalizeModKey(n)
+                            : String(n || '').replace(/^Disabled\//i, ''));
+                        const clean = norm(modName);
+                        const en = new Set((preset.enabled || []).map(norm).filter(Boolean));
+                        if (isEnabled) en.add(clean);
+                        else en.delete(clean);
+                        preset.enabled = [...en];
+                        const members = Array.isArray(preset.mods) ? preset.mods.map(norm) : [];
+                        if (isEnabled && members.length > 0 && !members.some(m => m.toLowerCase() === clean.toLowerCase())) {
+                            preset.mods = [...members, clean];
+                        }
+                        mgr.save?.(true);
+                    }
+                } catch {  }
 
                 const row = checkbox.closest('.mod-row');
                 if (row) {
@@ -615,25 +924,17 @@ export class ModsManager {
             editor.disabled = false;
             setStatus('', 'neutral');
 
+            const isJson = String(data.relativePath || '').toLowerCase().endsWith('.json');
             if (backdrop) {
-                let content = editor.value || '';
-                content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                const highlighted = content.replace(/^([^=\s\n][^=\n]*=)/gm, (match) => {
-                    const parts = match.split('=');
-                    if (parts.length > 1) {
-                        return `<span style="color: #6ed58a; font-weight: 500;">${parts[0]}</span>=`;
-                    }
-                    return match;
-                });
-                backdrop.innerHTML = highlighted + '\n';
+                backdrop.innerHTML = this._renderConfigHighlight(editor.value, isJson) + '\n';
                 backdrop.scrollTop = editor.scrollTop;
                 this._syncConfigEditorBackdropPad(overlay);
             }
 
-            const isJson = String(data.relativePath || '').toLowerCase().endsWith('.json');
             if (saveBtn) saveBtn.disabled = false;
             if (validateBtn) validateBtn.disabled = !isJson;
             if (formatBtn) formatBtn.disabled = !isJson;
+            this._onConfigContentLoaded?.(isJson);
         } catch (e) {
             console.warn('[MODS] handleModFileContent failed', e);
         }
@@ -646,7 +947,14 @@ export class ModsManager {
             const status = overlay.querySelector('#mod-config-file-status');
             if (!status) return;
             if (data.ok) {
-                status.textContent = 'Saved.';
+                if (data.applied != null) {
+                    const count = Number(data.applied) || 0;
+                    const target = String(data.appliedTarget || 'INI');
+                    const keyLabel = count === 1 ? 'key' : 'keys';
+                    status.textContent = `Saved and applied ${count} ${keyLabel} to ${target}.`;
+                } else {
+                    status.textContent = 'Saved.';
+                }
                 status.className = 'mod-config-status mod-config-status--success';
             } else {
                 const msg = String(data.error || 'Save failed.');
@@ -681,8 +989,99 @@ export class ModsManager {
         }
     }
 
+    _setModFileDropTarget(name) {
+        const next = name || null;
+        if (this._modFileDropTarget === next) return;
+        this._modFileDropTarget = next;
+        window.chrome?.webview?.postMessage?.({ type: 'SET_MOD_FILE_DROP_TARGET', name: next });
+    }
+
+    handleModContents(data) {
+        const overlay = document.getElementById('rename-mod-overlay');
+        const openFor = overlay?.dataset?.filesModName;
+        if (!openFor || !data?.name ||
+            this._normalizeModPathForMatch(openFor) !== this._normalizeModPathForMatch(data.name)) return;
+
+        const list = document.getElementById('rename-mod-files-list');
+        const countLabel = document.getElementById('rename-mod-files-count');
+        if (!list) return;
+
+        const esc = (value) => String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+        const maxRows = 2000;
+
+        if (countLabel) {
+            countLabel.textContent = `${window._t('rename_mod_files_current')} (${entries.length})`;
+        }
+        if (data.error && entries.length === 0) {
+            list.innerHTML = `<li class="rename-mod-files-status--error">${esc(data.error)}</li>`;
+            return;
+        }
+        if (entries.length === 0) {
+            list.innerHTML = `<li class="text-muted">${esc(window._t('rename_mod_files_none'))}</li>`;
+            return;
+        }
+
+        const sorted = entries
+            .map(e => String(e?.path || '').replace(/\//g, '\\'))
+            .filter(Boolean)
+            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+        let html = sorted.slice(0, maxRows).map(p => `<li title="${esc(p)}">${esc(p)}</li>`).join('');
+        if (sorted.length > maxRows) {
+            html += `<li class="text-muted">${esc(String(window._t('rename_mod_files_more')).replace('{count}', String(sorted.length - maxRows)))}</li>`;
+        }
+        list.innerHTML = html;
+    }
+
+    handleModFilesAdded(data) {
+        const overlay = document.getElementById('rename-mod-overlay');
+        const openFor = overlay?.dataset?.filesModName;
+        const matches = openFor && data?.name &&
+            this._normalizeModPathForMatch(openFor) === this._normalizeModPathForMatch(data.name);
+        const status = matches ? document.getElementById('rename-mod-files-status') : null;
+        const setStatus = (text, isError = false) => {
+            if (!status) return;
+            status.hidden = !text;
+            status.textContent = text || '';
+            status.classList.toggle('rename-mod-files-status--error', !!isError);
+        };
+
+        if (data?.type === 'MOD_FILES_ADDING') {
+            setStatus(window._t('rename_mod_files_adding'));
+            overlay?.querySelector('.rename-mod-files-dropzone')?.classList.add('busy');
+            return;
+        }
+
+        overlay?.querySelector('.rename-mod-files-dropzone')?.classList.remove('busy');
+        if (!data?.ok) {
+            setStatus(data?.error || window._t('rename_mod_files_failed'), true);
+            return;
+        }
+        if (!matches) return;
+
+        const reopenName = data.newName || data.name;
+        const count = data.count || 0;
+        setTimeout(() => {
+            this.showRenameModal(reopenName, 'files');
+            const refreshed = document.getElementById('rename-mod-files-status');
+            if (refreshed) {
+                refreshed.hidden = false;
+                refreshed.textContent = String(window._t('rename_mod_files_added')).replace('{count}', String(count));
+            }
+        }, 150);
+    }
+
     hideRenameModal() {
         this._teardownConfigEditorLayout?.();
+        this._configJsonTree?.destroy();
+        this._configJsonTree = null;
+        this._onConfigContentLoaded = null;
+        this._setModFileDropTarget(null);
+        this._pendingNexusResolve = null;
         const overlay = document.getElementById('rename-mod-overlay');
         if (overlay) {
             overlay.remove();
@@ -695,6 +1094,7 @@ export class ModsManager {
 
     showRenameModal(currentName, initialTab = 'general') {
         this.hideRenameModal();
+        try { window.dismissAppConfirm?.(); } catch (_) { }
 
         const escapeHtml = (value) => String(value || '')
             .replace(/&/g, '&amp;')
@@ -716,6 +1116,9 @@ export class ModsManager {
             .replace(/^Strings\//, '')
             .replace(/^GameRoot\//, '');
         const isCoreIni = /^CoreIni\//i.test(editableName);
+        const addToBaseName = String(editableName || '').replace(/^CoreIni\//i, '').split('/').pop() || '';
+        const isAddToOverlay = /^F76-Manager-AddTo(Custom|Prefs|Fallout76)\.ini$/i.test(addToBaseName)
+            || /^F76AddTo(Custom|Prefs|Fallout76)\.ini$/i.test(addToBaseName);
         const currentNameNormalized = normalizeOriginalName(name);
         const currentFileKey = toFileKey(name);
         const rawNameNorm = this._normalizeModPathForMatch(name);
@@ -740,7 +1143,7 @@ export class ModsManager {
                 return bHasDetails - aHasDetails;
             })[0];
 
-        const editableConfigExts = new Set(['.json', '.txt', '.ini']);
+        const editableConfigExts = new Set(['.json', '.txt', '.ini', '.toml']);
         const modFiles = Array.isArray(currentMod?.files) ? currentMod.files : [];
         const configFiles = modFiles
             .map(f => String(f || '').replace(/\\/g, '/').trim())
@@ -757,8 +1160,12 @@ export class ModsManager {
 
         const normPath = String(name || '').replace(/\\/g, '/').trim();
         const lower = normPath.toLowerCase();
-        const isConfigRow = lower.endsWith('.ini') || lower.endsWith('.json') || lower.endsWith('.txt');
-
+        const isConfigRow = lower.endsWith('.ini') || lower.endsWith('.json') || lower.endsWith('.txt') || lower.endsWith('.toml');
+        const isLooseMod = !!(currentMod?.isLoose || currentMod?.type === 'loose' || /^(Disabled\/)?Loose\//i.test(normPath));
+        const isPlainBa2Mod = !isLooseMod && lower.endsWith('.ba2') && !currentMod?.isBundle;
+        const supportsFiles = !isConfigRow &&
+            (isLooseMod || isPlainBa2Mod) &&
+            !/^(Disabled\/)?(Bundles|Strings|GameRoot|CoreIni)\//i.test(normPath);
         const overlay = document.createElement('div');
         overlay.id = 'rename-mod-overlay';
         overlay.className = 'modal-overlay active rename-mod-overlay';
@@ -769,29 +1176,32 @@ export class ModsManager {
             overlay.dataset.configRelativePath = normPath;
             overlay.innerHTML = `
                 <div class="custom-modal polished rename-mod-modal rename-mod-modal-config" role="dialog" aria-modal="true" aria-label="${escapeHtml(editableName || window._t('mods'))}">
-                    <div class="rename-mod-header">
-                        <button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>
-                    </div>
                     <div class="modal-body rename-mod-body">
                         <div class="config-editor-topbar">
-                            <label class="rename-mod-label" for="rename-mod-input">File</label>
                             <div class="config-editor-toprow">
+                                <label class="rename-mod-label" for="rename-mod-input">File</label>
                                 <input id="rename-mod-input" class="rename-mod-input" type="text" value="${escapeHtml(editableName)}" ${isCoreIni ? 'readonly' : ''} />
                                 <div class="mod-config-actions mod-config-actions-inline config-editor-actions">
+                                    ${jsonMode ? `
+                                    <div class="config-view-toggle mod-config-json-only" role="tablist" aria-label="View">
+                                        <button type="button" class="config-view-btn" id="mod-config-view-tree" role="tab" aria-selected="false">Tree</button>
+                                        <button type="button" class="config-view-btn active" id="mod-config-view-text" role="tab" aria-selected="true">Text</button>
+                                    </div>
+                                    <button type="button" class="btn-popup secondary mod-config-json-only config-tree-only config-icon-btn" id="mod-config-tree-fold" title="Collapse all" aria-label="Collapse all"><i data-lucide="chevrons-down-up"></i></button>` : ``}
                                     ${jsonMode ? `<button type="button" class="btn-popup secondary mod-config-json-only" id="mod-config-validate" disabled>Validate JSON</button>` : ``}
                                     ${jsonMode ? `<button type="button" class="btn-popup secondary mod-config-json-only" id="mod-config-format" disabled>Format JSON</button>` : ``}
                                 </div>
+                                <button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>
                             </div>
                         </div>
 
                         <div class="config-editor-main">
-                            <div class="config-editor-pane config-editor-pane-left" role="group" aria-labelledby="rename-mod-config-heading">
-                                <div class="rename-mod-type-heading" id="rename-mod-config-heading">Config file</div>
-                                <p class="rename-mod-type-hint">Editing <code>${escapeHtml(editableName)}</code>.</p>
+                            <div class="config-editor-pane config-editor-pane-left" role="group" aria-label="${escapeAttr(editableName)}">
                                 <div class="mod-config-single config-editor-single">
                                     <div class="mod-config-editor-wrap">
                                         <div id="mod-config-highlight-backdrop"></div>
                                         <textarea id="mod-config-editor" class="rename-mod-details mod-config-editor mod-config-editor-single" placeholder="Loading…" disabled spellcheck="${configSpellCheck}"></textarea>
+                                        ${jsonMode ? `<div id="mod-config-json-tree" role="tree" aria-label="${escapeAttr(editableName)}"></div>` : ``}
                                     </div>
                                     <div id="mod-config-file-status" class="mod-config-status text-muted" aria-live="polite"></div>
                                 </div>
@@ -802,19 +1212,18 @@ export class ModsManager {
                         <div class="rename-mod-footer-spacer" aria-hidden="true"></div>
                         <button type="button" class="btn-popup secondary" id="rename-mod-cancel">${window._t('cancel')}</button>
                         ${isCoreIni ? `` : `<button type="button" class="btn-popup secondary" id="mod-config-rename" disabled><i data-lucide="edit-3"></i> Rename</button>`}
-                        <button type="button" class="btn-popup primary" id="mod-config-save" disabled><i data-lucide="save"></i> Save file</button>
+                        <button type="button" class="btn-popup primary" id="mod-config-save" disabled title="Save (Ctrl+S)"><i data-lucide="save"></i> Save file</button>
                     </div>
                 </div>
             `;
         } else {
             overlay.innerHTML = `
                 <div class="custom-modal polished rename-mod-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(editableName || window._t('mods'))}">
-                    <div class="rename-mod-header">
-                        <button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>
-                    </div>
                     <nav class="rename-mod-tabs" role="tablist" aria-label="${escapeAttr(window._t('rename_mod_tabs_label'))}">
                         <button type="button" class="rename-mod-tab active" data-tab="general" role="tab" aria-selected="true" id="rename-mod-tab-general">${escapeHtml(window._t('rename_mod_tab_general'))}</button>
                         <button type="button" class="rename-mod-tab" data-tab="nexus" role="tab" aria-selected="false" id="rename-mod-tab-nexus">${escapeHtml(window._t('rename_mod_tab_nexus'))}</button>
+                        ${supportsFiles ? `<button type="button" class="rename-mod-tab" data-tab="files" role="tab" aria-selected="false" id="rename-mod-tab-files">${escapeHtml(window._t('rename_mod_tab_files'))}</button>` : ``}
+                        <button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>
                     </nav>
                     <div class="rename-mod-name-row">
                         <label class="rename-mod-label" for="rename-mod-input">${window._t('rename_mod_name_label')}</label>
@@ -830,7 +1239,14 @@ export class ModsManager {
                             <label class="rename-mod-label" for="rename-mod-nexus-url">${window._t('rename_mod_nexus_url_label')}</label>
                             <input id="rename-mod-nexus-url" class="rename-mod-input" type="text" placeholder="${escapeAttr(window._t('rename_mod_nexus_url_placeholder'))}" value="${escapeAttr(currentMod?.url || '')}" />
                             <label class="rename-mod-label" for="rename-mod-nexus-mod-id">${window._t('rename_mod_nexus_mod_id_label')}</label>
-                            <input id="rename-mod-nexus-mod-id" class="rename-mod-input" type="text" inputmode="numeric" placeholder="12345" value="${escapeAttr(currentMod?.nexusModId != null ? String(currentMod.nexusModId) : '')}" />
+                            <div class="rename-mod-nexus-id-row">
+                                <input id="rename-mod-nexus-mod-id" class="rename-mod-input" type="text" inputmode="numeric" placeholder="12345" value="${escapeAttr(currentMod?.nexusModId != null ? String(currentMod.nexusModId) : '')}" />
+                                <button type="button" class="btn-popup secondary rename-mod-nexus-fetch" id="rename-mod-nexus-fetch" title="${escapeAttr(window._t('rename_mod_nexus_fetch') || 'Fetch from Nexus')}">
+                                    <i data-lucide="download-cloud"></i>
+                                    <span>${escapeHtml(window._t('rename_mod_nexus_fetch') || 'Fetch from Nexus')}</span>
+                                </button>
+                            </div>
+                            <p class="rename-mod-type-hint" id="rename-mod-nexus-fetch-status" hidden></p>
                             <label class="rename-mod-label" for="rename-mod-nexus-version">${window._t('rename_mod_nexus_version_label')}</label>
                             <input id="rename-mod-nexus-version" class="rename-mod-input" type="text" placeholder="1.0" value="${escapeAttr(currentMod?.nexusFileVersion || currentMod?.version || '')}" />
                             <label class="rename-mod-label" for="rename-mod-nexus-file-id">${window._t('rename_mod_nexus_file_id_label')}</label>
@@ -839,6 +1255,24 @@ export class ModsManager {
                             <input id="rename-mod-nexus-uploaded" class="rename-mod-input" type="text" inputmode="numeric" placeholder="${escapeAttr(window._t('rename_mod_nexus_uploaded_placeholder'))}" value="${escapeAttr(currentMod?.nexusFileUploaded != null ? String(currentMod.nexusFileUploaded) : '')}" />
                             <p class="rename-mod-type-hint">${escapeHtml(window._t('rename_mod_nexus_file_id_hint'))}</p>
                         </div>
+                        ${supportsFiles ? `
+                        <div class="rename-mod-tab-panel" data-panel="files" role="tabpanel" aria-labelledby="rename-mod-tab-files" hidden>
+                            <label class="rename-mod-label">${escapeHtml(window._t('rename_mod_files_legend'))}</label>
+                            <div class="rename-mod-files-actions">
+                                <button type="button" class="btn-popup secondary" id="rename-mod-files-import-archive"><i data-lucide="file-archive"></i> ${escapeHtml(window._t('rename_mod_files_import_archive'))}</button>
+                                <button type="button" class="btn-popup secondary" id="rename-mod-files-import-folder"><i data-lucide="folder-open"></i> ${escapeHtml(window._t('rename_mod_files_import_folder'))}</button>
+                                <div class="rename-mod-files-hint-wrap">
+                                    <button type="button" class="rename-mod-files-hint-icon" id="rename-mod-files-hint-btn" aria-expanded="false" aria-controls="rename-mod-files-hint-popover" aria-label="${escapeAttr(window._t('rename_mod_files_drop_hint'))}"><i data-lucide="alert-triangle"></i></button>
+                                    <div class="rename-mod-files-hint-popover" id="rename-mod-files-hint-popover" role="tooltip" hidden>${escapeHtml(window._t('rename_mod_files_drop_hint'))}</div>
+                                </div>
+                            </div>
+                            <div class="rename-mod-files-dropzone" id="rename-mod-files-dropzone">
+                                <i data-lucide="download"></i>
+                            </div>
+                            <p class="rename-mod-type-hint rename-mod-files-status" id="rename-mod-files-status" aria-live="polite" hidden></p>
+                            <label class="rename-mod-label" id="rename-mod-files-count">${escapeHtml(window._t('rename_mod_files_current'))}</label>
+                            <ul class="rename-mod-files-list" id="rename-mod-files-list"><li class="text-muted">${escapeHtml(window._t('rename_mod_files_loading'))}</li></ul>
+                        </div>` : ``}
                     </div>
                     <div class="modal-footer rename-mod-footer">
                         <button type="button" class="btn-popup secondary" id="rename-mod-cancel">${window._t('cancel')}</button>
@@ -849,7 +1283,11 @@ export class ModsManager {
         }
 
         document.body.appendChild(overlay);
-        if (window.lucide) window.lucide.createIcons();
+        if (window.lucide) {
+            try { window.lucide.createIcons({ nodes: [overlay] }); } catch (_) {
+                try { window.lucide.createIcons(); } catch (__) { }
+            }
+        }
 
         if (!isConfigRow) {
             const tabBtns = overlay.querySelectorAll('.rename-mod-tab');
@@ -865,12 +1303,54 @@ export class ModsManager {
                     panel.classList.toggle('active', show);
                     panel.hidden = !show;
                 });
+                this._setModFileDropTarget(tabId === 'files' && supportsFiles ? name : null);
+                if (tabId === 'files' && supportsFiles && !contentsRequested) {
+                    contentsRequested = true;
+                    window.chrome?.webview?.postMessage?.({ type: 'LIST_MOD_CONTENTS', name });
+                }
             };
+            let contentsRequested = false;
             tabBtns.forEach((btn) => {
                 btn.addEventListener('click', () => switchRenameTab(btn.dataset.tab));
             });
-            const tabToOpen = initialTab === 'nexus' ? 'nexus' : 'general';
+            let tabToOpen = 'general';
+            if (initialTab === 'nexus') tabToOpen = 'nexus';
+            else if (initialTab === 'files' && supportsFiles) tabToOpen = 'files';
             switchRenameTab(tabToOpen);
+
+            if (supportsFiles) {
+                overlay.dataset.filesModName = name;
+                const requestAddFiles = (mode) => {
+                    window.chrome?.webview?.postMessage?.({ type: 'ADD_FILES_TO_MOD', name, mode });
+                };
+                document.getElementById('rename-mod-files-import-archive')
+                    ?.addEventListener('click', () => requestAddFiles('archive'));
+                document.getElementById('rename-mod-files-import-folder')
+                    ?.addEventListener('click', () => requestAddFiles('folder'));
+
+                const hintBtn = document.getElementById('rename-mod-files-hint-btn');
+                const hintPopover = document.getElementById('rename-mod-files-hint-popover');
+                const setHintOpen = (open) => {
+                    if (!hintBtn || !hintPopover) return;
+                    hintPopover.hidden = !open;
+                    hintBtn.setAttribute('aria-expanded', String(open));
+                    hintBtn.classList.toggle('active', open);
+                };
+                hintBtn?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    setHintOpen(hintPopover.hidden);
+                });
+                overlay.addEventListener('click', (e) => {
+                    if (hintPopover && !hintPopover.hidden && !e.target.closest('.rename-mod-files-hint-wrap')) setHintOpen(false);
+                });
+                overlay.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape' && hintPopover && !hintPopover.hidden) {
+                        e.stopPropagation();
+                        setHintOpen(false);
+                        hintBtn?.focus();
+                    }
+                }, true);
+            }
         }
 
         const cancelBtn = document.getElementById('rename-mod-cancel');
@@ -883,11 +1363,14 @@ export class ModsManager {
         const nexusVersionInput = document.getElementById('rename-mod-nexus-version');
         const nexusFileIdInput = document.getElementById('rename-mod-nexus-file-id');
         const nexusUploadedInput = document.getElementById('rename-mod-nexus-uploaded');
+        const nexusFetchBtn = document.getElementById('rename-mod-nexus-fetch');
+        const nexusFetchStatus = document.getElementById('rename-mod-nexus-fetch-status');
         const initialNexusUrl = (currentMod?.url || '').trim();
         const initialNexusModId = currentMod?.nexusModId != null ? String(currentMod.nexusModId) : '';
         const initialNexusVersion = (currentMod?.nexusFileVersion || currentMod?.version || '').trim();
         const initialNexusFileId = currentMod?.nexusFileId != null ? String(currentMod.nexusFileId) : '';
         const initialNexusUploaded = currentMod?.nexusFileUploaded != null ? String(currentMod.nexusFileUploaded) : '';
+        this._pendingNexusResolve = null;
         const configSelect = document.getElementById('mod-config-file-select');
         const configStatus = document.getElementById('mod-config-file-status');
         const configEditor = document.getElementById('mod-config-editor');
@@ -916,11 +1399,107 @@ export class ModsManager {
             const fileId = nexusFileIdInput ? parseOptionalLong(nexusFileIdInput.value) : null;
             const uploaded = nexusUploadedInput ? parseOptionalLong(nexusUploadedInput.value) : null;
             let modId = modIdEntered;
-            if (!modId && url && url !== initialNexusUrl) {
+            if (!modId && url) {
                 modId = parseNexusModIdFromUrl(url);
             }
             return { url, modIdEntered, modId, version, fileId, uploaded };
         };
+
+        const setNexusFetchStatus = (text, isError = false) => {
+            if (!nexusFetchStatus) return;
+            if (!text) {
+                nexusFetchStatus.hidden = true;
+                nexusFetchStatus.textContent = '';
+                return;
+            }
+            nexusFetchStatus.hidden = false;
+            nexusFetchStatus.textContent = text;
+            nexusFetchStatus.classList.toggle('rename-mod-nexus-fetch-status--error', !!isError);
+        };
+
+        if (nexusFetchBtn) {
+            nexusFetchBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const loggedIn = !!(window.app?.realData?.managerSettings?.nexusLoggedIn
+                    ?? window.app?.realData?.nexusLoggedIn);
+                if (!loggedIn) {
+                    setNexusFetchStatus(window._t('rename_mod_nexus_fetch_login') || 'Log in to Nexus Mods in Settings first.', true);
+                    return;
+                }
+                const fields = getNexusFieldInputs();
+                if (!fields.modId) {
+                    setNexusFetchStatus(window._t('rename_mod_nexus_fetch_need_id') || 'Enter a Nexus URL or mod ID first.', true);
+                    return;
+                }
+                nexusFetchBtn.disabled = true;
+                setNexusFetchStatus(window._t('rename_mod_nexus_fetching') || 'Fetching from Nexus…');
+                this._pendingNexusResolve = {
+                    modId: fields.modId,
+                    apply: (payload) => {
+                        if (payload?.ok) {
+                            if (nexusModIdInput && payload.nexusModId) nexusModIdInput.value = String(payload.nexusModId);
+                            if (nexusUrlInput && payload.url) nexusUrlInput.value = String(payload.url);
+                            if (nexusFileIdInput && payload.nexusFileId) nexusFileIdInput.value = String(payload.nexusFileId);
+                            if (nexusVersionInput && payload.nexusFileVersion) nexusVersionInput.value = String(payload.nexusFileVersion);
+                            if (nexusUploadedInput && payload.nexusFileUploaded != null) nexusUploadedInput.value = String(payload.nexusFileUploaded);
+                            updateConfirmState();
+
+                            const nexusNow = getNexusFieldInputs();
+                            const nexusRemove = buildNexusRemoveFlags(nexusNow);
+                            const clearNexusLink = false;
+                            const metaPayload = {
+                                nexusUrl: nexusNow.url || payload.url || '',
+                                nexusFileVersion: nexusNow.version || payload.nexusFileVersion || '',
+                                clearNexusLink
+                            };
+                            if (Object.keys(nexusRemove).length) metaPayload.nexusRemove = nexusRemove;
+                            if (nexusNow.modId || payload.nexusModId) metaPayload.nexusModId = nexusNow.modId || payload.nexusModId;
+                            if (nexusNow.fileId || payload.nexusFileId) metaPayload.nexusFileId = nexusNow.fileId || payload.nexusFileId;
+                            if (nexusNow.uploaded != null || payload.nexusFileUploaded != null) {
+                                metaPayload.nexusFileUploaded = nexusNow.uploaded ?? payload.nexusFileUploaded;
+                            }
+
+                            this._applyLocalNexusPatch(name, nexusNow, nexusRemove, clearNexusLink);
+                            this._applyUpdateFlagsToVisibleRows();
+                            window.chrome?.webview?.postMessage?.({
+                                type: 'UPDATE_MOD_METADATA',
+                                originalName: name,
+                                metadata: metaPayload
+                            });
+
+                            if (payload.hasUpdate && payload.nexusModId && payload.nexusFileId) {
+                                setNexusFetchStatus(window._t('rename_mod_nexus_fetch_updating') || 'Downloading latest file from Nexus…');
+                                window.chrome?.webview?.postMessage?.({
+                                    type: 'UPDATE_MOD_FROM_NEXUS',
+                                    originalName: name,
+                                    modId: payload.nexusModId,
+                                    fileId: payload.nexusFileId,
+                                    fileName: payload.fileName || name,
+                                    fileVersion: payload.nexusFileVersion || '',
+                                    fileUploaded: payload.nexusFileUploaded ?? null
+                                });
+                                closeAction();
+                            } else if (payload.nexusFileId) {
+                                setNexusFetchStatus(window._t('rename_mod_nexus_fetch_uptodate') || 'Already up to date with this Nexus file.');
+                            } else {
+                                setNexusFetchStatus(window._t('rename_mod_nexus_fetch_ok') || 'Nexus link saved.');
+                            }
+                        } else {
+                            setNexusFetchStatus(payload?.error || window._t('rename_mod_nexus_fetch_failed') || 'Could not fetch Nexus data.', true);
+                        }
+                        nexusFetchBtn.disabled = false;
+                    }
+                };
+                window.chrome?.webview?.postMessage?.({
+                    type: 'NEXUS_RESOLVE_MOD_LINK',
+                    modId: fields.modId,
+                    url: fields.url || '',
+                    fileId: fields.fileId || null,
+                    version: fields.version || ''
+                });
+            });
+        }
 
         const buildNexusRemoveFlags = (fields) => {
             const remove = {};
@@ -1020,16 +1599,8 @@ export class ModsManager {
 
         const updateConfigHighlighting = () => {
             if (!configBackdrop || !configEditor) return;
-            let content = configEditor.value || '';
-            content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            const highlighted = content.replace(/^([^=\s\n][^=\n]*=)/gm, (match) => {
-                const parts = match.split('=');
-                if (parts.length > 1) {
-                    return `<span style="color: #6ed58a; font-weight: 500;">${parts[0]}</span>=`;
-                }
-                return match;
-            });
-            configBackdrop.innerHTML = highlighted + '\n';
+            const isJson = String(getCurrentConfigRelativePath()).toLowerCase().endsWith('.json');
+            configBackdrop.innerHTML = this._renderConfigHighlight(configEditor.value, isJson) + '\n';
             configBackdrop.scrollTop = configEditor.scrollTop;
             this._syncConfigEditorBackdropPad(overlay);
         };
@@ -1070,7 +1641,7 @@ export class ModsManager {
 
         const isConfigLikePath = (p) => {
             const lp = String(p || '').toLowerCase();
-            return lp.endsWith('.ini') || lp.endsWith('.json') || lp.endsWith('.txt');
+            return lp.endsWith('.ini') || lp.endsWith('.json') || lp.endsWith('.txt') || lp.endsWith('.toml');
         };
 
         const findOwningModsForRelativePath = (relPath) => {
@@ -1139,12 +1710,98 @@ export class ModsManager {
             });
         }
 
+        this._configJsonTree?.destroy();
+        this._configJsonTree = null;
+        this._onConfigContentLoaded = null;
+        const configTreeEl = document.getElementById('mod-config-json-tree');
+        if (isConfigRow && configTreeEl && configEditor) {
+            const viewTreeBtn = document.getElementById('mod-config-view-tree');
+            const viewTextBtn = document.getElementById('mod-config-view-text');
+            const foldBtn = document.getElementById('mod-config-tree-fold');
+            let sourceHadExtras = false;
+            let extrasWarned = false;
+
+            const tree = new JsonTreeEditor(configTreeEl, {
+                onChange: (value) => {
+                    configEditor.value = JSON.stringify(value, null, 2);
+                    updateConfigHighlighting();
+                    if (sourceHadExtras && !extrasWarned) {
+                        extrasWarned = true;
+                        setConfigStatus('Comments and trailing commas from the original file are removed when editing in Tree view.');
+                    } else if (!extrasWarned) {
+                        setConfigStatus('');
+                    }
+                }
+            });
+            this._configJsonTree = tree;
+
+            const syncFoldButton = () => {
+                if (!foldBtn) return;
+                const expanded = tree.allExpanded;
+                const label = expanded ? 'Collapse all' : 'Expand all';
+                foldBtn.title = label;
+                foldBtn.setAttribute('aria-label', label);
+                foldBtn.innerHTML = `<i data-lucide="${expanded ? 'chevrons-down-up' : 'chevrons-up-down'}"></i>`;
+                try { window.lucide?.createIcons({ nodes: [foldBtn] }); } catch (_) { }
+            };
+
+            const setConfigView = (view) => {
+                if (view === 'tree') {
+                    const text = configEditor.value || '';
+                    const parsed = this._parseJsonRelaxed(text);
+                    if (!parsed.ok) {
+                        setConfigStatus(`Invalid JSON: ${parsed.error}`, 'error');
+                        view = 'text';
+                    } else {
+                        try {
+                            JSON.parse(text);
+                            sourceHadExtras = false;
+                        } catch (_) {
+                            sourceHadExtras = true;
+                        }
+                        tree.setValue(parsed.value);
+                        syncFoldButton();
+                    }
+                }
+                overlay.dataset.configView = view;
+                viewTreeBtn?.classList.toggle('active', view === 'tree');
+                viewTreeBtn?.setAttribute('aria-selected', String(view === 'tree'));
+                viewTextBtn?.classList.toggle('active', view === 'text');
+                viewTextBtn?.setAttribute('aria-selected', String(view === 'text'));
+                if (configFormat) configFormat.disabled = view === 'tree' || configEditor.disabled;
+                if (view === 'text') {
+                    updateConfigHighlighting();
+                    requestAnimationFrame(() => this._syncConfigEditorBackdropPad(overlay));
+                }
+                return view;
+            };
+
+            viewTreeBtn?.addEventListener('click', () => {
+                if (!configEditor.disabled) setConfigView('tree');
+            });
+            viewTextBtn?.addEventListener('click', () => setConfigView('text'));
+            foldBtn?.addEventListener('click', () => {
+                tree.toggleAll();
+                syncFoldButton();
+            });
+
+            this._onConfigContentLoaded = (isJson) => {
+                setConfigView(isJson ? 'tree' : 'text');
+            };
+        }
+
         if (configSave && configEditor) {
             configSave.addEventListener('click', () => {
                 const rel = getCurrentConfigRelativePath();
                 if (!rel) return;
                 setConfigStatus('Saving…');
-                window.chrome.webview.postMessage({ type: 'WRITE_MOD_FILE', name: name, relativePath: rel, content: configEditor.value ?? '' });
+                window.chrome.webview.postMessage({
+                    type: 'WRITE_MOD_FILE',
+                    name: name,
+                    relativePath: rel,
+                    content: configEditor.value ?? '',
+                    applyToIni: isAddToOverlay
+                });
             });
         }
 
@@ -1210,6 +1867,13 @@ export class ModsManager {
                 closeAction();
                 return;
             }
+            if (isConfigRow && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && String(e.key).toLowerCase() === 's') {
+                e.preventDefault();
+                const active = document.activeElement;
+                if (active && active.classList && active.classList.contains('jt-input')) active.blur();
+                if (configSave && !configSave.disabled) configSave.click();
+                return;
+            }
             const ae = document.activeElement;
             const inTabs = ae && ae.closest && ae.closest('.rename-mod-tabs');
             const isMultilineEditor = ae && (
@@ -1248,7 +1912,16 @@ export class ModsManager {
         const term = (searchTerm || '').trim().toLowerCase();
         rows.forEach(row => {
             const searchText = (row.dataset.searchText || '').toLowerCase();
-            row.style.display = !term || searchText.includes(term) ? '' : 'none';
+            const show = !term || searchText.includes(term);
+            row.style.display = show ? '' : 'none';
+            const parentName = row.dataset.name;
+            if (parentName) {
+                document.querySelectorAll('.mod-loose-files-row').forEach((child) => {
+                    if (child.dataset.parent === parentName) {
+                        child.style.display = show ? '' : 'none';
+                    }
+                });
+            }
         });
         const selectAll = document.getElementById('select-all-mods');
         if (selectAll) {
@@ -1295,13 +1968,34 @@ export class ModsManager {
         const priorData = this.data;
         this._clearPendingDetailsIfServerHasData(data);
         if (data?.mods) this._mergeModUpdateFlags(data.mods);
-        if (this.tryInPlaceUpdate(data)) {
+
+        if (_pendingDeleteName && Array.isArray(data?.mods)) {
+            const stillThere = data.mods.some(m =>
+                String(m?.originalName || '') === _pendingDeleteName
+            );
+            if (!stillThere) clearDeleteModInFlight();
+        }
+
+        const modSig = (mods) => (mods || [])
+            .map(m => [
+                String(m?.originalName || ''),
+                String(m?.type || ''),
+                m?.isLoose ? '1' : '0',
+                String(m?.status || ''),
+                Array.isArray(m?.files) ? m.files.join(',') : ''
+            ].join('|'))
+            .sort()
+            .join('\n');
+        const contentChanged = modSig(priorData?.mods) !== modSig(data?.mods);
+
+        if (!contentChanged && this.tryInPlaceUpdate(data)) {
             this._applyUpdateFlagsToVisibleRows();
             if (this._shouldRecheckModUpdates(priorData, data)) {
                 this.scheduleModUpdateCheck();
             }
             return;
         }
+        this.data = data;
         this.refreshUI();
     }
 
@@ -1311,7 +2005,10 @@ export class ModsManager {
         const cleanName = n => n ? n.replace(/^Disabled\//, '') : '';
         const fileKeyOf = (n) => this._modFileKeyFromOriginalName(n);
         const expected = this.getSortedFilteredMods(data);
-        const currentRows = Array.from(document.querySelectorAll('.mod-row'));
+        const modsTbody = document.getElementById('mods-list-body');
+        const currentRows = modsTbody
+            ? Array.from(modsTbody.querySelectorAll(':scope > tr.mod-row'))
+            : Array.from(document.querySelectorAll('#mods-list-body .mod-row, .mods-table .mod-row'));
         
         if (expected.length === currentRows.length - 1 && expected.length >= 1) {
             const expectedIdentities = new Set();
@@ -1327,7 +2024,13 @@ export class ModsManager {
             };
             const unmatched = currentRows.filter((row) => !rowMatchesExpected(row));
             if (unmatched.length === 1 && unmatched[0].parentNode) {
+                const removedName = unmatched[0].dataset.name;
                 unmatched[0].remove();
+                if (removedName) {
+                    document.querySelectorAll('.mod-loose-files-row').forEach((child) => {
+                        if (child.dataset.parent === removedName) child.remove();
+                    });
+                }
                 this.data = data;
                 this.updateDeployButtonText();
                 this.updateSelectAllCheckbox(expected);
@@ -1336,7 +2039,7 @@ export class ModsManager {
         }
 
         if (expected.length > currentRows.length) {
-            const tbody = document.getElementById('mods-list-body');
+            const tbody = modsTbody || document.getElementById('mods-list-body');
             if (!tbody) return false;
 
             const modMatchesIdentity = (mod, identities) => {
@@ -1373,11 +2076,11 @@ export class ModsManager {
 
             for (const { mod, modIndex } of newModsByIndex) {
                 const temp = document.createElement('tbody');
-                temp.innerHTML = ModsRenderer.renderModRow(mod).trim();
-                const newRow = temp.querySelector('tr');
-                if (!newRow) return false;
+                temp.innerHTML = ModsRenderer.renderModRow(mod, this).trim();
+                const newRows = Array.from(temp.querySelectorAll('tr'));
+                if (newRows.length === 0) return false;
 
-                const rows = Array.from(tbody.querySelectorAll('.mod-row'));
+                const rows = Array.from(tbody.querySelectorAll(':scope > tr.mod-row'));
                 let insertBefore = null;
                 for (let i = modIndex + 1; i < expected.length; i++) {
                     const anchor = rows.find((r) => rowMatchesMod(r, expected[i]));
@@ -1386,8 +2089,12 @@ export class ModsManager {
                         break;
                     }
                 }
-                tbody.insertBefore(newRow, insertBefore);
-                if (window.lucide) window.lucide.createIcons({ nodes: [newRow] });
+
+                for (const newRow of newRows) {
+                    if (insertBefore) tbody.insertBefore(newRow, insertBefore);
+                    else tbody.appendChild(newRow);
+                }
+                if (window.lucide) window.lucide.createIcons({ nodes: newRows });
             }
 
             this.data = data;
@@ -1461,7 +2168,7 @@ export class ModsManager {
 
         let filteredMods = mods.filter(m => {
             const original = String(m?.originalName || '').toLowerCase();
-            if (original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt')) return false;
+            if (original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt') || original.endsWith('.toml')) return false;
 
             const matchesSearch = (m.name || "").toLowerCase().includes(searchTerm) ||
                 (m.originalName || "").toLowerCase().includes(searchTerm);
@@ -1469,10 +2176,10 @@ export class ModsManager {
 
             if (m.isBundle && m.status === 'disabled') return false;
 
-            if (this.currentPreset === 'uncategorized') {
-                return !m.group;
-            } else if (this.currentPreset !== 'all') {
-                return m.group === this.currentPreset;
+            const baseName = original.split('/').pop() || '';
+            const isStringMod = /\.(strings|dlstrings|ilstrings)$/i.test(baseName);
+            if (!isStringMod && this.modGroupsManager && !this.modGroupsManager.shouldShowMod(m.originalName, m.files)) {
+                return false;
             }
             return true;
         });
@@ -1519,57 +2226,163 @@ export class ModsManager {
         const btnDeployAll = document.getElementById('btn-deploy-all');
         if (btnDeployAll) {
             btnDeployAll.addEventListener('click', () => {
-                const selectedMods = Array.from(document.querySelectorAll('.mod-row'))
-                    .filter(tr => tr.querySelector('.mod-select').checked)
-                    .map(tr => tr.dataset.name);
+                const norm = (n) => (this.modGroupsManager?.constructor?.normalizeModKey
+                    ? this.modGroupsManager.constructor.normalizeModKey(n)
+                    : String(n || '').replace(/^Disabled\//i, ''));
+                const preset = this.modGroupsManager?.getActive?.();
+                const members = Array.isArray(preset?.mods) ? preset.mods.map(String) : [];
+                const memberSet = new Set(members.map(m => norm(m).toLowerCase()).filter(Boolean));
+                const activeName = this.modGroupsManager?.getActiveName?.() || 'Preset';
+
+                if (memberSet.size === 0) {
+                    window.app?.showBanner?.({
+                        type: 'warning',
+                        text: window._t?.('preset_deploy_empty')
+                            || `“${activeName}” has no mods. Add mods to this preset before deploying.`
+                    });
+                    window.chrome.webview.postMessage({
+                        type: 'DEPLOY_ALL',
+                        force: false,
+                        mods: [],
+                        presetScoped: true
+                    });
+                    return;
+                }
+
+                const tbody = document.getElementById('mods-list-body');
+                const rows = tbody
+                    ? Array.from(tbody.querySelectorAll(':scope > tr.mod-row'))
+                    : Array.from(document.querySelectorAll('#mods-list-body .mod-row'));
+
+                let modsToDeploy = rows
+                    .filter(tr => tr.querySelector('.mod-select')?.checked)
+                    .map(tr => tr.dataset.name)
+                    .filter(name => name && memberSet.has(norm(name).toLowerCase()));
+
+                if (modsToDeploy.length === 0) {
+                    const allMods = this.data?.mods || window.app?.realData?.mods || [];
+                    modsToDeploy = allMods
+                        .filter(m => m?.status === 'enabled' && memberSet.has(norm(m.originalName).toLowerCase()))
+                        .map(m => m.originalName)
+                        .filter(Boolean);
+                }
+
                 window.chrome.webview.postMessage({
                     type: 'DEPLOY_ALL',
                     force: false,
-                    mods: selectedMods
+                    mods: modsToDeploy,
+                    presetScoped: true
                 });
             });
         }
 
-        const presetSelect = document.getElementById('preset-select');
-        if (presetSelect) {
-            presetSelect.addEventListener('change', (e) => {
-                const val = e.target.value;
-                if (val === '__NEW__') {
-                    const name = prompt(window._t('new_preset_prompt'));
-                    if (name) {
-                        this.modGroupsManager.createGroup(name);
-                        this.currentPreset = name;
-                        this.refreshUI();
-                    } else {
-                        presetSelect.value = this.currentPreset;
+        const presetTrigger = document.getElementById('btn-preset-menu');
+        const presetDropdown = document.getElementById('preset-menu-dropdown');
+        if (presetTrigger && presetDropdown) {
+            if (this._presetMenuAbort) this._presetMenuAbort.abort();
+            this._presetMenuAbort = new AbortController();
+            const { signal: presetSignal } = this._presetMenuAbort;
+
+            const closePresetMenu = () => {
+                presetDropdown.hidden = true;
+                presetTrigger.setAttribute('aria-expanded', 'false');
+            };
+
+            const applyPreset = (val) => {
+                if (!val) return;
+                try {
+                    const leaving = this.modGroupsManager.getActive();
+                    if ((leaving?.mods || []).length > 0) {
+                        const allMods = this.app?.realData?.mods || window.app?.realData?.mods || [];
+                        this.modGroupsManager.syncEnabledFromMods(allMods);
                     }
-                } else {
-                    this.currentPreset = val;
+                } catch {  }
+                this.currentPreset = val;
+                this.modGroupsManager.activePreset = val;
+                this.modGroupsManager.save(true);
+                this.modGroupsManager.applyActive();
+                this.refreshUI();
+            };
+
+            presetTrigger.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const open = presetDropdown.hidden;
+                presetDropdown.hidden = !open;
+                presetTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+                if (open && window.lucide) window.lucide.createIcons();
+            }, { signal: presetSignal });
+
+            document.addEventListener('click', (e) => {
+                if (!document.getElementById('btn-preset-menu')) return;
+                if (!e.target.closest('.preset-menu-wrap')) closePresetMenu();
+            }, { signal: presetSignal });
+
+            presetDropdown.querySelectorAll('.preset-menu-item[data-preset]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const val = btn.getAttribute('data-preset');
+                    closePresetMenu();
+                    if (!val || val === this.modGroupsManager.getActiveName()) return;
+                    applyPreset(val);
+                }, { signal: presetSignal });
+            });
+
+            presetDropdown.querySelector('[data-preset-action="new"]')?.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                closePresetMenu();
+                const name = await window.appPrompt({
+                    title: window._t('new_preset') || 'New…',
+                    promptLabel: window._t('new_preset_prompt') || 'Enter new preset name:',
+                    okText: window._t('create') || 'Create'
+                });
+                if (name && this.modGroupsManager.createPreset(name.trim())) {
+                    this.currentPreset = name.trim();
+                    this.modGroupsManager.applyActive();
                     this.refreshUI();
                 }
-            });
-        }
+            }, { signal: presetSignal });
 
-        const btnDeletePreset = document.getElementById('btn-delete-preset');
-        if (btnDeletePreset) {
-            btnDeletePreset.addEventListener('click', async () => {
-                const name = this.currentPreset;
-                if (name === 'all' || name === 'uncategorized') return;
+            presetDropdown.querySelector('[data-preset-action="receive-updates"]')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const globalOn = !!(this.data?.managerSettings?.updateModsInAllPresets
+                    || window.app?.realData?.managerSettings?.updateModsInAllPresets);
+                if (globalOn) return;
+                const name = this.modGroupsManager.getActiveName();
+                const next = !this.modGroupsManager.getReceiveUpdates(name);
+                this.modGroupsManager.setReceiveUpdates(name, next);
+                closePresetMenu();
+                this.refreshUI();
+            }, { signal: presetSignal });
 
+            presetDropdown.querySelector('[data-preset-action="delete"]')?.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                closePresetMenu();
+                const name = this.modGroupsManager.getActiveName();
+                if (this.modGroupsManager.isDefaultPreset?.(name)) {
+                    window.app?.showBanner?.({ type: 'warning', text: window._t('cannot_delete_default_preset') });
+                    return;
+                }
                 const ok = await window.appConfirm({
-                    title: 'Confirmation',
+                    title: window._t('delete_preset') || 'Delete Preset',
                     message: window._t('delete_preset_confirm', name),
                     okText: window._t('delete'),
                     cancelText: window._t('cancel'),
                     danger: true
                 });
                 if (ok) {
-                    this.modGroupsManager.deleteGroup(name);
-                    this.currentPreset = 'all';
+                    this.modGroupsManager.deletePreset(name);
+                    this.currentPreset = this.modGroupsManager.getActiveName();
+                    this.modGroupsManager.applyActive();
                     this.refreshUI();
                 }
-            });
+            }, { signal: presetSignal });
         }
+
+        document.getElementById('btn-preset-add-from-files')?.addEventListener('click', () => {
+            if (window.chrome?.webview?.postMessage) {
+                window.chrome.webview.postMessage({ type: 'ADD_MOD' });
+            }
+        });
 
         const selectAll = document.getElementById('select-all-mods');
         if (selectAll) {
@@ -1596,6 +2409,24 @@ export class ModsManager {
                         enabled: checked,
                         names
                     });
+                    try {
+                        const mgr = this.modGroupsManager;
+                        const preset = mgr?.getActive?.();
+                        if (preset) {
+                            const norm = (n) => (mgr?.constructor?.normalizeModKey
+                                ? mgr.constructor.normalizeModKey(n)
+                                : String(n || '').replace(/^Disabled\//i, ''));
+                            const en = new Set((preset.enabled || []).map(norm).filter(Boolean));
+                            for (const n of names) {
+                                const clean = norm(n);
+                                if (!clean) continue;
+                                if (checked) en.add(clean);
+                                else en.delete(clean);
+                            }
+                            preset.enabled = [...en];
+                            mgr.save?.(true);
+                        }
+                    } catch {  }
                 }
                 this.updateDeployButtonText();
             });
@@ -1610,5 +2441,197 @@ export class ModsManager {
                 }
             });
         }
+
+        this._mountModsContextMenu();
+    }
+
+    _closeModsContextMenu() {
+        document.querySelectorAll('.mods-row-context-menu').forEach(m => m.remove());
+        if (this._modsContextAbort) {
+            this._modsContextAbort.abort();
+            this._modsContextAbort = null;
+        }
+    }
+
+    _mountModsContextMenu() {
+        const listRoot = document.querySelector('.mods-list-container') || document.getElementById('mods-list-body')?.closest('.mods-page');
+        const tbody = document.getElementById('mods-list-body');
+        if (!tbody && !listRoot) return;
+
+        if (this._modsContextRootAbort) this._modsContextRootAbort.abort();
+        this._modsContextRootAbort = new AbortController();
+        const { signal } = this._modsContextRootAbort;
+
+        const openMenu = (e, row) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._closeModsContextMenu();
+
+            this._modsContextAbort = new AbortController();
+            const dismissSignal = this._modsContextAbort.signal;
+
+            const menu = document.createElement('div');
+            menu.className = 'bundle-menu-dropdown file-entry-context-menu mods-row-context-menu';
+
+            if (!row) {
+                menu.innerHTML = `
+                    <div class="bundle-menu-item" data-action="add-mod">
+                        <i data-lucide="plus"></i>
+                        <span>${window._t('add_mod') || 'Add Mod'}</span>
+                    </div>
+                `;
+            } else {
+                const name = row.dataset.name || '';
+                const checkbox = row.querySelector('.mod-select');
+                const enabled = !!checkbox?.checked;
+                const updateBtn = row.querySelector('.btn-mod-update:not(.btn-mod-state-off):not([disabled])');
+                const hasUpdate = !!updateBtn;
+                const presetMgr = this.modGroupsManager;
+                const activePreset = presetMgr?.getActiveName?.() || '';
+                const inPreset = !!presetMgr?.isModInActivePreset?.(name);
+                const addTargets = (presetMgr?.listNames?.() || [])
+                    .filter(p => p !== activePreset && !presetMgr.isModInPreset(p, name));
+                const presetAddHtml = addTargets.length
+                    ? addTargets.map(p => `
+                    <div class="bundle-menu-item" data-action="preset-add" data-preset="${escapeAttr(p)}">
+                        <i data-lucide="folder-plus"></i>
+                        <span>${escapeAttr(window._t('preset_add_to', p))}</span>
+                    </div>`).join('')
+                    : `
+                    <div class="bundle-menu-item bundle-menu-item--muted">
+                        <i data-lucide="folder-plus"></i>
+                        <span>${escapeAttr(window._t('preset_in_all_presets'))}</span>
+                    </div>`;
+
+                menu.innerHTML = `
+                    <div class="bundle-menu-item" data-action="edit">
+                        <i data-lucide="pencil"></i>
+                        <span>${window._t('edit') || 'Edit'}</span>
+                    </div>
+                    <div class="bundle-menu-item" data-action="nexus">
+                        <i data-lucide="link"></i>
+                        <span>${window._t('rename_mod_tab_nexus') || 'Nexus'}</span>
+                    </div>
+                    <div class="bundle-menu-item" data-action="toggle">
+                        <i data-lucide="${enabled ? 'toggle-right' : 'toggle-left'}"></i>
+                        <span>${enabled ? (window._t('disable') || 'Disable') : (window._t('enable') || 'Enable')}</span>
+                    </div>
+                    ${hasUpdate ? `
+                    <div class="bundle-menu-item" data-action="update">
+                        <i data-lucide="download-cloud"></i>
+                        <span>${window._t('mod_update_available') || 'Update This Mod'}</span>
+                    </div>` : ''}
+                    <div class="bundle-menu-divider" role="separator"></div>
+                    ${presetAddHtml}
+                    <div class="bundle-menu-item${inPreset ? '' : ' bundle-menu-item--muted'}" data-action="preset-remove">
+                        <i data-lucide="folder-minus"></i>
+                        <span>${escapeAttr(window._t('preset_remove_from', activePreset))}</span>
+                    </div>
+                    <div class="bundle-menu-divider" role="separator"></div>
+                    <div class="bundle-menu-item danger" data-action="delete">
+                        <i data-lucide="trash-2"></i>
+                        <span>${window._t('delete') || 'Delete'}</span>
+                    </div>
+                `;
+
+                menu.querySelector('[data-action="edit"]')?.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    this.showRenameModal(name, 'general');
+                });
+                menu.querySelector('[data-action="nexus"]')?.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    this.showRenameModal(name, 'nexus');
+                });
+                menu.querySelector('[data-action="toggle"]')?.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    if (!checkbox) return;
+                    checkbox.checked = !enabled;
+                    if (window.handleModToggle) window.handleModToggle(checkbox, name);
+                    else checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                });
+                menu.querySelector('[data-action="update"]')?.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    if (updateBtn && window.nuclearModUpdate) window.nuclearModUpdate(updateBtn);
+                });
+                const cleanName = String(name).replace(/^Disabled\//i, '');
+                menu.querySelectorAll('[data-action="preset-add"]').forEach(item => {
+                    item.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        this._closeModsContextMenu();
+                        const target = item.dataset.preset;
+                        if (!target || !cleanName) return;
+                        presetMgr.addModsToPreset(target, [cleanName]);
+                        window.app?.showBanner?.({ type: 'success', text: window._t('preset_added_to', target) });
+                    });
+                });
+                menu.querySelector('[data-action="preset-remove"]')?.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    if (!inPreset || !activePreset || !cleanName) return;
+                    presetMgr.removeModsFromPreset(activePreset, [cleanName]);
+                    this.refreshUI?.();
+                });
+                menu.querySelector('[data-action="delete"]')?.addEventListener('click', async (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    await deleteModWithConfirmation(name);
+                });
+            }
+
+            menu.querySelector('[data-action="add-mod"]')?.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                this._closeModsContextMenu();
+                window.chrome?.webview?.postMessage?.({ type: 'ADD_MOD' });
+            });
+
+            document.body.appendChild(menu);
+            if (window.lucide) window.lucide.createIcons();
+
+            const pad = 8;
+            let left = e.clientX;
+            let top = e.clientY;
+            const mw = menu.offsetWidth || 220;
+            const mh = menu.offsetHeight || 200;
+            if (left + mw > window.innerWidth - pad) left = window.innerWidth - mw - pad;
+            if (top + mh > window.innerHeight - pad) top = window.innerHeight - mh - pad;
+            menu.style.position = 'fixed';
+            menu.style.left = `${Math.max(pad, left)}px`;
+            menu.style.top = `${Math.max(pad, top)}px`;
+            menu.style.zIndex = '10060';
+
+            const closeOnDismiss = (ev) => {
+                if (!menu.contains(ev.target)) this._closeModsContextMenu();
+            };
+            setTimeout(() => {
+                document.addEventListener('click', closeOnDismiss, { signal: dismissSignal });
+                document.addEventListener('contextmenu', closeOnDismiss, { signal: dismissSignal });
+                document.addEventListener('scroll', () => this._closeModsContextMenu(), { signal: dismissSignal, capture: true });
+                document.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Escape') this._closeModsContextMenu();
+                }, { signal: dismissSignal });
+            }, 0);
+        };
+
+        tbody?.addEventListener('contextmenu', (e) => {
+            const row = e.target.closest('tr.mod-row');
+            if (row && tbody.contains(row)) {
+                if (e.target.closest('a, input, button, .mod-select, .btn-icon')) {
+                }
+                openMenu(e, row);
+                return;
+            }
+            openMenu(e, null);
+        }, { signal });
+
+        listRoot?.addEventListener('contextmenu', (e) => {
+            if (e.target.closest('tr.mod-row')) return;
+            if (tbody && tbody.contains(e.target)) return;
+            if (!listRoot.contains(e.target)) return;
+            openMenu(e, null);
+        }, { signal });
     }
 }

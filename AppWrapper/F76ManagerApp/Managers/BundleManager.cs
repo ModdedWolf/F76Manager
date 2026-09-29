@@ -203,13 +203,24 @@ namespace F76ManagerApp.Managers
                     bool wantGeneral = format.Equals("Auto", StringComparison.OrdinalIgnoreCase) || format.Equals("General", StringComparison.OrdinalIgnoreCase);
                     bool wantTextures = format.Equals("Auto", StringComparison.OrdinalIgnoreCase) || format.Equals("DDS", StringComparison.OrdinalIgnoreCase);
 
-                    if (!wantGeneral) hasGeneral = false;
-                    if (!wantTextures) hasTextures = false;
-
-                    if (!hasGeneral && !hasTextures)
+                    bool filteredGeneral = wantGeneral && hasGeneral;
+                    bool filteredTextures = wantTextures && hasTextures;
+                    if (!filteredGeneral && !filteredTextures)
                     {
-                        throw new Exception("Selected format has no matching files to pack.");
+                        if (hasGeneral || hasTextures)
+                        {
+                            _logger($"[BUNDLE] Format '{format}' matched no files (general={hasGeneral}, textures={hasTextures}); auto-packing available content.");
+                            filteredGeneral = hasGeneral;
+                            filteredTextures = hasTextures;
+                        }
+                        else
+                        {
+                            throw new Exception("Selected format has no matching files to pack.");
+                        }
                     }
+
+                    hasGeneral = filteredGeneral;
+                    hasTextures = filteredTextures;
 
                     string gnrlDir = Path.Combine(tempDir, "Temp_GNRL");
                     string dx10Dir = Path.Combine(tempDir, "Temp_DX10");
@@ -219,12 +230,15 @@ namespace F76ManagerApp.Managers
 
                     foreach (var file in allFiles)
                     {
-                        string relPath = Path.GetRelativePath(tempDir, file);
                         bool isDds = file.EndsWith(".dds", StringComparison.OrdinalIgnoreCase);
+                        if (isDds && !hasTextures) continue;
+                        if (!isDds && !hasGeneral) continue;
+
+                        string relPath = Path.GetRelativePath(tempDir, file);
                         string targetRoot = isDds ? dx10Dir : gnrlDir;
                         
                         string destPath = Path.Combine(targetRoot, relPath);
-                        Directory.CreateDirectory(Path.GetDirectoryName(destPath));
+                        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
                         File.Move(file, destPath);
                     }
 
@@ -270,7 +284,8 @@ namespace F76ManagerApp.Managers
                         Files = generatedFiles
                     });
 
-                    _statusCallback?.Invoke("success", $"Successfully created bundle: {bundleName}");
+                    string successMsg = $"Successfully created bundle: {bundleName}";
+                    _statusCallback?.Invoke("success", successMsg);
                     _logger($"[BUNDLE] Completed. Cleaning up {tempDir}");
                     
                     var modsToDisable = new List<string>(modFiles);
@@ -283,7 +298,7 @@ namespace F76ManagerApp.Managers
                     onComplete?.Invoke();
                 } catch (Exception ex) {
                     _errorLogger($"[BUNDLE] FAILED: {ex.Message}");
-                    _statusCallback?.Invoke("error", "Failed to create bundle.");
+                    _statusCallback?.Invoke("error", $"Failed to create bundle: {ex.Message}");
                 } finally {
                     try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch (Exception cleanupEx) { _logger($"[BUNDLE] Failed to clean temp directory '{tempDir}': {cleanupEx.Message}"); }
                 }

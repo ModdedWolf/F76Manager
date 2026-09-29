@@ -6,21 +6,42 @@ namespace F76ManagerApp.Managers;
 
 public static class ThemePackageValidator
 {
-    public const int FormatVersion = 1;
-    public const int MaxZipBytes = 600 * 1024;
+    public const int FormatVersion = 2;
+    public const int MinFormatVersion = 1;
+    public const int MaxZipBytes = 2200 * 1024;
     public const int MaxManifestBytes = 32 * 1024;
-    public const int MaxLogoBytes = 512 * 1024;
+    public const int MaxLogoBytes = 2 * 1024 * 1024;
     public const int MaxLogoDimension = 512;
 
     public static readonly IReadOnlyList<string> TokenKeys = new[]
+    {
+        "bg-dark", "bg-surface", "bg-surface-light", "bg-elevated", "bg-inset",
+        "primary-green", "primary-rgb", "primary-hover",
+        "accent-amber", "text-main", "text-muted", "border-color",
+        "danger-red", "danger-red-soft", "success-green", "warning-yellow", "on-primary",
+    };
+
+    public static readonly IReadOnlyList<string> V1TokenKeys = new[]
     {
         "bg-dark", "bg-surface", "bg-surface-light", "primary-green", "primary-rgb",
         "accent-amber", "text-main", "text-muted", "border-color",
         "danger-red", "success-green", "warning-yellow", "on-primary",
     };
 
+    public static readonly IReadOnlyList<string> OptionalTokenKeys = new[]
+    {
+        "slider-track",
+    };
+
+    private static readonly HashSet<string> TokenKeySet = new(TokenKeys.Concat(OptionalTokenKeys), StringComparer.Ordinal);
+    private static readonly HashSet<string> V1TokenKeySet = new(V1TokenKeys, StringComparer.Ordinal);
+
     private static readonly Regex IdRe = new(@"^[a-z][a-z0-9]*(-[a-z0-9]+)*$", RegexOptions.Compiled);
-    private static readonly Regex HexRe = new(@"^#([0-9a-fA-F]{6})$", RegexOptions.Compiled);
+    private static readonly Regex Hex6Re = new(@"^#([0-9a-fA-F]{6})$", RegexOptions.Compiled);
+    private static readonly Regex Hex8Re = new(@"^#([0-9a-fA-F]{8})$", RegexOptions.Compiled);
+    private static readonly Regex RgbaRe = new(
+        @"^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(0|1|0?\.\d+|1\.0+)\s*\)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex RgbRe = new(@"^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$", RegexOptions.Compiled);
     private static readonly HashSet<string> ObjectFits = new(StringComparer.OrdinalIgnoreCase)
         { "cover", "contain", "fill", "none", "scale-down" };
@@ -35,6 +56,18 @@ public static class ThemePackageValidator
         return lower.Contains('<') || lower.Contains('>') || lower.Contains("javascript:") || lower.Contains("expression(");
     }
 
+    public static bool IsValidColorToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var v = value.Trim();
+        if (Hex6Re.IsMatch(v) || Hex8Re.IsMatch(v)) return true;
+        var m = RgbaRe.Match(v);
+        if (!m.Success) return false;
+        return int.TryParse(m.Groups[1].Value, out var r) && r <= 255
+            && int.TryParse(m.Groups[2].Value, out var g) && g <= 255
+            && int.TryParse(m.Groups[3].Value, out var b) && b <= 255;
+    }
+
     public static bool TryValidateManifest(string json, out ValidatedThemeManifest? manifest, out string? error)
     {
         manifest = null;
@@ -43,7 +76,12 @@ public static class ThemePackageValidator
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-            if (root.GetProperty("formatVersion").GetInt32() != FormatVersion)
+            if (!root.TryGetProperty("formatVersion", out var fvEl) || !fvEl.TryGetInt32(out var formatVersion))
+            {
+                error = "Missing formatVersion.";
+                return false;
+            }
+            if (formatVersion < MinFormatVersion || formatVersion > FormatVersion)
             {
                 error = "Unsupported formatVersion.";
                 return false;
@@ -62,7 +100,19 @@ public static class ThemePackageValidator
             }
 
             var tokens = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var key in TokenKeys)
+            var required = formatVersion >= 2 ? TokenKeys : V1TokenKeys;
+            var allowed = formatVersion >= 2 ? TokenKeySet : V1TokenKeySet;
+
+            foreach (var prop in tokensEl.EnumerateObject())
+            {
+                if (!allowed.Contains(prop.Name) && !TokenKeySet.Contains(prop.Name))
+                {
+                    error = $"Unknown token key: {prop.Name}";
+                    return false;
+                }
+            }
+
+            foreach (var key in required)
             {
                 if (!tokensEl.TryGetProperty(key, out var prop))
                 {
@@ -75,7 +125,30 @@ public static class ThemePackageValidator
                 {
                     if (!RgbRe.IsMatch(val)) { error = "Invalid primary-rgb."; return false; }
                 }
-                else if (!HexRe.IsMatch(val))
+                else if (!IsValidColorToken(val))
+                {
+                    if (formatVersion < 2 && !Hex6Re.IsMatch(val.Trim()))
+                    {
+                        error = $"Invalid color for {key}.";
+                        return false;
+                    }
+                    error = $"Invalid color for {key}.";
+                    return false;
+                }
+                tokens[key] = val.Trim();
+            }
+
+            foreach (var key in TokenKeys.Concat(OptionalTokenKeys))
+            {
+                if (tokens.ContainsKey(key)) continue;
+                if (!tokensEl.TryGetProperty(key, out var prop)) continue;
+                var val = prop.GetString() ?? "";
+                if (ContainsDangerousText(val)) { error = $"Unsafe token value: {key}"; return false; }
+                if (key == "primary-rgb")
+                {
+                    if (!RgbRe.IsMatch(val)) { error = "Invalid primary-rgb."; return false; }
+                }
+                else if (!IsValidColorToken(val))
                 {
                     error = $"Invalid color for {key}.";
                     return false;
@@ -83,14 +156,7 @@ public static class ThemePackageValidator
                 tokens[key] = val.Trim();
             }
 
-            foreach (var prop in tokensEl.EnumerateObject())
-            {
-                if (!TokenKeys.Contains(prop.Name))
-                {
-                    error = $"Unknown token key: {prop.Name}";
-                    return false;
-                }
-            }
+            DeriveMissingTokens(tokens);
 
             var logoLayout = NormalizeLogoLayout(root);
 
@@ -102,6 +168,101 @@ public static class ThemePackageValidator
             error = ex.Message;
             return false;
         }
+    }
+
+    public static void DeriveMissingTokens(Dictionary<string, string> tokens)
+    {
+        if (!tokens.ContainsKey("primary-hover") && tokens.TryGetValue("primary-green", out var primary))
+            tokens["primary-hover"] = LightenHexOrColor(primary, 0.12);
+
+        if (!tokens.ContainsKey("bg-elevated")
+            && tokens.TryGetValue("bg-surface", out var surface)
+            && tokens.TryGetValue("bg-surface-light", out var surfaceLight))
+            tokens["bg-elevated"] = MixColors(surface, surfaceLight, 0.5);
+
+        if (!tokens.ContainsKey("bg-inset") && tokens.TryGetValue("bg-dark", out var dark))
+            tokens["bg-inset"] = DarkenHexOrColor(dark, 0.04);
+
+        if (!tokens.ContainsKey("danger-red-soft") && tokens.TryGetValue("danger-red", out var danger))
+            tokens["danger-red-soft"] = ToRgba(danger, 0.18);
+
+        if (!tokens.ContainsKey("slider-track")
+            && tokens.TryGetValue("bg-surface-light", out var trackBase)
+            && tokens.TryGetValue("primary-green", out var trackTint))
+            tokens["slider-track"] = MixColors(trackBase, trackTint, 0.35);
+    }
+
+    private static bool TryParseColor(string value, out int r, out int g, out int b, out double a)
+    {
+        r = g = b = 0;
+        a = 1;
+        var v = value.Trim();
+        if (Hex6Re.IsMatch(v))
+        {
+            r = Convert.ToInt32(v.Substring(1, 2), 16);
+            g = Convert.ToInt32(v.Substring(3, 2), 16);
+            b = Convert.ToInt32(v.Substring(5, 2), 16);
+            return true;
+        }
+        if (Hex8Re.IsMatch(v))
+        {
+            r = Convert.ToInt32(v.Substring(1, 2), 16);
+            g = Convert.ToInt32(v.Substring(3, 2), 16);
+            b = Convert.ToInt32(v.Substring(5, 2), 16);
+            a = Convert.ToInt32(v.Substring(7, 2), 16) / 255.0;
+            return true;
+        }
+        var m = RgbaRe.Match(v);
+        if (!m.Success) return false;
+        r = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+        g = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+        b = int.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture);
+        a = double.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture);
+        return r <= 255 && g <= 255 && b <= 255;
+    }
+
+    private static string FormatHex(int r, int g, int b) =>
+        $"#{ClampByte(r):x2}{ClampByte(g):x2}{ClampByte(b):x2}";
+
+    private static int ClampByte(int n) => Math.Clamp(n, 0, 255);
+
+    private static string LightenHexOrColor(string color, double amount)
+    {
+        if (!TryParseColor(color, out var r, out var g, out var b, out _))
+            return color;
+        r = (int)Math.Round(r + (255 - r) * amount);
+        g = (int)Math.Round(g + (255 - g) * amount);
+        b = (int)Math.Round(b + (255 - b) * amount);
+        return FormatHex(r, g, b);
+    }
+
+    private static string DarkenHexOrColor(string color, double amount)
+    {
+        if (!TryParseColor(color, out var r, out var g, out var b, out _))
+            return color;
+        r = (int)Math.Round(r * (1 - amount));
+        g = (int)Math.Round(g * (1 - amount));
+        b = (int)Math.Round(b * (1 - amount));
+        return FormatHex(r, g, b);
+    }
+
+    private static string MixColors(string a, string b, double t)
+    {
+        if (!TryParseColor(a, out var r1, out var g1, out var b1, out _))
+            return a;
+        if (!TryParseColor(b, out var r2, out var g2, out var b2, out _))
+            return a;
+        var r = (int)Math.Round(r1 + (r2 - r1) * t);
+        var g = (int)Math.Round(g1 + (g2 - g1) * t);
+        var bl = (int)Math.Round(b1 + (b2 - b1) * t);
+        return FormatHex(r, g, bl);
+    }
+
+    private static string ToRgba(string color, double alpha)
+    {
+        if (!TryParseColor(color, out var r, out var g, out var b, out _))
+            return $"rgba(224, 86, 76, {alpha.ToString(CultureInfo.InvariantCulture)})";
+        return $"rgba({r}, {g}, {b}, {alpha.ToString(CultureInfo.InvariantCulture)})";
     }
 
     public static Dictionary<string, object> NormalizeLogoLayout(JsonElement root)
@@ -156,9 +317,12 @@ public static class ThemePackageValidator
 
     public static string BuildThemeCssBlock(string themeId, IReadOnlyDictionary<string, string> tokens, IReadOnlyDictionary<string, object> logoLayout)
     {
-        var lines = new List<string> { $"[data-theme=\"{themeId}\"] {{" };
-        foreach (var kv in tokens)
-            lines.Add($"  --{kv.Key}: {kv.Value};");
+        var lines = new List<string> { $":root[data-theme=\"{themeId}\"] {{" };
+        foreach (var key in TokenKeys.Concat(OptionalTokenKeys))
+        {
+            if (tokens.TryGetValue(key, out var val))
+                lines.Add($"  --{key}: {val};");
+        }
 
         if (tokens.TryGetValue("primary-rgb", out var rgb))
             lines.Add($"  --primary-green-dim: rgba({rgb}, 0.7);");
@@ -205,8 +369,15 @@ public static class ThemePackageValidator
             ext = ".webp";
             return true;
         }
+        if (data.Length >= 6
+            && data[0] == (byte)'G' && data[1] == (byte)'I' && data[2] == (byte)'F'
+            && data[3] == (byte)'8' && (data[4] == (byte)'7' || data[4] == (byte)'9') && data[5] == (byte)'a')
+        {
+            ext = ".gif";
+            return true;
+        }
 
-        error = "Unsupported image format (use PNG, JPEG, or WebP).";
+        error = "Unsupported image format (use PNG, JPEG, WebP, or GIF).";
         return false;
     }
 

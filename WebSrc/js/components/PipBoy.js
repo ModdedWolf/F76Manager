@@ -51,7 +51,7 @@ export class PipBoy {
             return '<div class="pipboy-page">' + tabsHtml + '<div class="interface-tab-content">' + panelHtml + '</div></div>';
         } catch (err) {
             console.error('[PipBoy] Render error:', err);
-            return '<div style="padding:48px;color:#ff5252;"><h2>PipBoy Render Error</h2><pre>' + (err.message || err) + '</pre><pre>' + (err.stack || '') + '</pre></div>';
+            return '<div style="padding:48px;color:var(--danger-red);"><h2>PipBoy Render Error</h2><pre>' + (err.message || err) + '</pre><pre>' + (err.stack || '') + '</pre></div>';
         }
     }
 

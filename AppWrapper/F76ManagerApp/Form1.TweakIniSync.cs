@@ -19,6 +19,7 @@ public partial class Form1
         if (!File.Exists(prefsPath) && !File.Exists(customPath))
             return;
 
+
         bool isXbox = _platformManager.IsXbox();
 
         string? ReadPrefs(string section, string key) =>
@@ -92,27 +93,27 @@ public partial class Form1
 
         string? gf = ReadPrefs("Grass", "fGrassStartFadeDistance");
         if (float.TryParse(gf, NumberStyles.Float, CultureInfo.InvariantCulture, out float gfVal))
-            SetGrassFade(isXbox, (int)Math.Clamp(gfVal, 0, 15000));
+            SetGrassFade(isXbox, (int)Math.Max(0, gfVal));
 
         string? td = ReadPrefs("TerrainManager", "fTreeLoadDistance");
         if (float.TryParse(td, NumberStyles.Float, CultureInfo.InvariantCulture, out float tdVal))
-            SetTreeDist(isXbox, (int)Math.Clamp(tdVal, 5000, 100000));
+            SetTreeDist(isXbox, (int)Math.Max(0, tdVal));
 
         string? lodMult = ReadPrefs("LOD", "fLODFadeOutMultObjects");
         if (float.TryParse(lodMult, NumberStyles.Float, CultureInfo.InvariantCulture, out float lodVal))
-            SetLod(isXbox, (int)Math.Clamp(Math.Round(lodVal * 10), 10, 100));
+            SetLod(isXbox, (int)Math.Max(0, Math.Round(lodVal * 10)));
 
         string? ls = ReadPrefs("LOD", "fLODFadeOutMultSkyCell");
         if (float.TryParse(ls, NumberStyles.Float, CultureInfo.InvariantCulture, out float lsVal))
-            SetLodSky(isXbox, (int)Math.Clamp(Math.Round(lsVal * 10), 1, 20));
+            SetLodSky(isXbox, (int)Math.Max(0, Math.Round(lsVal * 10)));
 
         string? la = ReadPrefs("Display", "fLeafAnimDampenDistStart");
         if (float.TryParse(la, NumberStyles.Float, CultureInfo.InvariantCulture, out float laVal))
-            SetLeafAnim(isXbox, (int)Math.Clamp(laVal, 1000, 8000));
+            SetLeafAnim(isXbox, (int)Math.Max(0, laVal));
 
         string? gm = ReadMerged("Display", "fGamma");
         if (double.TryParse(gm, NumberStyles.Float, CultureInfo.InvariantCulture, out double gmVal))
-            SetGamma(isXbox, Math.Clamp(gmVal, 0.8, 1.4));
+            SetGamma(isXbox, Math.Max(0.1, gmVal));
 
         string? ssr = ReadPrefs("LightingShader", "bScreenSpaceReflections");
         if (ssr != null)
@@ -147,14 +148,19 @@ public partial class Form1
         SyncFastloadFromIni(isXbox, ReadMerged);
         SyncFpsAndVsyncFromIni(isXbox, ReadMerged, ReadPrefs);
 
-        if (int.TryParse(ReadMerged("Display", "fDefaultWorldFOV"), out int fovW))
-            SetFov(isXbox, Math.Clamp(fovW, 70, 120));
+        string? defaultFovRaw = ReadMerged("Display", "fDefaultFOV");
+        if (TryParseWorldFovIni(ReadMerged("Display", "fDefaultWorldFOV"), out int fovW))
+            SetFov(isXbox, fovW);
+        else if (TryParseWorldFovIni(defaultFovRaw, out int fovWFallback))
+            SetFov(isXbox, fovWFallback);
 
-        if (int.TryParse(ReadMerged("Display", "fDefault1stPersonFOV"), out int fov1))
-            SetFov1st(isXbox, Math.Clamp(fov1, 70, 120));
+        if (TryParseFovIni(ReadMerged("Display", "fDefault1stPersonFOV"), out int fov1))
+            SetFov1st(isXbox, fov1);
+        else if (TryParseFovIni(defaultFovRaw, out int fov1Fallback))
+            SetFov1st(isXbox, fov1Fallback);
 
-        if (int.TryParse(ReadMerged("Display", "fPipboy1stFOV"), out int fovPb))
-            SetFovPipboy(isXbox, Math.Clamp(fovPb, 70, 120));
+        if (TryParseFovIni(ReadMerged("Display", "fPipboy1stFOV"), out int fovPb))
+            SetFovPipboy(isXbox, fovPb);
 
         string? mb = ReadMerged("ImageSpace", "bMBEnable");
         if (mb != null)
@@ -202,7 +208,7 @@ public partial class Form1
 
         string? conv = ReadPrefs("Display", "fConversationHistorySize");
         if (float.TryParse(conv, NumberStyles.Float, CultureInfo.InvariantCulture, out float convVal))
-            SetConversationHistory(isXbox, (int)Math.Clamp(Math.Round(convVal), 1, 10));
+            SetConversationHistory(isXbox, (int)Math.Max(0, Math.Round(convVal)));
 
         string? pipFx = ReadMerged("Pipboy", "bPipboyDisableFX");
         if (pipFx != null)
@@ -300,6 +306,34 @@ public partial class Form1
     private void SetFov(bool xbox, int v) { if (xbox) xboxFov = v; else steamFov = v; }
     private void SetFov1st(bool xbox, int v) { if (xbox) xboxFov1st = v; else steamFov1st = v; }
     private void SetFovPipboy(bool xbox, int v) { if (xbox) xboxFovPipboy = v; else steamFovPipboy = v; }
+
+    private static bool TryParseFovIni(string? raw, out int fov)
+    {
+        fov = 0;
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        string t = raw.Trim();
+        if (int.TryParse(t, NumberStyles.Integer, CultureInfo.InvariantCulture, out fov) && fov >= 70)
+            return true;
+        if (float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out float f) && f >= 70f)
+        {
+            fov = (int)Math.Round(f);
+            return true;
+        }
+        return false;
+    }
+
+    private static float WorldFovEngineToDisplayed(float engine) => engine * 4f / 3f;
+    private static float WorldFovDisplayedToEngine(float displayed) => displayed * 3f / 4f;
+
+    private static bool TryParseWorldFovIni(string? raw, out int displayed)
+    {
+        displayed = 0;
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        if (!float.TryParse(raw.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float engine) || engine <= 0f)
+            return false;
+        displayed = (int)Math.Round(WorldFovEngineToDisplayed(engine));
+        return true;
+    }
     private void SetFastload(bool xbox, bool v) { if (xbox) xboxFastload = v; else steamFastload = v; }
     private void SetSkipSplash(bool xbox, bool v) { if (xbox) xboxSkipSplash = v; else steamSkipSplash = v; }
     private void SetPing(bool xbox, bool v) { if (xbox) xboxPing = v; else steamPing = v; }
@@ -476,5 +510,70 @@ public partial class Form1
         gameIntegrityRepairV1 = true;
         SaveSettings();
         LogActivity($"[MIGRATION] Game integrity repair complete (Prefs archive scrub: {prefsScrubbed}; Data/CoreIni removed: {dataFoldersRemoved}).");
+    }
+
+    private void EnsureLooseConfigDeployRepairMigration()
+    {
+        if (looseConfigDeployRepairV1) return;
+        if (_modManager == null) return;
+
+        List<string> restored;
+        try
+        {
+            SyncAppPaths();
+            restored = _modManager.RestoreParkedLooseConfigs();
+        }
+        catch (Exception ex)
+        {
+            LogError($"[MIGRATION] Loose config restore failed: {ex.Message}");
+            return;
+        }
+
+        if (restored.Count > 0)
+        {
+            EnsureModPresetsInitialized();
+            var presets = LoadModPresetsDictionary();
+            foreach (var preset in presets.Values)
+            {
+                if (preset == null) continue;
+                preset.Mods ??= new List<string>();
+                preset.Enabled ??= new List<string>();
+                foreach (string key in restored)
+                {
+                    if (!preset.Mods.Any(m => string.Equals(NormalizePresetModKey(m), key, StringComparison.OrdinalIgnoreCase)))
+                        preset.Mods.Add(key);
+                    if (!preset.Enabled.Any(m => string.Equals(NormalizePresetModKey(m), key, StringComparison.OrdinalIgnoreCase)))
+                        preset.Enabled.Add(key);
+                }
+            }
+            PersistModPresets(presets);
+
+            bool profilesDirty = false;
+            foreach (var profile in profiles)
+            {
+                profile.ProfileMods ??= new List<string>();
+                profile.EnabledMods ??= new List<string>();
+                foreach (string key in restored)
+                {
+                    if (!profile.ProfileMods.Any(m => string.Equals(NormalizePresetModKey(m), key, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        profile.ProfileMods.Add(key);
+                        profilesDirty = true;
+                    }
+                    if (!profile.EnabledMods.Any(m => string.Equals(NormalizePresetModKey(m), key, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        profile.EnabledMods.Add(key);
+                        profilesDirty = true;
+                    }
+                }
+            }
+            if (profilesDirty) SaveProfiles();
+
+            LogActivity($"[MIGRATION] Restored {restored.Count} loose config(s) from Disabled Mods to Data: {string.Join(", ", restored)}");
+            try { SendDataToWeb(); } catch {  }
+        }
+
+        looseConfigDeployRepairV1 = true;
+        SaveSettings();
     }
 }

@@ -12,10 +12,9 @@ html[data-theme="red-black"] .presets-bar,
 html[data-theme="red-black"] .tweak-category,
 html[data-theme="red-black"] .settings-panel-card,
 html[data-theme="red-black"] .logs-container,
-html[data-theme="red-black"] .logs-tabs,
 html[data-theme="red-black"] .glass-panel-unified,
 html[data-theme="red-black"] .sync-popover {
-    background: #000000 !important;
+    background: var(--bg-surface) !important;
     border-color: var(--border-color) !important;
 }
 
@@ -31,8 +30,8 @@ html[data-theme="red-black"] .bundle-menu-item.bundle-menu-item--active:not(.bun
 
 html[data-theme="red-black"] .bundle-menu-item.danger:hover:not(.bundle-menu-item--muted),
 html[data-theme="red-black"] .bundle-menu-item.danger.bundle-menu-item--active:not(.bundle-menu-item--muted) {
-    background: rgba(239, 68, 68, 0.15) !important;
-    color: #f87171 !important;
+    background: var(--danger-red-soft) !important;
+    color: var(--danger-red) !important;
 }
 
 html[data-theme="red-black"] .nav-item,
@@ -57,10 +56,98 @@ html[data-theme="red-black"] .rename-mod-tabs,
 html[data-theme="red-black"] .rename-mod-header,
 html[data-theme="red-black"] .rename-mod-input,
 html[data-theme="red-black"] .rename-mod-details {
-    background: #000000 !important;
+    background: var(--bg-surface) !important;
     border-color: var(--border-color) !important;
 }
 
 html[data-theme="red-black"] .rename-mod-tabs {
     border-bottom-color: var(--border-color) !important;
+}
+
+html[data-theme="red-black"] .app-name,
+html[data-theme="red-black"] .section-title,
+html[data-theme="red-black"] .hero-overlay h1,
+html[data-theme="red-black"] .widget-header,
+html[data-theme="red-black"] .widget-header h3,
+html[data-theme="red-black"] .widget-header i,
+html[data-theme="red-black"] .card-header,
+html[data-theme="red-black"] .card-header i,
+html[data-theme="red-black"] .settings-content-title,
+html[data-theme="red-black"] .stat-value {
+    color: var(--primary-green) !important;
+}
+
+html[data-theme="red-black"] .log-tab:hover {
+    background: rgba(var(--primary-rgb), 0.08) !important;
+    color: var(--text-main) !important;
+}
+
+html[data-theme="red-black"] .log-tab.active {
+    background: rgba(var(--primary-rgb), 0.14) !important;
+    color: var(--primary-green) !important;
+    border-color: rgba(var(--primary-rgb), 0.35) !important;
+}
+
+html[data-theme="red-black"] .btn.primary:hover,
+html[data-theme="red-black"] .action-card.primary:hover {
+    background-color: #c64f38 !important;
+    border-color: #c64f38 !important;
+}
+
+html[data-theme="red-black"] .mod-row:hover,
+html[data-theme="red-black"] .mod-row:hover td {
+    background: rgba(var(--primary-rgb), 0.06) !important;
+}
+
+html[data-theme="red-black"] .empty-state-icon i {
+    color: var(--primary-green) !important;
+    filter: drop-shadow(0 0 12px rgba(var(--primary-rgb), 0.35));
+}
+
+html[data-theme="red-black"] .empty-state-content,
+html[data-theme="red-black"] .empty-state-container.polished {
+    border-color: rgba(var(--primary-rgb), 0.22) !important;
+}
+
+html[data-theme="red-black"] .tweak-label,
+html[data-theme="red-black"] .setting-label,
+html[data-theme="red-black"] .action-title {
+    color: var(--text-main) !important;
+}
+
+html[data-theme="red-black"] .tweak-desc,
+html[data-theme="red-black"] .setting-desc,
+html[data-theme="red-black"] .action-desc {
+    color: var(--text-muted) !important;
+}
+
+html[data-theme="red-black"] .action-card.primary .action-desc,
+html[data-theme="red-black"] .action-card.discord-card .action-desc,
+html[data-theme="red-black"] .action-card.github-card .action-desc {
+    color: rgba(245, 239, 232, 0.75) !important;
+}
+
+html[data-theme="red-black"] .action-card.primary .action-title,
+html[data-theme="red-black"] .action-card.discord-card .action-title,
+html[data-theme="red-black"] .action-card.github-card .action-title {
+    color: var(--on-primary) !important;
+}
+
+html[data-theme="red-black"] .mod-name {
+    color: var(--text-main) !important;
+}
+
+html[data-theme="red-black"] .tweaks-page,
+html[data-theme="red-black"] .log-content {
+    color: var(--text-main) !important;
+}
+
+html[data-theme="red-black"] .preset-btn:hover,
+html[data-theme="red-black"] .preset-btn.active {
+    color: var(--primary-green) !important;
+    border-color: var(--primary-green) !important;
+}
+
+html[data-theme="red-black"] .preset-btn.active {
+    background: rgba(var(--primary-rgb), 0.12) !important;
 }

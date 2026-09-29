@@ -9,7 +9,7 @@ import {
 } from '../utils/keybinds.js';
 import { escapeHtml, escapeAttr } from '../utils/htmlSafe.js';
 import { DEFAULT_UI_THEME } from '../themes/registry.js';
-import { applyUiTheme, getThemeOptionsForSettings } from '../utils/themeManager.js';
+import { applyUiTheme, getThemeOptionsForSettings, getRegisteredUserThemes, isUserThemeId } from '../utils/themeManager.js';
 
 export class Settings {
     constructor() {
@@ -35,6 +35,7 @@ export class Settings {
     static TOGGLES = [
         { id: 'tray-toggle', labelKey: 'minimize_to_tray', key: 'minimizeToTray' },
         { id: 'animations-toggle', labelKey: 'ui_animations', key: 'uiAnimations' },
+        { id: 'hide-kofi-toggle', labelKey: 'hide_kofi', key: 'hideKofi' },
         { id: 'platform-glow-toggle', labelKey: 'platform_badge_glow', key: 'platformBadgeGlow' },
         { id: 'sync-platforms-toggle', labelKey: 'sync_platforms', key: 'syncPlatforms' },
         { id: 'auto-force-toggle', labelKey: 'auto_conflict_override', key: 'autoForceDeploy' },
@@ -42,6 +43,9 @@ export class Settings {
         { id: 'config-spellcheck-toggle', labelKey: 'config_editor_spellcheck', key: 'configEditorSpellCheck' },
         { id: 'confirm-delete-mod-toggle', labelKey: 'confirm_before_delete_mod', key: 'confirmBeforeDeleteMod' },
         { id: 'confirm-remove-old-mod-toggle', labelKey: 'confirm_before_remove_old_mod_on_update', key: 'confirmBeforeRemoveOldModOnUpdate' },
+        { id: 'update-all-presets-toggle', labelKey: 'update_mods_in_all_presets', key: 'updateModsInAllPresets' },
+        { id: 'logs-reopen-toggle', labelKey: 'logs_popout_reopen', key: 'logsPopoutReopenOnLaunch' },
+        { id: 'logs-keep-open-toggle', labelKey: 'logs_popout_keep_open', key: 'logsPopoutKeepOpen' },
     ];
 
     render(data) {
@@ -65,13 +69,17 @@ export class Settings {
         const toggleDefaults = {
             minimizeToTray: false,
             uiAnimations: true,
+            hideKofi: false,
             platformBadgeGlow: true,
             syncPlatforms: true,
             autoForceDeploy: false,
             virtualModMode: false,
             configEditorSpellCheck: false,
             confirmBeforeDeleteMod: false,
-            confirmBeforeRemoveOldModOnUpdate: false
+            confirmBeforeRemoveOldModOnUpdate: false,
+            updateModsInAllPresets: false,
+            logsPopoutReopenOnLaunch: true,
+            logsPopoutKeepOpen: false
         };
         const togglesHtml = Settings.TOGGLES.map(p => {
             const val = ms[p.key];
@@ -79,13 +87,10 @@ export class Settings {
             const descKey = `${p.labelKey}_desc`;
             const desc = window._t(descKey);
             const descHtml = (desc && desc !== descKey) ? desc : '';
-            const labelHtml = p.key === 'virtualModMode'
-                ? `${t(p.labelKey)}<span class="text-muted">(Beta)</span>`
-                : t(p.labelKey);
             return `
             <div class="tweak-item">
                 <div class="tweak-info">
-                    <div class="tweak-label">${labelHtml}</div>
+                    <div class="tweak-label">${t(p.labelKey)}</div>
                     <div class="tweak-desc">${descHtml}</div>
                 </div>
                 <label class="switch">
@@ -103,37 +108,12 @@ export class Settings {
             </div>`;
 
         const renderPreferencesPanel = () => `
-            <div class="settings-card-inner">
-                <div class="tweak-item settings-nexus-wrap" style="flex-direction: column; align-items: flex-start; gap: 6px; border-bottom: 1px solid #1a1a1a; padding-bottom: 10px; margin-bottom: 4px;">
-                    <div class="tweak-label">${t('nexus_connection')}</div>
-                    <div class="path-input-group" style="width: 100%;">
-                        ${hasNexus ?
-                            `<div class="nexus-connected">
-                                <span>
-                                    <i data-lucide="check-circle"></i>
-                                    ${t('nexus_connected')}
-                                </span>
-                                <button class="btn danger btn-compact" id="nexus-logout-btn">
-                                    <i data-lucide="log-out"></i>
-                                    <span>${t('nexus_logout')}</span>
-                                </button>
-                            </div>` :
-                            `<button class="btn primary full-width nexus-login-btn" id="nexus-login-btn">
-                                <i data-lucide="log-in"></i>
-                                <span>${t('nexus_login')}</span>
-                            </button>`
-                        }
-                    </div>
-                    <div class="tweak-desc">
-                        ${hasNexus ? t('nexus_connected_desc') : t('nexus_login_sso_hint')}
-                    </div>
-                </div>
-
+            <div class="settings-card-inner settings-preferences-panel">
                 <div class="preferences-row">
                     ${togglesHtml}
                 </div>
 
-                <div class="tweak-item" style="border-top: 1px solid #1a1a1a; padding-top: 10px; margin-top: 4px;">
+                <div class="tweak-item" style="border-top: 1px solid var(--border-color); padding-top: 10px; margin-top: 4px;">
                     <div class="tweak-info">
                         <div class="tweak-label">${t('archive_key_label')}</div>
                         <div class="tweak-desc">${t('archive_key_desc')}</div>
@@ -243,56 +223,78 @@ export class Settings {
         };
         const contentTitle = contentTitles[this.activeTab] || '';
         const contentDesc = contentDescs[this.activeTab] || '';
-        const appVersion = data && data.appVersion ? data.appVersion : null;
 
         return `
             <div class="settings-page animate-fade">
                 <div class="settings-header-bar">
-                    <div class="settings-lang-wrap">
-                        <label for="language-select">${t('ui_language_label')}</label>
-                        <select class="settings-select" id="language-select">
-                            <option value="en-US" ${ms.language === 'en-US' ? 'selected' : ''}>English</option>
-                            <option value="fr-FR" ${ms.language === 'fr-FR' ? 'selected' : ''}>Français</option>
-                            <option value="de-DE" ${ms.language === 'de-DE' ? 'selected' : ''}>Deutsch</option>
-                            <option value="es-ES" ${ms.language === 'es-ES' ? 'selected' : ''}>Español</option>
-                            <option value="it-IT" ${ms.language === 'it-IT' ? 'selected' : ''}>Italiano</option>
-                            <option value="pl-PL" ${ms.language === 'pl-PL' ? 'selected' : ''}>Polski</option>
-                            <option value="ru-RU" ${ms.language === 'ru-RU' ? 'selected' : ''}>Русский</option>
-                            <option value="zh-CN" ${ms.language === 'zh-CN' ? 'selected' : ''}>简体中文</option>
-                            <option value="zh-TW" ${ms.language === 'zh-TW' ? 'selected' : ''}>繁體中文</option>
-                            <option value="ja-JP" ${ms.language === 'ja-JP' ? 'selected' : ''}>日本語</option>
-                            <option value="ko-KR" ${ms.language === 'ko-KR' ? 'selected' : ''}>한국어</option>
-                            <option value="pt-BR" ${ms.language === 'pt-BR' ? 'selected' : ''}>Português (Brasil)</option>
-                        </select>
+                    <div class="settings-header-left">
+                        <div class="settings-lang-wrap">
+                            <label for="language-select">${t('ui_language_label')}</label>
+                            <select class="settings-select" id="language-select">
+                                <option value="en-US" ${ms.language === 'en-US' ? 'selected' : ''}>English</option>
+                                <option value="fr-FR" ${ms.language === 'fr-FR' ? 'selected' : ''}>Français</option>
+                                <option value="de-DE" ${ms.language === 'de-DE' ? 'selected' : ''}>Deutsch</option>
+                                <option value="es-ES" ${ms.language === 'es-ES' ? 'selected' : ''}>Español</option>
+                                <option value="it-IT" ${ms.language === 'it-IT' ? 'selected' : ''}>Italiano</option>
+                                <option value="pl-PL" ${ms.language === 'pl-PL' ? 'selected' : ''}>Polski</option>
+                                <option value="ru-RU" ${ms.language === 'ru-RU' ? 'selected' : ''}>Русский</option>
+                                <option value="zh-CN" ${ms.language === 'zh-CN' ? 'selected' : ''}>简体中文</option>
+                                <option value="zh-TW" ${ms.language === 'zh-TW' ? 'selected' : ''}>繁體中文</option>
+                                <option value="ja-JP" ${ms.language === 'ja-JP' ? 'selected' : ''}>日本語</option>
+                                <option value="ko-KR" ${ms.language === 'ko-KR' ? 'selected' : ''}>한국어</option>
+                                <option value="pt-BR" ${ms.language === 'pt-BR' ? 'selected' : ''}>Português (Brasil)</option>
+                            </select>
+                        </div>
+                        <div class="settings-lang-wrap settings-theme-picker">
+                            <label for="ui-theme-select">${t('ui_theme_label')}</label>
+                            <select class="settings-select" id="ui-theme-select">
+                                ${getThemeOptionsForSettings(ms, { followApplied: true }).map((th) => {
+                                    const label = th.isUser
+                                        ? escapeHtml(th.displayName || th.id)
+                                        : escapeHtml(t(th.labelKey));
+                                    return `<option value="${escapeAttr(th.id)}" ${th.selected ? 'selected' : ''}>${label}</option>`;
+                                }).join('')}
+                            </select>
+                        </div>
                     </div>
-                    <div class="settings-lang-wrap settings-theme-picker">
-                        <label for="ui-theme-select">${t('ui_theme_label')}</label>
-                        <select class="settings-select" id="ui-theme-select">
-                            ${getThemeOptionsForSettings(ms).map((th) => {
-                                const label = th.isUser
-                                    ? escapeHtml(th.displayName || th.id)
-                                    : escapeHtml(t(th.labelKey));
-                                return `<option value="${escapeAttr(th.id)}" ${th.selected ? 'selected' : ''}>${label}</option>`;
-                            }).join('')}
-                        </select>
-                    </div>
-                    <div class="mods-actions-menu-wrap settings-theme-actions-wrap">
-                        <button type="button" class="btn-secondary mods-actions-trigger" id="btn-settings-theme-actions" aria-haspopup="true" aria-expanded="false" title="${escapeAttr(t('actions'))}">
-                            <i data-lucide="more-horizontal"></i>
+                    <div class="settings-header-actions">
+                        <div class="settings-nexus-wrap" title="${escapeAttr(hasNexus ? t('nexus_connected_desc') : t('nexus_login_sso_hint'))}">
+                            ${Settings.nexusControlsHtml(hasNexus)}
+                        </div>
+                        <button type="button" class="btn primary" id="save-settings">
+                            <i data-lucide="save"></i>
+                            <span>${t('save_changes')}</span>
                         </button>
-                        <div class="mods-actions-dropdown" id="settings-theme-actions-dropdown" hidden>
-                            <button type="button" class="mods-actions-item" id="btn-import-theme" title="${escapeAttr(t('theme_import_hint'))}">
-                                <i data-lucide="download"></i>
-                                <span>${escapeHtml(t('theme_import'))}</span>
+                        <div class="mods-actions-menu-wrap settings-theme-actions-wrap">
+                            <button type="button" class="btn-secondary mods-actions-trigger" id="btn-settings-theme-actions" aria-haspopup="true" aria-expanded="false" title="${escapeAttr(t('actions'))}">
+                                <i data-lucide="more-horizontal"></i>
                             </button>
-                            <button type="button" class="mods-actions-item" id="btn-open-themes-folder" title="${escapeAttr(t('theme_open_folder_hint'))}">
-                                <i data-lucide="folder-open"></i>
-                                <span>${escapeHtml(t('theme_open_folder'))}</span>
-                            </button>
-                            <button type="button" class="mods-actions-item" id="btn-reload-themes" title="${escapeAttr(t('theme_reload_hint'))}">
-                                <i data-lucide="refresh-cw"></i>
-                                <span>${escapeHtml(t('theme_reload'))}</span>
-                            </button>
+                            <div class="mods-actions-dropdown" id="settings-theme-actions-dropdown" hidden>
+                                <button type="button" class="mods-actions-item" id="btn-theme-creator" title="${escapeAttr(t('theme_creator_hint'))}">
+                                    <i data-lucide="palette"></i>
+                                    <span>${escapeHtml(t('theme_creator'))}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="btn-import-theme" title="${escapeAttr(t('theme_import_hint'))}">
+                                    <i data-lucide="download"></i>
+                                    <span>${escapeHtml(t('theme_import'))}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="btn-open-themes-folder" title="${escapeAttr(t('theme_open_folder_hint'))}">
+                                    <i data-lucide="folder-open"></i>
+                                    <span>${escapeHtml(t('theme_open_folder'))}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="btn-reload-themes" title="${escapeAttr(t('theme_reload_hint'))}">
+                                    <i data-lucide="refresh-cw"></i>
+                                    <span>${escapeHtml(t('theme_reload'))}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="btn-edit-theme" title="${escapeAttr(t('theme_edit_hint'))}" hidden>
+                                    <i data-lucide="pencil"></i>
+                                    <span>${escapeHtml(t('theme_edit'))}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item danger" id="btn-delete-theme" title="${escapeAttr(t('theme_delete_hint'))}" hidden>
+                                    <i data-lucide="trash-2"></i>
+                                    <span>${escapeHtml(t('theme_delete'))}</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -328,29 +330,130 @@ export class Settings {
                         </div>
                     </div>
                 </div>
-
-                <div class="settings-footer">
-                    <div class="app-info">
-                        ${appVersion ? `<span class="version-text">v${appVersion}</span>` : ''}
-                        <span class="author-text">${t('created_for_wastelanders')}</span>
-                    </div>
-                    <button class="btn primary" id="save-settings" style="padding: 8px 24px;">
-                        <i data-lucide="save"></i>
-                        <span>${t('save_changes')}</span>
-                    </button>
-                </div>
             </div>
         `;
     }
 
     updateValues(data) {
         if (window.app?.currentSection !== 'settings') return;
-        if (typeof window.app.replaceCurrentSectionContent === 'function') {
-            window.app.replaceCurrentSectionContent();
+        if (!data) return;
+
+        const ms = data.managerSettings || {};
+        const last = this._lastAppliedManagerSettings || {};
+        const toggleDefaults = {
+            minimizeToTray: false,
+            uiAnimations: true,
+            hideKofi: false,
+            platformBadgeGlow: true,
+            syncPlatforms: true,
+            autoForceDeploy: false,
+            virtualModMode: false,
+            configEditorSpellCheck: false,
+            confirmBeforeDeleteMod: false,
+            confirmBeforeRemoveOldModOnUpdate: false,
+            updateModsInAllPresets: false,
+            logsPopoutReopenOnLaunch: true,
+            logsPopoutKeepOpen: false
+        };
+
+        const hostVal = (key, fallback = '') => {
+            const v = ms[key];
+            return v === undefined || v === null ? fallback : v;
+        };
+
+        const shouldApply = (el, previousHost, nextHost) => {
+            if (!el) return false;
+            if (document.activeElement === el) return false;
+            const prev = previousHost === undefined || previousHost === null ? null : previousHost;
+            const next = nextHost === undefined || nextHost === null ? null : nextHost;
+            if (el.type === 'checkbox') {
+                const current = !!el.checked;
+                const prevBool = prev === null ? null : !!prev;
+                if (prevBool !== null && current !== prevBool) return false;
+                return current !== !!next;
+            }
+            const current = String(el.value ?? '');
+            const prevStr = prev === null ? null : String(prev);
+            const nextStr = next === null ? '' : String(next);
+            if (prevStr !== null && current !== prevStr) return false;
+            return current !== nextStr;
+        };
+
+        Settings.PATHS.forEach(p => {
+            const el = document.getElementById(p.id);
+            const next = hostVal(p.key, '');
+            if (shouldApply(el, last[p.key], next)) el.value = next;
+        });
+
+        Settings.TOGGLES.forEach(p => {
+            const el = document.getElementById(p.id);
+            const next = ms[p.key] !== undefined ? ms[p.key] : toggleDefaults[p.key];
+            const prev = last[p.key] !== undefined ? last[p.key] : toggleDefaults[p.key];
+            if (shouldApply(el, prev, next)) el.checked = !!next;
+        });
+
+        const languageEl = document.getElementById('language-select');
+        const nextLang = hostVal('language', 'en-US');
+        if (shouldApply(languageEl, last.language, nextLang)) languageEl.value = nextLang;
+
+        const themeEl = document.getElementById('ui-theme-select');
+        const nextTheme = hostVal('uiTheme', DEFAULT_UI_THEME);
+        if (shouldApply(themeEl, last.uiTheme, nextTheme)) {
+            themeEl.value = nextTheme;
         }
+
+        const archiveEl = document.getElementById('archive-key-select');
+        const nextArchive = hostVal('archiveKeyName', 'auto');
+        if (shouldApply(archiveEl, last.archiveKeyName, nextArchive)) archiveEl.value = nextArchive;
+
+        const nextNexus = !!ms.nexusLoggedIn;
+        const prevNexus = !!last.nexusLoggedIn;
+        if (nextNexus !== prevNexus || (document.querySelector('.settings-nexus-wrap') && !document.getElementById(nextNexus ? 'nexus-logout-btn' : 'nexus-login-btn'))) {
+            this._patchNexusConnection(nextNexus);
+        }
+
+        this._lastAppliedManagerSettings = { ...ms };
     }
 
-    onMount() {
+    static nexusControlsHtml(hasNexus) {
+        const t = (k) => window._t(k);
+        return hasNexus
+            ? `<div class="nexus-connected">
+                    <span>
+                        <i data-lucide="check-circle"></i>
+                        ${t('nexus_connection')}
+                    </span>
+                    <button type="button" class="btn secondary nexus-logout-icon" id="nexus-logout-btn" title="${escapeAttr(t('nexus_logout'))}" aria-label="${escapeAttr(t('nexus_logout'))}">
+                        <i data-lucide="log-out"></i>
+                    </button>
+                </div>`
+            : `<button type="button" class="btn primary nexus-login-btn" id="nexus-login-btn">
+                    <i data-lucide="log-in"></i>
+                    <span>${t('nexus_login')}</span>
+                </button>`;
+    }
+
+    _patchNexusConnection(hasNexus) {
+        const wrap = document.querySelector('.settings-nexus-wrap');
+        if (!wrap) return;
+        const t = (k) => window._t(k);
+        wrap.innerHTML = Settings.nexusControlsHtml(hasNexus);
+        wrap.title = hasNexus ? t('nexus_connected_desc') : t('nexus_login_sso_hint');
+        document.getElementById('nexus-login-btn')?.addEventListener('click', () => {
+            window.chrome.webview.postMessage({ type: 'NEXUS_LOGIN' });
+        });
+        document.getElementById('nexus-logout-btn')?.addEventListener('click', () => {
+            localStorage.removeItem('nexusBannerDismissed');
+            window.chrome.webview.postMessage({ type: 'NEXUS_LOGOUT' });
+        });
+        if (window.lucide) window.lucide.createIcons();
+    }
+
+    onMount(data) {
+        if (data?.managerSettings) {
+            this._lastAppliedManagerSettings = { ...data.managerSettings };
+        }
+
         document.querySelectorAll('[data-settings-tab]').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const target = e.currentTarget;
@@ -383,6 +486,23 @@ export class Settings {
             applyUiTheme(e.target?.value);
         });
 
+        const LIVE_PREVIEW_KEYS = ['uiAnimations', 'hideKofi', 'platformBadgeGlow'];
+        const applyLiveToggle = (key, checked) => {
+            if (LIVE_PREVIEW_KEYS.includes(key) && window.app) {
+                window.app._liveSettingOverrides = { ...(window.app._liveSettingOverrides || {}), [key]: checked };
+                window.app.applyLiveUiSettings();
+                return;
+            }
+            if (window.app?.realData?.managerSettings) {
+                window.app.realData.managerSettings[key] = checked;
+            }
+        };
+        Settings.TOGGLES.forEach(p => {
+            const el = document.getElementById(p.id);
+            if (!el) return;
+            el.addEventListener('change', () => applyLiveToggle(p.key, el.checked));
+        });
+
         this._mountSettingsThemeActionsMenu();
 
         document.getElementById('save-settings')?.addEventListener('click', () => {
@@ -396,6 +516,12 @@ export class Settings {
             settings.keybinds = this._keybindDraft || getKeybinds(window.app?.realData?.managerSettings);
             saveKeybindsLocal(settings.keybinds);
             window.chrome.webview.postMessage({ type: 'SAVE_MANAGER_SETTINGS', settings });
+            if (window.app) {
+                const ms = window.app.realData?.managerSettings;
+                if (ms) Object.assign(ms, window.app._liveSettingOverrides || {});
+                window.app._liveSettingOverrides = {};
+                window.app.applyLiveUiSettings();
+            }
         });
 
         this.mountKeybindEditors();
@@ -804,9 +930,16 @@ export class Settings {
         dropdown.hidden = true;
         trigger.setAttribute('aria-expanded', 'false');
 
+        const selectedThemeId = () => document.getElementById('ui-theme-select')?.value || '';
+
         trigger.addEventListener('click', (e) => {
             e.stopPropagation();
             const open = dropdown.hidden;
+            const isUser = isUserThemeId(selectedThemeId());
+            const deleteBtn = document.getElementById('btn-delete-theme');
+            const editBtn = document.getElementById('btn-edit-theme');
+            if (deleteBtn) deleteBtn.hidden = !isUser;
+            if (editBtn) editBtn.hidden = !isUser;
             dropdown.hidden = !open;
             trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
             if (open && window.lucide) window.lucide.createIcons();
@@ -817,6 +950,38 @@ export class Settings {
             if (!e.target.closest('.settings-theme-actions-wrap')) {
                 this._closeSettingsThemeActionsMenu();
             }
+        }, { signal });
+
+        document.getElementById('btn-edit-theme')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeSettingsThemeActionsMenu();
+            const id = selectedThemeId();
+            if (!isUserThemeId(id)) return;
+            window.chrome?.webview?.postMessage({ type: 'OPEN_THEME_CREATOR', editThemeId: id });
+        }, { signal });
+
+        document.getElementById('btn-delete-theme')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            this._closeSettingsThemeActionsMenu();
+            const id = selectedThemeId();
+            if (!isUserThemeId(id)) return;
+            const theme = getRegisteredUserThemes().find((th) => th.id === id);
+            const name = theme?.displayName || id;
+            const ok = await window.appConfirm?.({
+                title: window._t('theme_delete'),
+                message: window._t('theme_delete_confirm', name),
+                okText: window._t('theme_delete_ok'),
+                cancelText: window._t('cancel'),
+                danger: true,
+            });
+            if (!ok) return;
+            window.chrome?.webview?.postMessage({ type: 'DELETE_USER_THEME', id });
+        }, { signal });
+
+        document.getElementById('btn-theme-creator')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeSettingsThemeActionsMenu();
+            window.chrome?.webview?.postMessage({ type: 'OPEN_THEME_CREATOR' });
         }, { signal });
 
         document.getElementById('btn-import-theme')?.addEventListener('click', (e) => {

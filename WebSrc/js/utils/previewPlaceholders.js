@@ -52,12 +52,11 @@ function renderModsPlaceholder() {
                         <i data-lucide="search"></i>
                         <input type="text" placeholder="${t('search_mods_placeholder', 'Search mods…')}" disabled>
                     </div>
-                    <div class="preset-controls">
-                        <div class="preset-select-wrapper">
-                            <select class="preset-select" disabled>
-                                <option>${t('all_mods', 'All mods')}</option>
-                            </select>
-                        </div>
+                    <div class="preset-menu-wrap">
+                        <button type="button" class="preset-menu-trigger" disabled>
+                            <span>Default</span>
+                            <i data-lucide="chevron-down"></i>
+                        </button>
                     </div>
                 </div>
                 <div class="tool-buttons mods-toolbar-actions">
@@ -124,6 +123,7 @@ function renderConfigPlaceholder() {
                         <i data-lucide="search"></i>
                         <input type="text" id="config-search" placeholder="${t('search_config_placeholder', 'Search configs…')}" disabled>
                     </div>
+                    <div class="preset-active-label">Default</div>
                 </div>
                 <div class="tool-buttons mods-toolbar-actions">
                     <button type="button" class="btn-secondary" disabled><i data-lucide="more-horizontal"></i></button>

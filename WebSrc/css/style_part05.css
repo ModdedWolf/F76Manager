@@ -191,7 +191,7 @@ input:checked+.slider {
 
 input:checked+.slider:before {
     transform: translateX(20px) !important;
-    background-color: #121212 !important;
+    background-color: var(--bg-dark) !important;
 }
 
 .conflict-modal-overlay {
@@ -215,7 +215,7 @@ input:checked+.slider:before {
     height: auto !important;
     display: flex !important;
     flex-direction: column !important;
-    background: #121212 !important;
+    background: var(--bg-dark) !important;
     border: 1px solid rgba(255, 193, 7, 0.2) !important;
     border-radius: 16px !important;
     box-shadow: 0 32px 128px rgba(0, 0, 0, 0.9) !important;

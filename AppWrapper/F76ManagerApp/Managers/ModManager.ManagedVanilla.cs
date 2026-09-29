@@ -135,6 +135,12 @@ public partial class ModManager
         TrackManagedFileArtifact(AppPaths.PluginsFilePath);
     }
 
+    public bool HasPendingManagedArtifacts()
+    {
+        var manifest = LoadManagedArtifacts();
+        return manifest.Files.Count > 0 || manifest.IniKeys.Count > 0;
+    }
+
     public int CleanupManagedArtifacts()
     {
         var manifest = LoadManagedArtifacts();
@@ -231,5 +237,283 @@ public partial class ModManager
         {
             _logger($"[MANAGED] Failed to write INI restore to {path}: {ex.Message}");
         }
+    }
+
+    private HashSet<string> CollectManagerOwnedLiveFiles()
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var metadata = LoadMetadata();
+
+        void TryAdd(string? relative)
+        {
+            if (string.IsNullOrWhiteSpace(relative)) return;
+            string key = NormalizeMetadataKey(relative.Replace("\\", "/"));
+            if (string.IsNullOrWhiteSpace(key)) return;
+            if (key.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase) ||
+                key.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) ||
+                key.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!key.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) && IsVanillaFile(key)) return;
+            keys.Add(key);
+        }
+
+        foreach (string modName in GetEnabledModNamesInLoadOrder())
+        {
+            string metaKey = modName;
+            if (!metadata.ContainsKey(metaKey))
+            {
+                string fileName = Path.GetFileName(modName);
+                if (metadata.ContainsKey(fileName)) metaKey = fileName;
+            }
+
+            if (!metadata.TryGetValue(metaKey, out var meta) || meta?.Files == null) continue;
+            foreach (string file in meta.Files)
+                TryAdd(file);
+        }
+
+        string dataRoot = AppPaths.DataPath;
+        string stringsRoot = AppPaths.StringsPath;
+        string gameRoot = AppPaths.GameInstallRoot;
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(dataRoot) && Directory.Exists(dataRoot))
+            {
+                foreach (var file in Directory.GetFiles(dataRoot, "*.*", SearchOption.TopDirectoryOnly))
+                {
+                    string fileName = Path.GetFileName(file);
+                    string ext = Path.GetExtension(fileName).ToLowerInvariant();
+                    if (ext is not (".ba2" or ".esm" or ".esp")) continue;
+                    TryAdd(fileName);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(stringsRoot) && Directory.Exists(stringsRoot))
+            {
+                foreach (var file in Directory.GetFiles(stringsRoot, "*.*", SearchOption.TopDirectoryOnly))
+                {
+                    string fileName = Path.GetFileName(file);
+                    if (!TryParseStringModDiskName(fileName, out _, out _)) continue;
+                    TryAdd($"Strings/{fileName}");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(gameRoot) && Directory.Exists(gameRoot))
+            {
+                foreach (string name in GameRootInjectorBaseNames)
+                {
+                    string path = Path.Combine(gameRoot, name);
+                    if (File.Exists(path))
+                        TryAdd($"GameRoot/{name}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger($"[MANAGED] Failed scanning live mod files: {ex.Message}");
+        }
+
+        return keys;
+    }
+
+    private static bool FilesMatchBySize(string a, string b)
+    {
+        try
+        {
+            return File.Exists(a) && File.Exists(b) &&
+                   new FileInfo(a).Length == new FileInfo(b).Length;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public int MoveLiveModsIntoStaging()
+    {
+        if (!VirtualModMode) return 0;
+
+        EnsureActiveDataFolders();
+        int moved = 0;
+
+        foreach (string relative in CollectManagerOwnedLiveFiles())
+        {
+            try
+            {
+                string livePath = GetManagedRuntimeDestinationPath(relative);
+                string stagingPath = GetManagedRuntimeSourcePath(relative);
+                if (string.IsNullOrEmpty(livePath) || string.IsNullOrEmpty(stagingPath)) continue;
+                if (!File.Exists(livePath)) continue;
+
+                string? stagingDir = Path.GetDirectoryName(stagingPath);
+                if (!string.IsNullOrEmpty(stagingDir) && !Directory.Exists(stagingDir))
+                    Directory.CreateDirectory(stagingDir);
+
+                if (!FilesMatchBySize(livePath, stagingPath))
+                    File.Copy(livePath, stagingPath, true);
+
+                if (FilesMatchBySize(livePath, stagingPath))
+                {
+                    File.Delete(livePath);
+                    moved++;
+                    _logger($"[MANAGED] Moved live -> staging: {relative}");
+                }
+                else
+                {
+                    _logger($"[MANAGED] Skipped deleting live file after copy mismatch: {relative}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger($"[MANAGED] Failed moving live -> staging '{relative}': {ex.Message}");
+            }
+        }
+
+        return moved;
+    }
+
+    private List<string> CollectAllStagedFiles()
+    {
+        var keys = new List<string>();
+
+        string dataRoot = AppPaths.ManagedStagingDataPath;
+        if (!string.IsNullOrWhiteSpace(dataRoot) && Directory.Exists(dataRoot))
+        {
+            foreach (string file in Directory.GetFiles(dataRoot, "*", SearchOption.AllDirectories))
+            {
+                string key = Path.GetRelativePath(dataRoot, file).Replace("\\", "/");
+                if (key.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) ||
+                    key.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                keys.Add(key);
+            }
+        }
+
+        string gameRoot = AppPaths.ManagedStagingGameRootPath;
+        if (!string.IsNullOrWhiteSpace(gameRoot) && Directory.Exists(gameRoot))
+        {
+            foreach (string file in Directory.GetFiles(gameRoot, "*", SearchOption.TopDirectoryOnly))
+                keys.Add($"GameRoot/{Path.GetFileName(file)}");
+        }
+
+        return keys;
+    }
+
+    private static void RemoveEmptyDirectories(string root)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return;
+        foreach (string dir in Directory.GetDirectories(root, "*", SearchOption.AllDirectories)
+                     .OrderByDescending(d => d.Length))
+        {
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(dir).Any())
+                    Directory.Delete(dir);
+            }
+            catch { }
+        }
+    }
+
+    public bool HasStagedFiles() => CollectAllStagedFiles().Count > 0;
+
+    public int MoveStagedModsToLive()
+    {
+        if (VirtualModMode) return 0;
+
+        EnsureActiveDataFolders();
+        int moved = 0;
+
+        foreach (string relative in CollectAllStagedFiles())
+        {
+            try
+            {
+                string stagingPath = GetManagedRuntimeSourcePath(relative);
+                string livePath = GetManagedRuntimeDestinationPath(relative);
+                if (string.IsNullOrEmpty(livePath) || string.IsNullOrEmpty(stagingPath)) continue;
+                if (!File.Exists(stagingPath)) continue;
+
+                bool needsCopy = NeedsRuntimeCopy(stagingPath, livePath);
+                if (needsCopy && File.Exists(livePath) && !relative.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) && IsVanillaFile(relative))
+                {
+                    _logger($"[MANAGED] Kept staged file; refusing to overwrite vanilla game file: {relative}");
+                    continue;
+                }
+
+                string? liveDir = Path.GetDirectoryName(livePath);
+                if (!string.IsNullOrEmpty(liveDir) && !Directory.Exists(liveDir))
+                    Directory.CreateDirectory(liveDir);
+
+                if (needsCopy)
+                    File.Copy(stagingPath, livePath, true);
+
+                if (!NeedsRuntimeCopy(stagingPath, livePath))
+                {
+                    File.Delete(stagingPath);
+                    moved++;
+                    _logger($"[MANAGED] Moved staging -> live: {relative}");
+                }
+                else
+                {
+                    _logger($"[MANAGED] Kept staged file after copy mismatch: {relative}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger($"[MANAGED] Failed moving staging -> live '{relative}': {ex.Message}");
+            }
+        }
+
+        RemoveEmptyDirectories(AppPaths.ManagedStagingDataPath);
+        RemoveEmptyDirectories(AppPaths.ManagedStagingGameRootPath);
+
+        int left = CollectAllStagedFiles().Count;
+        if (left > 0)
+            _logger($"[MANAGED] {left} file(s) remain in staging after moving to live; see messages above.");
+
+        return moved;
+    }
+
+    public void ClearLiveLoadState()
+    {
+        try
+        {
+            string archiveKey = DetectArchiveKey();
+            _configManager.UpdateBothInis("Archive", archiveKey, "", onlyCustom: true);
+            _logger($"[MANAGED] Cleared live Custom.ini archive key ({archiveKey}).");
+        }
+        catch (Exception ex)
+        {
+            _logger($"[MANAGED] Failed clearing live archive list: {ex.Message}");
+        }
+
+        try
+        {
+            string pluginsPath = AppPaths.PluginsFilePath;
+            if (!string.IsNullOrWhiteSpace(pluginsPath))
+            {
+                string? dir = Path.GetDirectoryName(pluginsPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+                File.WriteAllText(pluginsPath, "");
+                _logger("[MANAGED] Cleared live plugins.txt.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger($"[MANAGED] Failed clearing plugins.txt: {ex.Message}");
+        }
+    }
+
+    public void RedeployDirect()
+    {
+        if (VirtualModMode)
+        {
+            _logger("[MANAGED] RedeployDirect skipped: Virtual Mod Mode is still enabled.");
+            return;
+        }
+
+        var order = GetEnabledModNamesInLoadOrder();
+        _logger($"[MANAGED] Redeploying {order.Count} enabled mod(s) in direct mode.");
+        UpdateModOrder(order, updateMetadataLoadOrder: false);
     }
 }

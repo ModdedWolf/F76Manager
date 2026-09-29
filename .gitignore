@@ -6,6 +6,8 @@ obj/
 publish/
 
 AppWrapper/F76ManagerApp/www/
+WebSrc/js/app.bundle.js
+WebSrc/node_modules/
 
 # Generated app data / packages
 Release/

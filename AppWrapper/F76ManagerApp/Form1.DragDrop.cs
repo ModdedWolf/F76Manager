@@ -180,6 +180,13 @@ public partial class Form1
         _lastDropSignatureAtUtc = now;
 
         LogActivity($"[PROCESS] {source} dropped {files.Length} items.");
+        string? dropTarget = _modFileDropTarget;
+        if (!string.IsNullOrWhiteSpace(dropTarget))
+        {
+            LogActivity($"[PROCESS] Routing drop into mod '{dropTarget}'.");
+            HandleAddFilesToMod(dropTarget, files.ToList());
+            return;
+        }
         HandleAddModFiles(files.ToList());
     }
 

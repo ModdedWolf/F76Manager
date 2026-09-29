@@ -298,7 +298,7 @@
 
 .profile-card.active {
     border-color: var(--primary-green);
-    background-color: rgba(184, 197, 164, 0.05);
+    background-color: rgba(var(--primary-rgb), 0.05);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
@@ -442,7 +442,7 @@
 
 .terminal-window {
     flex: 1;
-    background-color: #0d0d0d;
+    background-color: var(--bg-inset);
     border: 1px solid var(--border-color);
     border-radius: 12px;
     display: flex;
@@ -452,7 +452,7 @@
 }
 
 .terminal-header {
-    background-color: #1a1a1a;
+    background-color: var(--bg-surface);
     padding: 8px 16px;
     display: flex;
     align-items: center;
@@ -520,7 +520,7 @@
 }
 
 .log-line.error .log-content {
-    color: #ff8a80;
+    color: var(--danger-red);
 }
 
 .empty-terminal {
@@ -693,7 +693,7 @@ body.no-animations .btn {
 .mod-row.drop-target,
 .mod-group-row.drop-target {
     border-bottom: 2px solid var(--primary-green);
-    background-color: rgba(184, 197, 164, 0.1) !important;
+    background-color: rgba(var(--primary-rgb), 0.1) !important;
 }
 
 .group-actions {
@@ -726,12 +726,12 @@ body.no-animations .btn {
 
 .group-select:hover {
     border-color: var(--primary-green-dim);
-    background-color: rgba(184, 197, 164, 0.05);
+    background-color: rgba(var(--primary-rgb), 0.05);
 }
 
 .group-select:focus {
     border-color: var(--primary-green);
-    box-shadow: 0 0 0 2px rgba(184, 197, 164, 0.2);
+    box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2);
 }
 
 .group-select option {
@@ -990,9 +990,9 @@ body.no-animations .btn {
 }
 
 .preset-delete-integrated:hover {
-    background: #ff4d4d;
+    background: var(--danger-red);
     color: white;
-    border-color: #ff4d4d;
+    border-color: var(--danger-red);
 }
 
 .preset-delete-integrated i {
@@ -1281,7 +1281,7 @@ body.no-animations .btn {
 }
 
 .slider-track-container.red {
-    background: linear-gradient(to right, #2a0000, #ff4c4c);
+    background: linear-gradient(to right, #2a0000, var(--danger-red));
 }
 
 .slider-track-container.green {
@@ -1346,13 +1346,13 @@ body.no-animations .btn {
 }
 
 .pipboy-frame {
-    background-color: #0a0a0a;
+    background-color: var(--bg-inset);
     border-radius: 30px;
     padding: 20px;
     box-shadow:
         inset 0 0 20px rgba(255, 255, 255, 0.05),
         0 20px 40px rgba(0, 0, 0, 0.5);
-    border: 2px solid #333;
+    border: 2px solid var(--border-color);
     width: 100%;
     max-width: 500px;
     position: relative;
@@ -1388,7 +1388,7 @@ body.no-animations .btn {
     padding: 2px 6px;
     border-radius: 4px;
     background: rgba(255, 0, 0, 0.2);
-    color: #ff4d4d;
+    color: var(--danger-red);
     border: 1px solid rgba(255, 0, 0, 0.3);
     z-index: 50;
     font-family: inherit;
@@ -1396,7 +1396,7 @@ body.no-animations .btn {
 }
 
 .live-connection-badge.live {
-    background: rgba(184, 197, 164, 0.2);
+    background: rgba(var(--primary-rgb), 0.2);
     color: var(--primary-green);
     border-color: var(--primary-green);
     box-shadow: 0 0 10px var(--primary-green-dim);
@@ -1562,7 +1562,7 @@ body.no-animations .btn {
 }
 
 .glass-panel-unified {
-    background: linear-gradient(145deg, rgba(30, 30, 30, 0.9), rgba(15, 15, 15, 0.95));
+    background: linear-gradient(145deg, color-mix(in srgb, var(--bg-surface) 90%, transparent), color-mix(in srgb, var(--bg-surface) 95%, transparent));
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 20px;
     padding: 32px;
@@ -1696,7 +1696,7 @@ body.no-animations .btn {
 }
 
 .channel-label.red {
-    color: #ff4c4c;
+    color: var(--danger-red);
 }
 
 .channel-label.green {
@@ -1717,7 +1717,7 @@ body.no-animations .btn {
 }
 
 .slider-track.red {
-    background: linear-gradient(90deg, #330505, #ff4c4c);
+    background: linear-gradient(90deg, #330505, var(--danger-red));
 }
 
 .slider-track.green {
@@ -1887,22 +1887,22 @@ body.no-animations .btn {
 
 
 .tweaks-page {
-    padding: 12px 16px;
+    padding: 0;
     height: 100%;
     color: #e0e0e0;
     font-family: 'Inter', sans-serif;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 0;
 }
 
 .presets-bar {
     display: flex;
     align-items: center;
-    background: #141414;
+    background: var(--bg-inset);
     padding: 10px 16px;
     border-radius: 10px;
-    border: 1px solid #2a2a2a;
+    border: 1px solid var(--border-color);
     gap: 12px;
     flex-shrink: 0;
 }
@@ -1916,7 +1916,7 @@ body.no-animations .btn {
 
 .preset-btn {
     background: transparent;
-    border: 1px solid #333;
+    border: 1px solid var(--border-color);
     color: #aaa;
     padding: 5px 15px;
     border-radius: 20px;
@@ -1933,7 +1933,7 @@ body.no-animations .btn {
 }
 
 .preset-btn.active {
-    background: rgba(184, 197, 164, 0.1);
+    background: rgba(var(--primary-rgb), 0.1);
     border-color: var(--primary-green);
     color: var(--primary-green);
 }
@@ -1945,7 +1945,7 @@ body.no-animations .btn {
     flex: 1;
     overflow-y: auto;
     scrollbar-width: thin;
-    scrollbar-color: #333 transparent;
+    scrollbar-color: var(--border-color) transparent;
 }
 
 .tweaks-grid::-webkit-scrollbar {
@@ -1953,14 +1953,14 @@ body.no-animations .btn {
 }
 
 .tweaks-grid::-webkit-scrollbar-thumb {
-    background: #333;
+    background: var(--bg-surface-light);
     border-radius: 3px;
 }
 
 .tweak-category {
-    background: #141414;
+    background: var(--bg-inset);
     border-radius: 10px;
-    border: 1px solid #2a2a2a;
+    border: 1px solid var(--border-color);
     padding: 12px 16px;
 }
 
@@ -1969,7 +1969,7 @@ body.no-animations .btn {
     align-items: center;
     gap: 8px;
     margin-bottom: 12px;
-    border-bottom: 1px solid #222;
+    border-bottom: 1px solid var(--border-color);
     padding-bottom: 8px;
 }
 
@@ -1990,7 +1990,7 @@ body.no-animations .btn {
     justify-content: space-between;
     align-items: center;
     padding: 8px 0;
-    border-bottom: 1px solid #1a1a1a;
+    border-bottom: 1px solid var(--border-color);
 }
 
 .tweak-item:last-child {
@@ -2063,7 +2063,7 @@ input:checked+.slider:before {
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: radial-gradient(circle, #666 0%, #222 100%);
+    background: radial-gradient(circle, #666 0%, var(--bg-elevated) 100%);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
     margin-bottom: 20px;
     border: 1px solid #000;
@@ -2072,7 +2072,7 @@ input:checked+.slider:before {
 .knob-select {
     width: 18px;
     height: 40px;
-    background: #222;
+    background: var(--bg-elevated);
     border-radius: 4px;
     margin-bottom: 30px;
     border: 1px solid #555;
@@ -2088,7 +2088,7 @@ input:checked+.slider:before {
 .vent-grill span {
     width: 20px;
     height: 3px;
-    background: #1a1a1a;
+    background: var(--bg-surface);
     border-radius: 2px;
     box-shadow: inset 0 1px 2px rgba(0, 0, 0, 1);
 }
@@ -2109,7 +2109,7 @@ input:checked+.slider:before {
     left: 50%;
     width: 60%;
     height: 15%;
-    background: #222;
+    background: var(--bg-elevated);
     transform: translate(-50%, -50%) rotate(45deg);
 }
 
@@ -2129,18 +2129,22 @@ input:checked+.slider:before {
 
 .notification-container {
     position: fixed;
-    top: 24px;
+    top: auto;
+    bottom: 24px;
     right: 24px;
     display: flex;
-    flex-direction: column;
+    flex-direction: column-reverse;
     gap: 10px;
-    z-index: 9999;
+    max-height: min(40vh, 320px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    z-index: 100000;
     pointer-events: none;
 }
 
 .status-banner {
     pointer-events: auto;
-    background: rgba(18, 18, 18, 0.95);
+    background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
     backdrop-filter: blur(10px);
     border: 1px solid var(--border-color);
     padding: 12px 16px;
@@ -2368,14 +2372,14 @@ input:checked+.slider:before {
 }
 
 .log-tab:hover {
-    background: rgba(184, 197, 164, 0.05);
+    background: rgba(var(--primary-rgb), 0.05);
     color: var(--text-main);
 }
 
 .log-tab.active {
-    background: rgba(184, 197, 164, 0.1);
+    background: rgba(var(--primary-rgb), 0.1);
     color: var(--primary-green);
-    border-color: rgba(184, 197, 164, 0.2);
+    border-color: rgba(var(--primary-rgb), 0.2);
 }
 
 .error-badge {
@@ -2392,7 +2396,7 @@ input:checked+.slider:before {
     align-items: center;
     justify-content: space-between;
     padding: 8px 16px;
-    background: #1a1a1a;
+    background: var(--bg-surface);
     border-bottom: 1px solid var(--border-color);
 }
 
@@ -2437,7 +2441,7 @@ input:checked+.slider:before {
 }
 
 .log-line.error {
-    color: #ff8a80;
+    color: var(--danger-red);
 }
 
 .log-ts {
@@ -2478,15 +2482,15 @@ input:checked+.slider:before {
 .endorsement-widget {
     margin: 20px 16px;
     padding: 1px;
-    background: linear-gradient(135deg, rgba(184, 197, 164, 0.2) 0%, transparent 100%);
+    background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.2) 0%, transparent 100%);
     border-radius: 12px;
     animation: fadeIn 0.5s ease-out;
 }
 
 .endorsement-card {
-    background: rgba(20, 20, 20, 0.6);
+    background: color-mix(in srgb, var(--bg-surface) 60%, transparent);
     backdrop-filter: blur(10px);
-    border: 1px solid rgba(184, 197, 164, 0.1);
+    border: 1px solid rgba(var(--primary-rgb), 0.1);
     border-radius: 11px;
     padding: 16px;
     display: flex;
@@ -2540,13 +2544,13 @@ input:checked+.slider:before {
     background: var(--primary-green);
     color: #000;
     border: none;
-    box-shadow: 0 4px 12px rgba(184, 197, 164, 0.2);
+    box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.2);
 }
 
 .endorse-btn.main:hover {
     transform: translateY(-1px);
     filter: brightness(1.1);
-    box-shadow: 0 6px 15px rgba(184, 197, 164, 0.3);
+    box-shadow: 0 6px 15px rgba(var(--primary-rgb), 0.3);
 }
 
 .endorse-btn.ghost {
@@ -2580,8 +2584,8 @@ input:checked+.slider:before {
     gap: 8px;
     padding: 0 20px;
     height: 38px;
-    background: rgba(184, 197, 164, 0.08);
-    border: 2px dashed rgba(184, 197, 164, 0.4);
+    background: rgba(var(--primary-rgb), 0.08);
+    border: 2px dashed rgba(var(--primary-rgb), 0.4);
     border-radius: 8px;
     color: var(--primary-green);
     font-size: 0.85rem;
@@ -2591,14 +2595,14 @@ input:checked+.slider:before {
 }
 
 .drop-zone-box:hover {
-    background: rgba(184, 197, 164, 0.15);
+    background: rgba(var(--primary-rgb), 0.15);
     border-color: var(--primary-green);
 }
 
 .drop-zone-box.drag-over {
-    background: rgba(184, 197, 164, 0.25);
+    background: rgba(var(--primary-rgb), 0.25);
     border-color: var(--primary-green);
-    box-shadow: 0 0 20px rgba(184, 197, 164, 0.3);
+    box-shadow: 0 0 20px rgba(var(--primary-rgb), 0.3);
     transform: scale(1.02);
 }
 
@@ -2695,18 +2699,18 @@ input:checked+.slider:before {
 }
 
 .preset-select:hover {
-    background-color: rgba(184, 197, 164, 0.05);
+    background-color: rgba(var(--primary-rgb), 0.05);
     border-color: var(--primary-green-dim);
 }
 
 .preset-select:focus {
     border-color: var(--primary-green);
-    box-shadow: 0 0 12px rgba(184, 197, 164, 0.2);
+    box-shadow: 0 0 12px rgba(var(--primary-rgb), 0.2);
     background-color: rgba(0, 0, 0, 0.6);
 }
 
 .preset-select option {
-    background: #1e1e1e;
+    background: var(--bg-surface);
     color: var(--text-main);
     padding: 10px;
 }
@@ -2753,7 +2757,7 @@ input:checked+.slider:before {
     outline: none;
     border-color: var(--primary-green);
     background: rgba(0, 0, 0, 0.5);
-    box-shadow: 0 0 8px rgba(184, 197, 164, 0.2);
+    box-shadow: 0 0 8px rgba(var(--primary-rgb), 0.2);
 }
 
 .tool-buttons {
@@ -2788,7 +2792,7 @@ input:checked+.slider:before {
 
 .mods-list-container {
     flex: 1;
-    background: #141414;
+    background: var(--bg-inset);
     border: 1px solid var(--border-color);
     border-radius: 12px;
     display: flex;
@@ -2854,13 +2858,13 @@ input:checked+.slider:before {
 }
 
 .mod-row {
-    background: #181818;
+    background: var(--bg-surface);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     animation: modRowEntry 0.4s ease-out both;
 }
 
 .mod-row:hover {
-    background: #222222;
+    background: var(--bg-elevated);
     transform: translateX(4px);
     box-shadow: -4px 0 0 var(--primary-green);
 }

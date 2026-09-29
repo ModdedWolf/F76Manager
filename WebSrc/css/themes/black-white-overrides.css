@@ -30,8 +30,8 @@ html[data-theme="black-white"] .mods-toolbar {
 
 html[data-theme="black-white"] .bundle-menu-item:hover:not(.bundle-menu-item--muted),
 html[data-theme="black-white"] .bundle-menu-item.bundle-menu-item--active:not(.bundle-menu-item--muted) {
-    background: rgba(255, 255, 255, 0.1) !important;
-    color: #ffffff !important;
+    background: rgba(var(--primary-rgb), 0.1) !important;
+    color: var(--text-main) !important;
 }
 
 html[data-theme="black-white"] .bundle-menu-item.danger:hover:not(.bundle-menu-item--muted),

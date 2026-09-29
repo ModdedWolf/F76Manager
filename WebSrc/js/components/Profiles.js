@@ -1,3 +1,5 @@
+import { escapeHtml, escapeAttr } from '../utils/htmlSafe.js';
+
 export class Profiles {
     render(data) {
         const profiles = data ? (data.profiles || ['Default Profile']) : ['Default Profile'];
@@ -18,7 +20,7 @@ export class Profiles {
                 <div class="profile-creator-bar">
                     <div class="creator-input-group">
                         <i data-lucide="plus-circle"></i>
-                        <input type="text" id="new-profile-name" placeholder="${window._t('profile_name_placeholder')}">
+                        <input type="text" id="new-profile-name" placeholder="${escapeAttr(window._t('profile_name_placeholder'))}">
                         <button class="btn primary" id="btn-create-profile">
                             <i data-lucide="save"></i>
                             <span>${window._t('create_from_current')}</span>
@@ -33,7 +35,7 @@ export class Profiles {
                                 <i data-lucide="user"></i>
                             </div>
                             <div class="profile-info">
-                                <div class="profile-name">${name}</div>
+                                <div class="profile-name">${escapeHtml(name)}</div>
                                 <div class="profile-status">
                                     ${name === active ?
                 `<span class="active-tag"><span class="dot"></span> ${window._t('tag_active')}</span>` :
@@ -43,13 +45,13 @@ export class Profiles {
                             </div>
                             <div class="profile-actions">
                                 ${name !== active ? `
-                                    <button class="btn-sm switch-profile" data-name="${name}">
+                                    <button class="btn-sm switch-profile" data-name="${escapeAttr(name)}">
                                         <i data-lucide="refresh-cw"></i>
                                         <span>${window._t('switch')}</span>
                                     </button>
                                 ` : ''}
                                 ${name !== 'Default Profile' ? `
-                                    <button class="icon-btn-sm delete-profile" data-name="${name}" title="${window._t('delete')}">
+                                    <button class="icon-btn-sm delete-profile" data-name="${escapeAttr(name)}" title="${escapeAttr(window._t('delete'))}">
                                         <i data-lucide="trash-2"></i>
                                     </button>
                                 ` : ''}
@@ -66,16 +68,37 @@ export class Profiles {
         `;
     }
 
-    updateValues() {
+    updateValues(data) {
+        if (window.app && typeof window.app.replaceCurrentSectionContent === 'function') {
+            window.app.replaceCurrentSectionContent();
+        }
     }
 
     onMount() {
         const createBtn = document.getElementById('btn-create-profile');
+        const nameInput = document.getElementById('new-profile-name');
+
+        const submitCreate = () => {
+            const name = (nameInput?.value || '').trim();
+            if (!name) {
+                if (window.app?.showBanner) {
+                    window.app.showBanner({ type: 'warning', text: window._t('profile_name_required') || 'Enter a profile name.' });
+                }
+                return;
+            }
+            window.chrome.webview.postMessage({ type: 'CREATE_PROFILE', name });
+            if (nameInput) nameInput.value = '';
+        };
+
         if (createBtn) {
-            createBtn.addEventListener('click', () => {
-                const name = document.getElementById('new-profile-name').value;
-                if (!name) return;
-                window.chrome.webview.postMessage({ type: 'CREATE_PROFILE', name: name });
+            createBtn.addEventListener('click', submitCreate);
+        }
+        if (nameInput) {
+            nameInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    submitCreate();
+                }
             });
         }
 

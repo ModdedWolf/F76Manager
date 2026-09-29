@@ -4,14 +4,40 @@ namespace F76ManagerApp.Managers;
 
 public partial class ModManager
 {
-    private static readonly HashSet<string> DeployLooseConfigExtensions = ConfigFileMerger.LooseConfigExtensions;
-
     public void UpdateModOrder(List<string> currentOrder, bool updateMetadataLoadOrder = true)
     {
         try {
             _logger($"[DEPLOY] Initializing deployment... (Path: {GetActiveDataPath()})");
             
             var metadata = LoadMetadata();
+
+            bool packedAny = false;
+            foreach (string modName in currentOrder)
+            {
+                string key = modName;
+                if (!metadata.ContainsKey(key))
+                {
+                    string fileName = Path.GetFileName(modName);
+                    if (metadata.ContainsKey(fileName)) key = fileName;
+                }
+                if (!metadata.TryGetValue(key, out var looseMeta) || looseMeta == null) continue;
+                if (!(looseMeta.IsLoose || key.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase))) continue;
+                if (!FilesHavePackableLooseAssets(looseMeta.Files)) continue;
+                if (!looseMeta.IsEnabled) continue;
+
+                if (TryPackLooseModToBa2(key, out var packErr))
+                {
+                    packedAny = true;
+                    _logger($"[DEPLOY] Auto-packed loose pack '{key}' to BA2.");
+                }
+                else if (!string.IsNullOrWhiteSpace(packErr))
+                {
+                    _logger($"[DEPLOY] Auto-pack skipped for '{key}': {packErr}");
+                }
+            }
+            if (packedAny)
+                metadata = LoadMetadata();
+
             var archiveMods = new List<string>();
             var pluginMods = new List<string>();
             var processedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -91,6 +117,8 @@ public partial class ModManager
 
                 if (metadata.ContainsKey(key)) {
                     filesResult.AddRange(metadata[key].Files);
+                    if (!VirtualModMode)
+                        EnsureModDirectories(AppPaths.DataPath, metadata[key].Directories);
                 } 
 
                 if (filesResult.Count == 0) {
@@ -129,8 +157,7 @@ public partial class ModManager
 
                     if (!VirtualModMode)
                     {
-                        string extLoose = Path.GetExtension(normalizedPath).ToLowerInvariant();
-                        if (DeployLooseConfigExtensions.Contains(extLoose))
+                        if (ConfigFileMerger.IsRootLooseConfigPath(normalizedPath))
                         {
                             try
                             {
@@ -144,9 +171,7 @@ public partial class ModManager
                                         Directory.CreateDirectory(destinationDir);
                                     }
 
-                                    bool shouldCopy = !File.Exists(destinationPath) ||
-                                                      new FileInfo(sourcePath).Length != new FileInfo(destinationPath).Length;
-                                    if (shouldCopy)
+                                    if (NeedsRuntimeCopy(sourcePath, destinationPath))
                                     {
                                         TrackManagedFileArtifact(destinationPath);
                                         File.Copy(sourcePath, destinationPath, true);
@@ -273,21 +298,13 @@ public partial class ModManager
                 return;
             }
 
-            if (archiveMods.Count > 0) {
-                string archiveList = string.Join(",", archiveMods.Select(NormalizeArchiveForIni));
-                
-                foreach (var mod in archiveMods) {
-                    if (mod.Contains(" ")) {
-                        _logger($"[WARNING] Mod filename '{mod}' contains spaces. This may prevent it from loading in-game. Consider renaming it.");
-                    }
-                }
-
-                TrackArchiveKeySnapshots(archiveKey);
-                _configManager.UpdateBothInis("Archive", archiveKey, archiveList, onlyCustom: true);
-                _logger($"[DEPLOY] Wrote {archiveMods.Count} archives to Custom.ini.");
-            } else {
-                _logger("[DEPLOY] No BA2 archives in deploy order; leaving existing Custom.ini archive list unchanged.");
+            foreach (var mod in archiveMods)
+            {
+                if (mod.Contains(" "))
+                    _logger($"[WARNING] Mod filename '{mod}' contains spaces. This may prevent it from loading in-game. Consider renaming it.");
             }
+
+            SyncArchiveListToCustomIni(archiveMods);
             
             UpdatePluginsTxt(pluginMods);
 
@@ -322,7 +339,11 @@ public partial class ModManager
                 }
 
                 var filesResult = new List<string>();
-                if (metadata.ContainsKey(key)) filesResult.AddRange(metadata[key].Files);
+                if (metadata.ContainsKey(key))
+                {
+                    filesResult.AddRange(metadata[key].Files);
+                    EnsureModDirectories(AppPaths.DataPath, metadata[key].Directories);
+                }
 
                 if (filesResult.Count == 0)
                 {
@@ -362,9 +383,7 @@ public partial class ModManager
                         Directory.CreateDirectory(destinationDir);
                     }
 
-                    bool shouldCopy = !File.Exists(destinationPath) ||
-                                      new FileInfo(sourcePath).Length != new FileInfo(destinationPath).Length;
-                    if (shouldCopy)
+                    if (NeedsRuntimeCopy(sourcePath, destinationPath))
                     {
                         TrackManagedFileArtifact(destinationPath);
                         File.Copy(sourcePath, destinationPath, true);
@@ -384,17 +403,7 @@ public partial class ModManager
                 }
             }
 
-            string archiveKey = DetectArchiveKey();
-            if (archiveMods.Count > 0)
-            {
-                TrackArchiveKeySnapshots(archiveKey);
-                string archiveList = string.Join(",", archiveMods.Select(NormalizeArchiveForIni));
-                _configManager.UpdateBothInis("Archive", archiveKey, archiveList, onlyCustom: true);
-            }
-            else
-            {
-                _logger("[MANAGED] No BA2 archives in runtime order; leaving existing Custom.ini archive list unchanged.");
-            }
+            SyncArchiveListToCustomIni(archiveMods, skipVirtualModeGuard: true);
             UpdatePluginsTxt(pluginMods);
 
             _logger($"[MANAGED] Runtime state prepared. Archives={archiveMods.Count}, Plugins={pluginMods.Count}");
@@ -420,6 +429,57 @@ public partial class ModManager
         }
 
         return Path.Combine(AppPaths.ManagedStagingDataPath, normalizedPath.Replace("/", "\\"));
+    }
+
+    public bool RefreshLiveRuntimeConfigCopy(string relativePath)
+    {
+        if (!VirtualModMode || string.IsNullOrWhiteSpace(relativePath)) return false;
+        string normalizedPath = relativePath.Replace("\\", "/").Trim();
+        if (normalizedPath.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(normalizedPath)))
+            return false;
+
+        try
+        {
+            string sourcePath = GetManagedRuntimeSourcePath(normalizedPath);
+            string destinationPath = GetManagedRuntimeDestinationPath(normalizedPath);
+            if (string.IsNullOrEmpty(destinationPath) || !File.Exists(sourcePath) || !File.Exists(destinationPath))
+                return false;
+            if (!NeedsRuntimeCopy(sourcePath, destinationPath))
+                return false;
+
+            File.Copy(sourcePath, destinationPath, true);
+            _logger($"[MANAGED] Refreshed live config copy: {normalizedPath}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger($"[MANAGED] Failed to refresh live config copy {normalizedPath}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool NeedsRuntimeCopy(string sourcePath, string destinationPath)
+    {
+        if (!File.Exists(destinationPath)) return true;
+        if (string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(destinationPath), StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var src = new FileInfo(sourcePath);
+        var dst = new FileInfo(destinationPath);
+        if (src.Length != dst.Length) return true;
+        if (!ConfigFileMerger.IsLooseConfigExtension(src.Extension)) return false;
+
+        try
+        {
+            return !File.ReadAllBytes(sourcePath).AsSpan().SequenceEqual(File.ReadAllBytes(destinationPath));
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private string GetManagedRuntimeDestinationPath(string normalizedPath)
@@ -615,8 +675,7 @@ public partial class ModManager
                 string normalizedPath = relativePath.Replace("\\", "/");
                 if (processedFiles.Contains(normalizedPath)) continue;
 
-                string extLoose = Path.GetExtension(normalizedPath).ToLowerInvariant();
-                if (DeployLooseConfigExtensions.Contains(extLoose))
+                if (ConfigFileMerger.IsRootLooseConfigPath(normalizedPath))
                 {
                     processedFiles.Add(normalizedPath);
                     continue;
@@ -656,6 +715,55 @@ public partial class ModManager
         var metadata = LoadMetadata();
         var modOrder = GetEnabledModNamesInLoadOrder();
         return CollectDeployArchivesForModOrder(modOrder, metadata);
+    }
+
+    public void SyncArchiveListToCustomIni(IEnumerable<string>? archiveMods = null, bool skipVirtualModeGuard = false)
+    {
+        if (VirtualModMode && !skipVirtualModeGuard)
+        {
+            _logger("[ARCHIVE-SYNC] Virtual Mod Mode: skipping live Custom.ini write (applied at launch).");
+            return;
+        }
+
+        try
+        {
+            var raw = (archiveMods ?? GetExpectedEnabledArchiveList()).ToList();
+            var normalized = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in raw)
+            {
+                string n = NormalizeArchiveForIni(entry);
+                if (string.IsNullOrWhiteSpace(n)) continue;
+                if (!seen.Add(n)) continue;
+                normalized.Add(n);
+            }
+
+            EnsureTextureCompanionsInArchiveList(normalized, seen);
+
+            string archiveKey = DetectArchiveKey();
+            string archiveList = string.Join(",", normalized);
+            TrackArchiveKeySnapshots(archiveKey);
+            _configManager.UpdateBothInis("Archive", archiveKey, archiveList, onlyCustom: true);
+            _configManager.EnsureCustomFovStable();
+            _logger($"[ARCHIVE-SYNC] Wrote {normalized.Count} archive(s) to Custom.ini ({archiveKey}).");
+        }
+        catch (Exception ex)
+        {
+            _logger($"[ARCHIVE-SYNC] Failed: {ex.Message}");
+        }
+    }
+
+    private void EnsureTextureCompanionsInArchiveList(List<string> archives, HashSet<string> seen)
+    {
+        for (int i = archives.Count - 1; i >= 0; i--)
+        {
+            string name = archives[i];
+            if (!name.EndsWith(" - Textures.ba2", StringComparison.OrdinalIgnoreCase)) continue;
+            string main = name.Substring(0, name.Length - " - Textures.ba2".Length) + ".ba2";
+            if (seen.Contains(main)) continue;
+            seen.Remove(name);
+            archives.RemoveAt(i);
+        }
     }
 
     public (bool InSync, string State, string? Detail) GetDeploySyncStatus()

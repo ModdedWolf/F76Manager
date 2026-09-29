@@ -5,12 +5,14 @@
     --primary-green: #b8c5a4;
     --primary-green-dim: rgba(184, 197, 164, 0.7);
     --primary-rgb: 184, 197, 164;
+    --primary-hover: #c9d6b5;
     --accent-amber: #ffb642;
     --text-main: #e0e0e0;
     --text-muted: #a0a0a0;
     --border-color: #333333;
-    --danger-red: #ff5252;
+    --danger-red: var(--danger-red);
     --success-green: #4caf50;
     --warning-yellow: #ffeb3b;
     --on-primary: #121212;
+    --slider-track: #5e6259;
 }

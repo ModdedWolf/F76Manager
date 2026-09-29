@@ -13,7 +13,8 @@ export class Translator {
             console.error("[Translator] Critical: Failed to load fallback language.", e);
         }
         
-        const detected = this.detectLanguage();
+        const boot = typeof window.__F76_BOOT_LANGUAGE === 'string' ? window.__F76_BOOT_LANGUAGE : '';
+        const detected = boot && boot !== 'auto' ? boot : this.detectLanguage();
         if (detected !== this.fallbackLanguage) {
              try {
                  await this.loadLanguage(detected);
@@ -136,7 +137,6 @@ export class Translator {
 
         if (args.length > 0) {
             args.forEach((arg, i) => {
-                // Replace ALL occurrences of the placeholder (split/join avoids `$` regex pitfalls).
                 text = text.split(`{${i}}`).join(String(arg));
             });
         }

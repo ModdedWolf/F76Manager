@@ -26,6 +26,42 @@ namespace F76ManagerApp.Managers
             CurrentPlatform = platform;
         }
 
+        public static GamePlatform DetectPlatformFromGamePath(string path, GamePlatform fallback)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return fallback;
+
+            if (path.Contains("XboxGames", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains("ModifiableWindowsApps", StringComparison.OrdinalIgnoreCase))
+            {
+                return GamePlatform.Xbox;
+            }
+
+            try
+            {
+                string dir = path;
+                if (File.Exists(path) && !Directory.Exists(path))
+                    dir = Path.GetDirectoryName(path) ?? path;
+
+                if (Directory.Exists(dir))
+                {
+                    if (File.Exists(Path.Combine(dir, "Project76_GamePass.exe")))
+                        return GamePlatform.Xbox;
+                    if (File.Exists(Path.Combine(dir, "Fallout76.exe")))
+                        return GamePlatform.Steam;
+                }
+            }
+            catch
+            {
+            }
+
+            if (path.Contains("Steam", StringComparison.OrdinalIgnoreCase))
+                return GamePlatform.Steam;
+
+            return fallback;
+        }
+
         public bool IsXbox() => CurrentPlatform == GamePlatform.Xbox;
         public string GetPlatformName() => GetPlatformLabel();
         public string GetGameExeName() => GetExecutableName();

@@ -1,7 +1,9 @@
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
 using System.IO;
+using Microsoft.Web.WebView2.Core;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Globalization;
@@ -15,12 +17,14 @@ public partial class Form1
     {
         ".json",
         ".txt",
-        ".ini"
+        ".ini",
+        ".toml"
     };
 
     private readonly object _importDropLock = new();
     private bool _isImportRunning = false;
     private readonly List<string> _queuedImportFiles = new();
+    private string? _modFileDropTarget;
 
     private static string BuildNexusDownloadArchivePath(long modId, string fileName)
     {
@@ -70,7 +74,11 @@ public partial class Form1
         var replacedKeys = _modManager.ReplaceModAfterNexusUpdate(replaceOriginalName, importedKeys);
         if (replacedKeys.Count > 0)
         {
-            ReplaceModInActiveProfile(replaceOriginalName, replacedKeys);
+            PropagateModUpdateToPresets(replaceOriginalName, replacedKeys, fromBulkUpdate);
+            if (updateModsInAllPresets)
+                ReplaceModInAllProfiles(replaceOriginalName, replacedKeys);
+            else
+                ReplaceModInActiveProfile(replaceOriginalName, replacedKeys);
             LogActivity($"[NEXUS] Update replaced '{replaceOriginalName}' with {replacedKeys.Count} file(s).");
             SendStatusMessage(
                 "success",
@@ -78,10 +86,119 @@ public partial class Form1
                 "mod_update_replaced",
                 new object[] { Path.GetFileName(replaceOriginalName) });
         }
+        else
+        {
+            AddImportedKeysToActivePreset(importedKeys);
+        }
 
         _modUpdateCache.Clear();
         if (fromBulkUpdate && _bulkUpdateInProgress)
             AdvanceBulkUpdateQueue(replacedKeys.Count > 0);
+    }
+
+    private void PropagateModUpdateToPresets(string oldKey, IReadOnlyList<string> newKeys, bool fromBulk)
+    {
+        if (string.IsNullOrWhiteSpace(oldKey) || newKeys == null || newKeys.Count == 0)
+            return;
+
+        try
+        {
+            EnsureModPresetsInitialized();
+            var presets = LoadModPresetsDictionary();
+            string activeName = string.IsNullOrWhiteSpace(activeModPreset) ? DefaultModPresetName : activeModPreset;
+            string oldNorm = NormalizePresetModKey(oldKey);
+            if (string.IsNullOrWhiteSpace(oldNorm)) return;
+
+            var newNormKeys = newKeys
+                .Select(NormalizePresetModKey)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (newNormKeys.Count == 0) return;
+
+            bool changed = false;
+            foreach (var kvp in presets)
+            {
+                string name = kvp.Key;
+                var preset = kvp.Value;
+                if (preset == null) continue;
+
+                bool isActive = string.Equals(name, activeName, StringComparison.OrdinalIgnoreCase);
+                bool shouldUpdate;
+                if (updateModsInAllPresets)
+                    shouldUpdate = true;
+                else if (fromBulk)
+                    shouldUpdate = isActive;
+                else
+                    shouldUpdate = isActive || preset.ReceiveUpdates;
+
+                if (!shouldUpdate) continue;
+
+                preset.Mods ??= new List<string>();
+                preset.Enabled ??= new List<string>();
+
+                bool hadOldInMods = preset.Mods.Any(m =>
+                    string.Equals(NormalizePresetModKey(m), oldNorm, StringComparison.OrdinalIgnoreCase));
+                bool hadOldInEnabled = preset.Enabled.Any(m =>
+                    string.Equals(NormalizePresetModKey(m), oldNorm, StringComparison.OrdinalIgnoreCase));
+
+                if (hadOldInMods)
+                {
+                    preset.Mods.RemoveAll(m =>
+                        string.Equals(NormalizePresetModKey(m), oldNorm, StringComparison.OrdinalIgnoreCase));
+                    preset.Enabled.RemoveAll(m =>
+                        string.Equals(NormalizePresetModKey(m), oldNorm, StringComparison.OrdinalIgnoreCase));
+
+                    var modsSet = new HashSet<string>(
+                        preset.Mods.Select(NormalizePresetModKey).Where(s => !string.IsNullOrWhiteSpace(s)),
+                        StringComparer.OrdinalIgnoreCase);
+                    var enabledSet = new HashSet<string>(
+                        preset.Enabled.Select(NormalizePresetModKey).Where(s => !string.IsNullOrWhiteSpace(s)),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var nk in newNormKeys)
+                    {
+                        if (modsSet.Add(nk))
+                            preset.Mods.Add(nk);
+                        if (hadOldInEnabled && enabledSet.Add(nk))
+                            preset.Enabled.Add(nk);
+                    }
+                    changed = true;
+                }
+                else if (isActive)
+                {
+                    var modsSet = new HashSet<string>(
+                        preset.Mods.Select(NormalizePresetModKey).Where(s => !string.IsNullOrWhiteSpace(s)),
+                        StringComparer.OrdinalIgnoreCase);
+                    var enabledSet = new HashSet<string>(
+                        preset.Enabled.Select(NormalizePresetModKey).Where(s => !string.IsNullOrWhiteSpace(s)),
+                        StringComparer.OrdinalIgnoreCase);
+                    foreach (var nk in newNormKeys)
+                    {
+                        if (modsSet.Add(nk))
+                        {
+                            preset.Mods.Add(nk);
+                            changed = true;
+                        }
+                        if (enabledSet.Add(nk))
+                        {
+                            preset.Enabled.Add(nk);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            if (changed)
+            {
+                PersistModPresets(presets);
+                LogActivity($"[PRESETS] Propagated update of '{oldNorm}' to selected presets.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"[PRESETS] Failed to propagate mod update: {ex.Message}");
+        }
     }
 
     private void PromptModUpdateReplace(string replaceOriginalName, IReadOnlyList<string> importedKeys)
@@ -155,19 +272,16 @@ public partial class Form1
         }));
     }
 
-    // --- Single (non-collection) Nexus download: persistent banner + cancellation + logging ---
 
     private CancellationTokenSource? _nexusDownloadCts;
     private readonly object _nexusDownloadLock = new();
 
-    /// <summary>Starts tracking a single Nexus download: cancels any previous one, shows an initial
-    /// persistent banner, and returns the token to pass to DownloadMod.</summary>
     private CancellationToken BeginNexusDownload(string fileName)
     {
         CancellationToken token;
         lock (_nexusDownloadLock)
         {
-            try { _nexusDownloadCts?.Cancel(); } catch { /* ignore */ }
+            try { _nexusDownloadCts?.Cancel(); } catch {  }
             _nexusDownloadCts?.Dispose();
             _nexusDownloadCts = new CancellationTokenSource();
             token = _nexusDownloadCts.Token;
@@ -178,7 +292,6 @@ public partial class Form1
         return token;
     }
 
-    /// <summary>Clears download tracking and removes the persistent banner from the UI.</summary>
     private void EndNexusDownload()
     {
         lock (_nexusDownloadLock)
@@ -196,7 +309,7 @@ public partial class Form1
             if (_nexusDownloadCts == null)
                 return;
             LogActivity("[NEXUS] Cancel requested for active download.");
-            try { _nexusDownloadCts.Cancel(); } catch { /* ignore */ }
+            try { _nexusDownloadCts.Cancel(); } catch {  }
         }
     }
 
@@ -218,7 +331,6 @@ public partial class Form1
         }));
     }
 
-    /// <summary>Marshals to the UI thread, swallowing errors during shutdown / disposed handle.</summary>
     private void SafeInvoke(Action action)
     {
         try
@@ -226,7 +338,7 @@ public partial class Form1
             if (IsDisposed || !IsHandleCreated) { return; }
             this.Invoke(action);
         }
-        catch { /* form closing / handle gone */ }
+        catch {  }
     }
 
     private NexusManager.DownloadProgressOptions BuildSingleDownloadProgressOptions(string fileName)
@@ -249,7 +361,6 @@ public partial class Form1
 
                 var now = DateTime.UtcNow;
 
-                // Periodic logging so a slow download leaves a visible trail in the activity log.
                 bool shouldLog = percent >= 0
                     ? (percent / 5 != (lastPercent < 0 ? -1 : lastPercent) / 5)
                     : (now - lastLog).TotalSeconds >= 3;
@@ -262,7 +373,6 @@ public partial class Form1
                     LogActivity($"[NEXUS] Downloading {fileName}: {(percent >= 0 ? percent + "% " : "")}({sizePart})");
                 }
 
-                // Throttle UI updates to percent changes (or ~250ms for unknown-size files).
                 bool uiDue = (percent >= 0 && percent != lastPercent) ||
                              (now - lastUi).TotalMilliseconds >= 250;
                 if (!uiDue) return;
@@ -280,7 +390,6 @@ public partial class Form1
         };
     }
 
-    /// <summary>Downloads a single Nexus file with a cancelable, persistent progress banner.</summary>
     private async Task DownloadSingleModWithProgressAsync(
         long modId, long fileId, string fileName, string? nxmKey = null, string? nxmExpires = null)
     {
@@ -332,9 +441,53 @@ public partial class Form1
         };
     }
 
+    private static string RedactNxmLink(string url)
+    {
+        int q = url.IndexOf('?');
+        return q >= 0 ? url[..q] : url;
+    }
+
+    private static readonly TimeSpan NxmDuplicateWindow = TimeSpan.FromSeconds(30);
+    private readonly Dictionary<string, DateTime> _recentNxmLinks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _recentNxmLinksLock = new();
+
+    private bool IsDuplicateNxmLink(string url)
+    {
+        string key = RedactNxmLink(url).Trim().TrimEnd('/');
+        var now = DateTime.UtcNow;
+        lock (_recentNxmLinksLock)
+        {
+            foreach (var stale in _recentNxmLinks.Where(kv => now - kv.Value > NxmDuplicateWindow).Select(kv => kv.Key).ToList())
+                _recentNxmLinks.Remove(stale);
+
+            if (_recentNxmLinks.ContainsKey(key))
+                return true;
+
+            _recentNxmLinks[key] = now;
+            return false;
+        }
+    }
+
     private async Task HandleNxmLinkAsync(string url)
     {
-        if (_nexusManager == null) return;
+        if (IsDuplicateNxmLink(url))
+        {
+            LogActivity($"[NEXUS] Ignored duplicate NXM link: {RedactNxmLink(url)}");
+            return;
+        }
+
+        LogActivity($"[NEXUS] NXM link received: {RedactNxmLink(url)}");
+
+        var readyDeadline = DateTime.UtcNow.AddSeconds(60);
+        while ((!_applicationReady || _nexusManager == null) && !IsDisposed && DateTime.UtcNow < readyDeadline)
+            await Task.Delay(100);
+
+        if (_nexusManager == null)
+        {
+            LogError("[NEXUS] NXM link dropped: Nexus integration was not ready within 60s.");
+            SendStatusMessage("error", "Could not start the Nexus download. Try the link again.", "nexus_download_failed");
+            return;
+        }
 
         if (NexusManager.TryParseNxmCollectionLink(url, out var collectionSlug, out var collectionRevision))
         {
@@ -360,6 +513,12 @@ public partial class Form1
             return;
         }
 
+        if (modId == NexusManager.AppNexusModId)
+        {
+            HandleAppUpdateFromNxm(fileId, nxmKey, nxmExpires);
+            return;
+        }
+
         SendStatusMessage("info", $"Processing NXM Link: Mod {modId}, File {fileId}...");
 
         await Task.Run(async () =>
@@ -367,6 +526,7 @@ public partial class Form1
             var info = await _nexusManager.ResolveImportInfoAsync(modId, fileId);
             if (info == null)
             {
+                LogError($"[NEXUS] Could not resolve mod info for mod={modId}, file={fileId}.");
                 this.Invoke(() => SendStatusMessage("error", "Could not resolve Nexus mod info.", "nexus_download_failed"));
                 return;
             }
@@ -700,12 +860,12 @@ public partial class Form1
         return false;
     }
 
-    private bool TryGetArray(JsonElement root, string propertyName, out JsonElement arrayElement)
+    private bool TryGetArray(JsonElement root, string propertyName, out JsonElement arrayElement, bool required = true)
     {
         arrayElement = default;
         if (!root.TryGetProperty(propertyName, out var prop))
         {
-            LogError($"[RCV] Missing required property '{propertyName}'.");
+            if (required) LogError($"[RCV] Missing required property '{propertyName}'.");
             return false;
         }
         if (prop.ValueKind == JsonValueKind.Array)
@@ -717,9 +877,9 @@ public partial class Form1
         return false;
     }
 
-    private List<string> GetStringList(JsonElement root, string propertyName)
+    private List<string> GetStringList(JsonElement root, string propertyName, bool required = false)
     {
-        if (!TryGetArray(root, propertyName, out var arr)) return new List<string>();
+        if (!TryGetArray(root, propertyName, out var arr, required)) return new List<string>();
         return arr.EnumerateArray()
             .Where(v => v.ValueKind == JsonValueKind.String)
             .Select(v => v.GetString() ?? string.Empty)
@@ -730,7 +890,7 @@ public partial class Form1
     private List<F76ManagerApp.Managers.Ba2PartialSelection> ParseBa2PartialList(JsonElement root)
     {
         var result = new List<F76ManagerApp.Managers.Ba2PartialSelection>();
-        if (!TryGetArray(root, "ba2Partial", out var arr)) return result;
+        if (!TryGetArray(root, "ba2Partial", out var arr, required: false)) return result;
 
         foreach (var item in arr.EnumerateArray())
         {
@@ -753,7 +913,7 @@ public partial class Form1
     private List<F76ManagerApp.Managers.FolderPartialSelection> ParseFolderPartialList(JsonElement root)
     {
         var result = new List<F76ManagerApp.Managers.FolderPartialSelection>();
-        if (!TryGetArray(root, "folderPartial", out var arr)) return result;
+        if (!TryGetArray(root, "folderPartial", out var arr, required: false)) return result;
 
         foreach (var item in arr.EnumerateArray())
         {
@@ -783,7 +943,7 @@ public partial class Form1
 
     private void HandleAddOrImportFilesMessage(JsonElement root, bool fallbackToPicker)
     {
-        var files = GetStringList(root, "files");
+        var files = GetStringList(root, "files", required: false);
         if (files.Count > 0)
         {
             this.Invoke(new Action(() => HandleAddModFiles(files)));
@@ -796,6 +956,48 @@ public partial class Form1
         }
     }
 
+    private static readonly HashSet<string> QuietWebMessageTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "NAVIGATE_TO",
+        "GET_DATA",
+        "LOAD_LANGUAGE",
+        "JS_LOG",
+        "SYNC_TWEAKS_FROM_INI",
+    };
+
+    private static bool ShouldLogWebMessage(string type) =>
+        !string.IsNullOrWhiteSpace(type) && !QuietWebMessageTypes.Contains(type);
+
+    private bool TryHandleStartupWebMessage(JsonElement root, string type)
+    {
+        if (_applicationReady) return false;
+
+        switch (type)
+        {
+            case "LOAD_LANGUAGE":
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    string reqLang = TryGetString(root, "lang", out var lang) ? lang : "en-US";
+                    HandleLoadLanguage(reqLang);
+                    StartupTrace.Mark($"LOAD_LANGUAGE({reqLang}) handled before ready in {sw.ElapsedMilliseconds}ms");
+                }
+                return true;
+            case "GET_DATA":
+                StartupTrace.Mark("GET_DATA received before ready → queued");
+                _pendingGetDataRequest = true;
+                return true;
+            case "JS_LOG":
+                if (TryGetString(root, "message", out var logMessage))
+                {
+                    if (logMessage.StartsWith("[BOOT]", StringComparison.Ordinal)) StartupTrace.Mark("JS " + logMessage);
+                    LogActivity($"[JS-LOG] {logMessage}");
+                }
+                return true;
+        }
+
+        return false;
+    }
+
     private async void OnWebMessageReceived(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
     {
         try 
@@ -805,16 +1007,30 @@ public partial class Form1
             if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("type", out var typeProp))
             {
                 string type = typeProp.GetString() ?? "";
-                LogActivity($"[RCV] {type}");
+                if (TryHandleStartupWebMessage(root, type)) return;
+                if (!_applicationReady) return;
+
+                if (ShouldLogWebMessage(type))
+                    LogActivity($"[RCV] {type}");
 
                 switch (type)
                 {
-                    case "GET_DATA": SendDataToWeb(); break;
+                    case "GET_DATA":
+                        _modManager.InvalidateModsListCache();
+                        SendDataToWeb(deferHeavyWork: true, deferModScan: false);
+                        break;
                     case "SYNC_TWEAKS_FROM_INI":
                         SyncTweakValuesFromIni();
                         SendDataToWeb();
                         break;
                     case "CLEAR_ERROR_LOG": HandleClearErrorLog(); break;
+                    case "CLEAR_ACTIVITY_LOG": HandleClearActivityLog(); break;
+                    case "SHARE_LOGS": HandleShareLogs(root); break;
+                    case "OPEN_LOGS_FOLDER": HandleOpenLogsFolder(); break;
+                    case "OPEN_LOGS_POPOUT": HandleOpenLogsPopout(); break;
+                    case "GET_LOGS":
+                        if (webView?.CoreWebView2 != null) HandleGetLogs(webView.CoreWebView2);
+                        break;
                     case "DEPLOY_MODS": HandleDeploy(root); break;
                     case "ADD_MOD":
                         HandleAddOrImportFilesMessage(root, fallbackToPicker: true);
@@ -879,8 +1095,25 @@ public partial class Form1
                         }
                         break;
                     case "UPDATE_MOD_GROUPS":
-                        if (root.TryGetProperty("groups", out var groupsElem)) HandleUpdateModGroups(groupsElem);
+                        if (root.TryGetProperty("groups", out var groupsElem)) HandleUpdateModPresets(groupsElem);
+                        else if (root.TryGetProperty("presets", out var groupsAsPresets)) HandleUpdateModPresets(groupsAsPresets);
                         else LogError("[RCV] UPDATE_MOD_GROUPS missing 'groups'.");
+                        break;
+                    case "UPDATE_MOD_PRESETS":
+                        if (root.TryGetProperty("presets", out var presetsElem)) HandleUpdateModPresets(presetsElem);
+                        else LogError("[RCV] UPDATE_MOD_PRESETS missing 'presets'.");
+                        break;
+                    case "SET_ACTIVE_MOD_PRESET":
+                        HandleSetActiveModPreset(TryGetString(root, "name", out var setPresetName) ? setPresetName : "");
+                        break;
+                    case "APPLY_MOD_PRESET":
+                        HandleApplyModPreset(TryGetString(root, "name", out var applyPresetName) ? applyPresetName : "");
+                        break;
+                    case "EXPORT_MOD_PRESET":
+                        HandleExportModPreset(TryGetString(root, "name", out var exportPresetName) ? exportPresetName : "");
+                        break;
+                    case "IMPORT_MOD_PRESET":
+                        HandleImportModPreset();
                         break;
                     case "UPDATE_MOD_METADATA":
                         if (TryGetString(root, "originalName", out var originalName, required: true) &&
@@ -909,11 +1142,25 @@ public partial class Form1
                     case "IMPORT_USER_THEME":
                         HandleImportUserTheme();
                         break;
+                    case "OPEN_THEME_CREATOR":
+                    {
+                        string? editThemeId = null;
+                        if (TryGetString(root, "editThemeId", out var etid) && !string.IsNullOrWhiteSpace(etid))
+                            editThemeId = etid.Trim();
+                        HandleOpenThemeCreator(editThemeId);
+                        break;
+                    }
+                    case "SAVE_THEME_PACKAGE":
+                        HandleSaveThemePackage(root);
+                        break;
                     case "OPEN_THEMES_FOLDER":
                         HandleOpenThemesFolder();
                         break;
                     case "RELOAD_USER_THEMES":
                         HandleReloadUserThemes();
+                        break;
+                    case "DELETE_USER_THEME":
+                        if (TryGetString(root, "id", out var deleteThemeId, required: true)) HandleDeleteUserTheme(deleteThemeId);
                         break;
                     case "SAVE_MANAGER_SETTINGS":
                         if (root.TryGetProperty("settings", out var managerSettingsElem)) HandleSaveManagerSettings(managerSettingsElem);
@@ -935,6 +1182,9 @@ public partial class Form1
                     case "CHECK_CONFLICTS": RefreshConflictCount(true); break;
                     case "OPEN_IN_BROWSER":
                         if (TryGetString(root, "url", out var browserUrl, required: true)) HandleOpenInBrowser(browserUrl);
+                        break;
+                    case "SET_WINDOW_CHROME":
+                        HandleSetWindowChrome(root);
                         break;
                     case "BACKUP_INI": HandleBackupIni(); break;
                     case "BACKUP_MODS": HandleBackupMods(); break;
@@ -971,12 +1221,21 @@ public partial class Form1
                         else LogError("[RCV] SAVE_INTERFACE_COLORS_BATCH missing 'colors'.");
                         break;
                     case "JS_LOG":
-                        if (TryGetString(root, "message", out var logMessage)) LogActivity($"[JS-LOG] {logMessage}");
+                        if (TryGetString(root, "message", out var logMessage))
+                        {
+                            if (logMessage.StartsWith("[BOOT]", StringComparison.Ordinal)) StartupTrace.Mark("JS " + logMessage);
+                            LogActivity($"[JS-LOG] {logMessage}");
+                        }
                         break;
                     case "ENDORSEMENT_CONFIRMED": _endorsementManager.ConfirmEndorsement(); break;
                     case "ENDORSEMENT_DISMISSED": _endorsementManager.DismissEndorsement(); break;
                     case "LOAD_LANGUAGE":
-                        HandleLoadLanguage(TryGetString(root, "lang", out var lang) ? lang : "en-US");
+                        {
+                            var swLang = System.Diagnostics.Stopwatch.StartNew();
+                            string reqLang = TryGetString(root, "lang", out var lang) ? lang : "en-US";
+                            HandleLoadLanguage(reqLang);
+                            StartupTrace.Mark($"LOAD_LANGUAGE({reqLang}) handled in {swLang.ElapsedMilliseconds}ms");
+                        }
                         break;
                     case "CREATE_BUNDLE":
                         {
@@ -1047,8 +1306,30 @@ public partial class Form1
                             TryGetString(root, "relativePath", out var writeRelativePath, required: true) &&
                             TryGetString(root, "content", out var writeContent, required: true))
                         {
-                            HandleWriteModFile(writeModName, writeRelativePath, writeContent);
+                            bool applyToIni = false;
+                            if (root.TryGetProperty("applyToIni", out var applyToIniEl) &&
+                                (applyToIniEl.ValueKind == JsonValueKind.True || applyToIniEl.ValueKind == JsonValueKind.False))
+                            {
+                                applyToIni = applyToIniEl.GetBoolean();
+                            }
+                            HandleWriteModFile(writeModName, writeRelativePath, writeContent, applyToIni);
                         }
+                        break;
+                    case "ADD_FILES_TO_MOD":
+                        if (TryGetString(root, "name", out var addFilesModName, required: true))
+                        {
+                            string addFilesMode = TryGetString(root, "mode", out var modeValue) ? modeValue : "archive";
+                            HandleAddFilesToModPicker(addFilesModName, addFilesMode);
+                        }
+                        break;
+                    case "LIST_MOD_CONTENTS":
+                        if (TryGetString(root, "name", out var listContentsModName, required: true))
+                            HandleListModContents(listContentsModName);
+                        break;
+                    case "SET_MOD_FILE_DROP_TARGET":
+                        _modFileDropTarget = TryGetString(root, "name", out var dropTargetName) && !string.IsNullOrWhiteSpace(dropTargetName)
+                            ? dropTargetName
+                            : null;
                         break;
                     case "ADOPT_DATA_FILE":
                         if (TryGetString(root, "relativePath", out var adoptRelativePath, required: true) &&
@@ -1136,6 +1417,10 @@ public partial class Form1
                                 });
                             }
                         }
+                        break;
+
+                    case "NEXUS_RESOLVE_MOD_LINK":
+                        HandleNexusResolveModLink(root);
                         break;
                         
                     case "NEXUS_LOGIN":
@@ -1271,6 +1556,22 @@ public partial class Form1
                         HandleCheckModUpdates(root);
                         break;
 
+                    case "INSTALL_APP_UPDATE":
+                        HandleInstallAppUpdate();
+                        break;
+
+                    case "CANCEL_APP_UPDATE":
+                        HandleCancelAppUpdate();
+                        break;
+
+                    case "OPEN_APP_UPDATE_PAGE":
+                        HandleOpenAppUpdatePage();
+                        break;
+
+                    case "REPLAY_APP_UPDATE":
+                        ReplayAppUpdateStatus();
+                        break;
+
                     case "MOD_UPDATE_REPLACE_RESPONSE":
                         if (TryGetString(root, "originalName", out var replaceOrigResp, required: true))
                         {
@@ -1297,11 +1598,14 @@ public partial class Form1
                             }
                             else if (!confirmed)
                             {
+                                if (importedKeys.Count > 0)
+                                    AddImportedKeysToActivePreset(importedKeys);
                                 SendStatusMessage(
                                     "info",
                                     $"Kept the previous version of {Path.GetFileName(replaceOrigResp)}.",
                                     "mod_update_remove_cancelled",
                                     new object[] { Path.GetFileName(replaceOrigResp) });
+                                SendDataToWeb(deferHeavyWork: true);
                             }
                         }
                         break;
@@ -1417,7 +1721,12 @@ public partial class Form1
         } catch (Exception ex) { LogError($"Message parsing error: {ex}"); }
     }
 
-    private void HandleNavigation(string section) => lastSection = section;
+    private void HandleNavigation(string section)
+    {
+        lastSection = section;
+        if (string.Equals(section, "update", StringComparison.OrdinalIgnoreCase))
+            ReplayAppUpdateStatus();
+    }
 
     private void HandleDeploy(JsonElement root)
     {
@@ -1438,10 +1747,8 @@ public partial class Form1
                 SyncAppPaths();
                 LogActivity($"[DEPLOY] HandleDeploy called. ModCount={mods.Count}, Force={force}");
 
-                if (mods.Count > 0) {
-                    _modManager.BulkUpdateModStatus(mods);
-                    LogActivity($"[DEPLOY] BulkUpdateModStatus completed for {mods.Count} mods.");
-                }
+                ApplyDeployEnabledSet(mods);
+                LogActivity($"[DEPLOY] Enabled set applied for {mods.Count} mod(s).");
 
                 if (!force) {
                     var searchPaths = new List<string> { Path.Combine(gamePath, "Data") };
@@ -1449,13 +1756,17 @@ public partial class Form1
                     
                     LogActivity($"[UI] Pre-deploy conflict check for {enabledModPaths.Count} mods.");
                     var conflicts = _conflictManager.DetectConflicts(enabledModPaths, searchPaths);
-                    
-                    if (conflicts != null && conflicts.Count > 0) {
+                    var realConflicts = conflicts?.Where(c =>
+                        !string.Equals(c.Status, "identical", StringComparison.OrdinalIgnoreCase)).ToList()
+                        ?? new List<ConflictManager.Conflict>();
+
+                    if (realConflicts.Count > 0) {
                         LogActivity($"[UI] Conflicts detected before deploy. Showing modal. requestedMods count={mods.Count}");
                         var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
                         string json = JsonSerializer.Serialize(new { 
                             type = "conflicts_found", 
                             conflicts = conflicts,
+                            identicalDuplicates = conflicts?.Count(c => string.Equals(c.Status, "identical", StringComparison.OrdinalIgnoreCase)) ?? 0,
                             requestedMods = mods,
                             isFromDeploy = true
                         }, options);
@@ -1480,7 +1791,18 @@ public partial class Form1
                 LogActivity($"[DEPLOY] Proceeding with UpdateModOrder for {mods.Count} mods.");
                 _modManager.UpdateModOrder(mods, true);
                 LogActivity($"[DEPLOY] UpdateModOrder completed. Sending success message with count={mods.Count}.");
-                this.Invoke(() => SendStatusMessage("success", $"Successfully deployed {mods.Count} mod{(mods.Count == 1 ? "" : "s")}!", "deploy_success", new object[] { mods.Count }));
+                if (mods.Count == 0)
+                {
+                    this.Invoke(() => SendStatusMessage(
+                        "warning",
+                        "Deployed an empty loadout (no mods in the active preset).",
+                        "deploy_empty_preset"));
+                }
+                else
+                {
+                    int modCount = mods.Count(m => !IsConfigListKey(NormalizePresetModKey(m)) && !IsCoreIniHealthKey(m));
+                    this.Invoke(() => SendStatusMessage("success", $"Successfully deployed {modCount} mod{(modCount == 1 ? "" : "s")}!", "deploy_success", new object[] { modCount }));
+                }
                 SendDataToWeb();
             } catch (Exception ex) {
                 LogError($"[DEPLOY] HandleDeploy exception: {ex}");
@@ -1489,10 +1811,39 @@ public partial class Form1
         });
     }
 
+    private void ApplyDeployEnabledSet(List<string> deployMods)
+    {
+        var want = (deployMods ?? new List<string>())
+            .Select(NormalizePresetModKey)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (dynamic m in _modManager.GetModsList().ToList())
+        {
+            string original = (string)m.originalName;
+            if (string.IsNullOrWhiteSpace(original)) continue;
+            if (IsStringModFileName(Path.GetFileName(original.Replace('\\', '/')))) continue;
+            if (IsConfigListKey(NormalizePresetModKey(original))) continue;
+            string key = NormalizePresetModKey(original);
+            bool currentlyEnabled = string.Equals((string)m.status, "enabled", StringComparison.OrdinalIgnoreCase);
+            bool shouldEnable = want.Contains(key);
+            if (currentlyEnabled == shouldEnable) continue;
+            if (!_modManager.ToggleModEnabled(original, shouldEnable, out string? err) &&
+                !string.IsNullOrWhiteSpace(err))
+            {
+                LogActivity($"[DEPLOY] Toggle '{original}' → {shouldEnable} failed: {err}");
+            }
+        }
+
+        ReconcileActiveProfileEnabledMods();
+    }
+
     private void HandleDeployAll(JsonElement root)
     {
         try {
             bool forceDeploy = root.TryGetProperty("force", out var fElem) && fElem.GetBoolean();
+            bool presetScoped = !root.TryGetProperty("presetScoped", out var psElem)
+                || psElem.ValueKind != JsonValueKind.False;
             List<string> enabledMods = new List<string>();
 
             if (root.TryGetProperty("mods", out var mElem) && mElem.ValueKind == JsonValueKind.Array) {
@@ -1502,17 +1853,116 @@ public partial class Form1
                     .ToList();
             }
 
-            if (enabledMods.Count == 0) {
-                enabledMods = _modManager.GetModsList()
-                   .Where(m => (string)((dynamic)m).status == "enabled")
-                   .Select(m => (string)((dynamic)m).originalName)
-                   .ToList();
-            }
+            enabledMods = FilterDeployListToActivePreset(enabledMods, presetScoped);
+            LogActivity($"[DEPLOY_ALL] Active preset '{activeModPreset}': deploying {enabledMods.Count} mod(s).");
 
-            HandleDeploy(enabledMods, forceDeploy); 
+            HandleDeploy(enabledMods, forceDeploy);
         } catch (Exception ex) {
             LogError($"DEPLOY_ALL Case Error: {ex.Message}");
             SendStatusMessage("error", $"Failed to start deployment: {ex.Message}", "deploy_failed", new object[] { ex.Message });
+        }
+    }
+
+    private List<string> FilterDeployListToActivePreset(List<string> clientMods, bool presetScoped)
+    {
+        var resolved = ResolveActivePresetDeployList();
+        if (!presetScoped)
+            return clientMods?.Count > 0 ? clientMods : resolved;
+
+        EnsureModPresetsInitialized();
+        var presets = LoadModPresetsDictionary();
+        string name = string.IsNullOrWhiteSpace(activeModPreset) ? DefaultModPresetName : activeModPreset;
+        if (!presets.TryGetValue(name, out var preset) || preset == null)
+            return new List<string>();
+
+        var members = (preset.Mods ?? new List<string>())
+            .Select(NormalizePresetModKey)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (members.Count == 0)
+        {
+            LogActivity($"[DEPLOY_ALL] Active preset '{name}' has empty membership; deploying nothing.");
+            return new List<string>();
+        }
+
+        if (clientMods == null || clientMods.Count == 0)
+            return resolved;
+
+        return clientMods
+            .Where(m => members.Contains(NormalizePresetModKey(m)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string NormalizePresetModKey(string? name)
+    {
+        string n = (name ?? "").Replace("\\", "/").Trim();
+        if (n.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
+            n = n.Substring("Disabled/".Length);
+        return n;
+    }
+
+    private List<string> ResolveActivePresetDeployList()
+    {
+        try
+        {
+            EnsureModPresetsInitialized();
+            var presets = LoadModPresetsDictionary();
+            string name = string.IsNullOrWhiteSpace(activeModPreset) ? DefaultModPresetName : activeModPreset;
+            if (!presets.TryGetValue(name, out var preset) || preset == null)
+            {
+                LogActivity($"[DEPLOY_ALL] Unknown active preset '{name}'; deploying nothing.");
+                return new List<string>();
+            }
+
+            var members = (preset.Mods ?? new List<string>())
+                .Select(NormalizePresetModKey)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (members.Count == 0)
+            {
+                LogActivity($"[DEPLOY_ALL] Active preset '{name}' has empty membership; deploying nothing.");
+                return new List<string>();
+            }
+
+            var enabledSnap = (preset.Enabled ?? new List<string>())
+                .Select(NormalizePresetModKey)
+                .Where(s => !string.IsNullOrWhiteSpace(s) && members.Contains(s))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var liveEnabled = new List<string>();
+            foreach (dynamic m in _modManager.GetModsList())
+            {
+                string original = (string)m.originalName;
+                if (string.IsNullOrWhiteSpace(original)) continue;
+                if (!string.Equals((string)m.status, "enabled", StringComparison.OrdinalIgnoreCase)) continue;
+                string key = NormalizePresetModKey(original);
+                if (!members.Contains(key)) continue;
+                liveEnabled.Add(original);
+            }
+
+            if (liveEnabled.Count > 0)
+                return liveEnabled;
+
+            var byKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (dynamic m in _modManager.GetModsList())
+            {
+                string original = (string)m.originalName;
+                if (string.IsNullOrWhiteSpace(original)) continue;
+                string key = NormalizePresetModKey(original);
+                if (members.Contains(key))
+                    byKey[key] = original;
+            }
+
+            return enabledSnap
+                .Select(k => byKey.TryGetValue(k, out var orig) ? orig : k)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            LogError($"[DEPLOY_ALL] ResolveActivePresetDeployList failed: {ex.Message}");
+            return new List<string>();
         }
     }
 
@@ -1527,6 +1977,9 @@ public partial class Form1
                 LogActivity($"[LAUNCH] Managed stale cleanup completed. Entries processed: {staleCleanup}");
                 int hydrated = _modManager.EnsureManagedStagingHydrated();
                 LogActivity($"[LAUNCH] Managed staging hydration copied {hydrated} files.");
+                int moved = _modManager.MoveLiveModsIntoStaging();
+                LogActivity($"[LAUNCH] Self-heal moved {moved} leftover live file(s) into staging.");
+                _modManager.ClearLiveLoadState();
 
                 var enabledMods = _modManager.GetModsList()
                     .Where(m => (string)((dynamic)m).status == "enabled")
@@ -1537,6 +1990,9 @@ public partial class Form1
                 preparedManagedRuntime = true;
                 SendStatusMessage("info", "Managed mode runtime state prepared. Cleanup will run after confirmed game exit.");
             }
+
+            try { _configManager.EnsureCustomFovStable(); }
+            catch (Exception fovEx) { LogActivity($"[FOV] Launch Camera align skipped: {fovEx.Message}"); }
 
             string exeName = _platformManager.GetGameExeName();
             string fullPath = Path.Combine(gamePath, exeName);
@@ -1575,8 +2031,8 @@ public partial class Form1
                             {
                                 bool stableExit = await WaitForGameProcessStableExit(
                                     minimumRuntimeFromLaunch: TimeSpan.FromSeconds(20),
-                                    absenceGraceWindow: TimeSpan.FromSeconds(30),
-                                    pollInterval: TimeSpan.FromSeconds(2),
+                                    absenceGraceWindow: TimeSpan.FromSeconds(5),
+                                    pollInterval: TimeSpan.FromMilliseconds(500),
                                     maxWaitAfterDetect: TimeSpan.FromHours(8),
                                     launchUtc: launchUtc
                                 );
@@ -1661,7 +2117,7 @@ public partial class Form1
                 }
                 firstAbsentAt = null;
                 graceLogged = false;
-                await Task.Delay(pollInterval);
+                await WaitForAnyGameProcessExit(TimeSpan.FromSeconds(30));
                 continue;
             }
 
@@ -1693,6 +2149,37 @@ public partial class Form1
         }
 
         return false;
+    }
+
+    private async Task WaitForAnyGameProcessExit(TimeSpan fallback)
+    {
+        string exeName = _platformManager.GetGameExeName().Replace(".exe", "");
+        Process[] procs = Array.Empty<Process>();
+        try
+        {
+            procs = Process.GetProcessesByName(exeName);
+            if (procs.Length == 0) return;
+
+            var waits = new List<Task>();
+            foreach (var p in procs)
+            {
+                try { waits.Add(p.WaitForExitAsync()); }
+                catch { }
+            }
+            waits.Add(Task.Delay(fallback));
+            await Task.WhenAny(waits);
+        }
+        catch
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1));
+        }
+        finally
+        {
+            foreach (var p in procs)
+            {
+                try { p.Dispose(); } catch { }
+            }
+        }
     }
 
     private void RunManagedCleanup(string reason)
@@ -1813,12 +2300,63 @@ public partial class Form1
         await Task.CompletedTask;
     }
 
+    private void MirrorTweakBatchToOtherPlatform(JsonElement settings)
+    {
+        var current = _platformManager.CurrentPlatform;
+        var other = current == GamePlatform.Steam ? GamePlatform.Xbox : GamePlatform.Steam;
+        string otherDocs = ResolvePlatformModLocation(other).docs;
+        if (string.IsNullOrWhiteSpace(otherDocs) || !Directory.Exists(otherDocs))
+        {
+            LogActivity($"[SYNC] Skipped mirroring tweaks to {other}: Documents folder not found ({otherDocs}).");
+            return;
+        }
+
+        var props = settings.EnumerateObject()
+            .Where(p => IsTweakSettingKey(p.Name)
+                && !p.Name.Equals("activeTweaksPreset", StringComparison.OrdinalIgnoreCase)
+                && !p.Name.StartsWith("steam", StringComparison.OrdinalIgnoreCase)
+                && !p.Name.StartsWith("xbox", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (props.Count == 0) return;
+
+        RunWithPlatformIniContext(other, otherDocs, () =>
+        {
+            foreach (var prop in props)
+                ApplyIndividualSettingObject(prop.Name, prop.Value, writeIni: true);
+        });
+        LogActivity($"[SYNC] Mirrored {props.Count} tweak(s) to {other}.");
+    }
+
+    private void RunWithPlatformIniContext(GamePlatform platform, string docs, Action action)
+    {
+        var prevPlatform = _platformManager.CurrentPlatform;
+        string prevDocs = documentsPath;
+        string prevAppDocs = AppPaths.DocumentsPath;
+        bool prevAppIsXbox = AppPaths.IsXbox;
+        try
+        {
+            _platformManager.SetPlatform(platform);
+            documentsPath = docs;
+            AppPaths.DocumentsPath = docs;
+            AppPaths.SetPlatform(platform == GamePlatform.Xbox);
+            action();
+        }
+        finally
+        {
+            _platformManager.SetPlatform(prevPlatform);
+            documentsPath = prevDocs;
+            AppPaths.DocumentsPath = prevAppDocs;
+            AppPaths.SetPlatform(prevAppIsXbox);
+        }
+    }
+
     private async Task HandleUpdateSettingsBatch(JsonElement settings, string presetName)
     {
         if (!string.IsNullOrEmpty(presetName)) activeTweaksPreset = presetName;
         foreach (var prop in settings.EnumerateObject()) {
             ApplyIndividualSettingObject(prop.Name, prop.Value, writeIni: true);
         }
+        if (syncPlatforms) MirrorTweakBatchToOtherPlatform(settings);
         SaveSettings();
         SendDataToWeb();
         if (!string.IsNullOrEmpty(presetName)) {
@@ -1857,6 +2395,9 @@ public partial class Form1
 
             if (settings.TryGetProperty("minimizeToTray", out var mt)) minimizeToTray = mt.GetBoolean();
             if (settings.TryGetProperty("uiAnimations", out var ua)) uiAnimations = ua.GetBoolean();
+            if (settings.TryGetProperty("hideKofi", out var hk)) hideKofi = hk.GetBoolean();
+            if (settings.TryGetProperty("logsPopoutReopenOnLaunch", out var lpr)) logsPopoutReopenOnLaunch = lpr.GetBoolean();
+            if (settings.TryGetProperty("logsPopoutKeepOpen", out var lpk)) logsPopoutKeepOpen = lpk.GetBoolean();
             if (settings.TryGetProperty("platformBadgeGlow", out var pbg)) platformBadgeGlow = pbg.GetBoolean();
             if (settings.TryGetProperty("syncPlatforms", out var spr)) syncPlatforms = spr.GetBoolean();
             if (settings.TryGetProperty("autoForceDeploy", out var afd)) autoForceDeploy = afd.GetBoolean();
@@ -1865,9 +2406,11 @@ public partial class Form1
             if (settings.TryGetProperty("configEditorSpellCheck", out var cesc)) configEditorSpellCheck = cesc.GetBoolean();
             if (settings.TryGetProperty("confirmBeforeDeleteMod", out var cbddm)) confirmBeforeDeleteMod = cbddm.GetBoolean();
             if (settings.TryGetProperty("confirmBeforeRemoveOldModOnUpdate", out var cbroou)) confirmBeforeRemoveOldModOnUpdate = cbroou.GetBoolean();
+            if (settings.TryGetProperty("updateModsInAllPresets", out var umiap)) updateModsInAllPresets = umiap.GetBoolean();
             if (settings.TryGetProperty("language", out var lang)) applicationLanguage = lang.GetString() ?? applicationLanguage;
             if (settings.TryGetProperty("uiTheme", out var ut)) {
                 uiTheme = NormalizeUiTheme(ut.GetString() ?? uiTheme);
+                ApplyWindowChromeFromTheme(uiTheme);
             }
             if (settings.TryGetProperty("archiveKeyName", out var akn)) archiveKeyName = akn.GetString() ?? archiveKeyName;
             if (settings.TryGetProperty("sevenZipPath", out var szp)) sevenZipPath = szp.GetString() ?? sevenZipPath;
@@ -1882,14 +2425,9 @@ public partial class Form1
 
             if (previousVirtualMode != virtualModMode)
             {
-                if (virtualModMode)
-                {
-                    int hydrated = _modManager.EnsureManagedStagingHydrated();
-                    LogActivity($"[SETTINGS] VirtualModMode enabled. Staging hydration copied {hydrated} files.");
-                }
-
-                int cleaned = _modManager.CleanupManagedArtifacts();
-                LogActivity($"[SETTINGS] VirtualModMode changed to {virtualModMode}. Cleanup processed {cleaned} entries.");
+                ApplyVirtualModModeTransition(previousVirtualMode, virtualModMode);
+                if (previousVirtualMode == virtualModMode)
+                    SaveSettings();
             }
 
             SendStatusMessage("success", "Settings saved successfully.", "manager_settings_saved");
@@ -1897,6 +2435,51 @@ public partial class Form1
         } catch (Exception ex) {
             LogError($"Save Manager Settings Failed: {ex.Message}");
             SendStatusMessage("error", "Failed to save settings.", "save_settings_failed");
+        }
+    }
+
+    private void ApplyVirtualModModeTransition(bool previous, bool current)
+    {
+        if (previous == current) return;
+
+        if (IsGameRunning())
+        {
+            virtualModMode = previous;
+            SyncAppPaths();
+            SendStatusMessage(
+                "warning",
+                "Close Fallout 76 before switching Virtual Mod Mode.",
+                "virtual_mod_mode_game_running");
+            LogActivity("[SETTINGS] VirtualModMode switch blocked: game is running.");
+            return;
+        }
+
+        try
+        {
+            int cleaned = _modManager.CleanupManagedArtifacts();
+            LogActivity($"[SETTINGS] VirtualModMode transition cleanup processed {cleaned} entries.");
+
+            if (current)
+            {
+                int hydrated = _modManager.EnsureManagedStagingHydrated();
+                LogActivity($"[SETTINGS] VirtualModMode enabled. Staging hydration copied {hydrated} files.");
+                int moved = _modManager.MoveLiveModsIntoStaging();
+                LogActivity($"[SETTINGS] VirtualModMode enabled. Moved {moved} live file(s) into staging.");
+                _modManager.ClearLiveLoadState();
+                LogActivity("[SETTINGS] VirtualModMode enabled. Cleared live archive list and plugins.txt.");
+            }
+            else
+            {
+                int moved = _modManager.MoveStagedModsToLive();
+                LogActivity($"[SETTINGS] VirtualModMode disabled. Moved {moved} staged file(s) back to live.");
+                _modManager.RedeployDirect();
+                LogActivity("[SETTINGS] VirtualModMode disabled. Direct-mode redeploy completed.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"[SETTINGS] VirtualModMode transition failed: {ex.Message}");
+            SendStatusMessage("error", "Failed to switch Virtual Mod Mode.", "virtual_mod_mode_switch_failed");
         }
     }
 
@@ -2131,6 +2714,8 @@ public partial class Form1
                     SaveProfiles();
                 }
             }
+            if (result != null && result.Count > 0)
+                AddImportedKeysToActivePreset(result);
         }); 
         RefreshConflictCount(false, sendDataUpdate: false); 
         SendDataToWeb(); 
@@ -2157,6 +2742,139 @@ public partial class Form1
                 total = progress.Total
             }
         }));
+    }
+
+    private void HandleListModContents(string modName)
+    {
+        Task.Run(() =>
+        {
+            string error;
+            List<(string Path, uint UnpackedSize)> entries;
+            try
+            {
+                entries = _modManager.ListModContents(modName, out error);
+            }
+            catch (Exception ex)
+            {
+                entries = new();
+                error = ex.Message;
+                LogError($"[ADDFILES] Listing contents of '{modName}' failed: {ex.Message}");
+            }
+
+            SendMessageToWeb(JsonSerializer.Serialize(new
+            {
+                type = "MOD_CONTENTS",
+                name = modName,
+                error,
+                entries = entries.Select(e => new { path = e.Path, unpackedSize = e.UnpackedSize })
+            }));
+        });
+    }
+
+    private void HandleAddFilesToModPicker(string modName, string mode)
+    {
+        var picked = new List<string>();
+        if (string.Equals(mode, "folder", StringComparison.OrdinalIgnoreCase))
+        {
+            using var fbd = new FolderBrowserDialog { Description = "Select a folder with the files to add (keep the Data folder structure, e.g. meshes\\...)" };
+            if (fbd.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(fbd.SelectedPath)) return;
+            picked.Add(fbd.SelectedPath);
+        }
+        else
+        {
+            using var ofd = new OpenFileDialog
+            {
+                Multiselect = true,
+                Filter = "Mod archives (*.zip;*.7z;*.rar;*.ba2)|*.zip;*.7z;*.rar;*.ba2"
+            };
+            if (ofd.ShowDialog() != DialogResult.OK) return;
+            picked.AddRange(ofd.FileNames);
+        }
+        HandleAddFilesToMod(modName, picked);
+    }
+
+    private void HandleAddFilesToMod(string modName, List<string> files)
+    {
+        var normalizedFiles = NormalizeImportPaths(files);
+        if (normalizedFiles.Count == 0) return;
+
+        lock (_importDropLock)
+        {
+            if (_isImportRunning)
+            {
+                SendStatusMessage("warning", "An import is already running. Try again when it finishes.");
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "MOD_FILES_ADDED",
+                    ok = false,
+                    name = modName,
+                    newName = modName,
+                    error = "An import is already running.",
+                    count = 0
+                }));
+                return;
+            }
+            _isImportRunning = true;
+        }
+
+        LogActivity($"[ADDFILES] Adding {normalizedFiles.Count} item(s) to '{modName}'.");
+        SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_FILES_ADDING", name = modName }));
+
+        Task.Run(() =>
+        {
+            ModManager.AddFilesResult result;
+            try
+            {
+                result = _modManager.AddFilesToMod(modName, normalizedFiles, progress => SendImportProgressBanner(progress));
+            }
+            catch (Exception ex)
+            {
+                result = new ModManager.AddFilesResult { Ok = false, Error = ex.Message, OldKey = modName, NewKey = modName };
+            }
+
+            this.Invoke(() =>
+            {
+                List<string> nextQueuedBatch = new();
+                try
+                {
+                    if (result.Ok &&
+                        !string.IsNullOrWhiteSpace(result.OldKey) &&
+                        !string.Equals(result.OldKey, result.NewKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ReplaceModKeyEverywhere(result.OldKey, result.NewKey);
+                        if (string.Equals(_modFileDropTarget, modName, StringComparison.OrdinalIgnoreCase))
+                            _modFileDropTarget = result.NewKey;
+                    }
+
+                    RefreshConflictCount(false, sendDataUpdate: false);
+                    SendDataToWeb();
+                    SendMessageToWeb(JsonSerializer.Serialize(new
+                    {
+                        type = "MOD_FILES_ADDED",
+                        ok = result.Ok,
+                        name = modName,
+                        newName = result.Ok ? result.NewKey : modName,
+                        error = result.Error,
+                        count = result.FileCount
+                    }));
+                }
+                finally
+                {
+                    lock (_importDropLock)
+                    {
+                        _isImportRunning = false;
+                        if (_queuedImportFiles.Count > 0)
+                        {
+                            nextQueuedBatch = NormalizeImportPaths(_queuedImportFiles);
+                            _queuedImportFiles.Clear();
+                        }
+                    }
+                }
+
+                if (nextQueuedBatch.Count > 0)
+                    HandleAddModFiles(nextQueuedBatch);
+            });
+        });
     }
 
     private void HandleAddModFiles(List<string> files) {
@@ -2262,14 +2980,15 @@ public partial class Form1
                             }
                         }
 
+                        bool isUpdateReplace = !string.IsNullOrWhiteSpace(pendingNexus?.ReplaceOriginalName);
+                        if (!isUpdateReplace)
+                            AddImportedKeysToActivePreset(result);
+
                         string profileContext = activeProfile == "Default Profile" ? "" : $" and added {addedToProfile} to '{activeProfile}'";
                         LogActivity($"[IMPORT] Completed import of {result.Count} mod files to {AppPaths.DataPath}{profileContext}.");
                     }
                     else
                     {
-                         // If the import already surfaced a specific problem (e.g. missing extractor,
-                         // failed extraction, or an installer archive with no loose mod files), don't
-                         // mask it with the generic banner.
                          if (!_modManager.LastImportReportedIssue)
                          {
                              if (normalizedFiles.Count == 1) {
@@ -2332,30 +3051,20 @@ public partial class Form1
 
                 LogActivity($"[RCV-DELETE-ALL] Request to delete {modNames.Count} mods.");
 
-                int deletedCount = 0;
-                if (activeProfile != "Default Profile")
+                int deletedCount = _modManager.DeleteAllMods();
+
+                bool profilesDirty = false;
+                foreach (var p in profiles)
                 {
-                    var p = profiles.FirstOrDefault(x => x.Name == activeProfile);
-                    if (p != null)
+                    if (p == null) continue;
+                    if (p.ProfileMods.Count > 0 || p.EnabledMods.Count > 0)
                     {
-                        foreach (var name in modNames)
-                        {
-                            string norm = name.Replace("\\", "/");
-                            p.ProfileMods.RemoveAll(x =>
-                                x.Equals(norm, StringComparison.OrdinalIgnoreCase) ||
-                                x.Equals(name, StringComparison.OrdinalIgnoreCase));
-                            p.EnabledMods.RemoveAll(x =>
-                                x.Equals(norm, StringComparison.OrdinalIgnoreCase) ||
-                                x.Equals(name, StringComparison.OrdinalIgnoreCase));
-                            deletedCount++;
-                        }
-                        SaveProfiles();
+                        p.ProfileMods.Clear();
+                        p.EnabledMods.Clear();
+                        profilesDirty = true;
                     }
                 }
-                else
-                {
-                    deletedCount = _modManager.DeleteAllMods();
-                }
+                if (profilesDirty) SaveProfiles();
 
                 this.Invoke(() =>
                 {
@@ -2382,34 +3091,28 @@ public partial class Form1
 
     private void HandleDeleteMod(string name) { 
         try {
-            if (activeProfile != "Default Profile")
+            bool profilesDirty = false;
+            foreach (var p in profiles)
             {
-                var p = profiles.FirstOrDefault(x => x.Name == activeProfile);
-                if (p != null)
-                {
-                    string norm = name.Replace("\\", "/");
-                    
-                    var entry = p.ProfileMods.FirstOrDefault(x => x.Equals(norm, StringComparison.OrdinalIgnoreCase) || x.Equals(name, StringComparison.OrdinalIgnoreCase));
-                    
-                    if (entry != null) {
-                        p.ProfileMods.Remove(entry);
-                        SaveProfiles();
-                        
-                        p.EnabledMods.RemoveAll(x => x.Equals(norm, StringComparison.OrdinalIgnoreCase) || x.Equals(name, StringComparison.OrdinalIgnoreCase));
-                        
-                        SendStatusMessage("success", $"Removed '{name}' from profile.", "removed_mod_from_profile", new object[] { name });
-                        RefreshConflictCount(); 
-                        SendDataToWeb();
-                        return;
-                    }
-                }
+                if (p == null) continue;
+                int beforeProfile = p.ProfileMods.Count;
+                int beforeEnabled = p.EnabledMods.Count;
+                p.ProfileMods.RemoveAll(x =>
+                    ProfileAllowsMod(new HashSet<string> { x }, name) ||
+                    string.Equals(NormalizeProfileModPath(x), NormalizeProfileModPath(name), StringComparison.OrdinalIgnoreCase));
+                p.EnabledMods.RemoveAll(x =>
+                    ProfileAllowsMod(new HashSet<string> { x }, name) ||
+                    string.Equals(NormalizeProfileModPath(x), NormalizeProfileModPath(name), StringComparison.OrdinalIgnoreCase));
+                if (p.ProfileMods.Count != beforeProfile || p.EnabledMods.Count != beforeEnabled)
+                    profilesDirty = true;
             }
+            if (profilesDirty) SaveProfiles();
 
             LogActivity($"[HANDLER] Calling _modManager.DeleteMod('{name}')");
             _modManager.DeleteMod(name); 
             LogActivity($"[HANDLER] DeleteMod returned.");
-            RefreshConflictCount(); 
-            SendDataToWeb(); 
+            SendDataToWeb();
+            RefreshConflictCount(false, sendDataUpdate: true);
         } catch (Exception ex) {
             LogError($"[DELETE_FAIL] {ex.Message}");
             SendStatusMessage("error", $"Delete failed: {ex.Message}", "delete_mod_failed", new object[] { ex.Message });
@@ -2438,7 +3141,8 @@ public partial class Form1
             {
                 SendStatusMessage("error",
                     $"Failed to toggle mod: {toggleError}. Is the game running?",
-                    "toggle_mod_failed");
+                    "toggle_mod_failed",
+                    new object[] { toggleError ?? "" });
             }
             SendDataToWeb();
         } catch (Exception ex) {
@@ -2479,12 +3183,429 @@ public partial class Form1
         }
     }
 
-    private void HandleUpdateModGroups(JsonElement groups) { 
-        modGroups = groups.GetRawText();
-        SaveSettings();
-        LogActivity("[MODS] Mod groups updated.");
-        SendDataToWeb();
+    private void HandleUpdateModGroups(JsonElement groups) => HandleUpdateModPresets(groups);
+
+    private void HandleUpdateModPresets(JsonElement presetsElem)
+    {
+        try
+        {
+            var dict = new Dictionary<string, ModPresetState>(StringComparer.OrdinalIgnoreCase);
+            if (presetsElem.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in presetsElem.EnumerateObject())
+                    dict[prop.Name] = ParsePresetElement(prop.Value);
+            }
+            if (dict.Count == 0)
+            {
+                dict[DefaultModPresetName] = new ModPresetState();
+            }
+            if (!dict.ContainsKey(DefaultModPresetName))
+            {
+                var existing = LoadModPresetsDictionary();
+                dict[DefaultModPresetName] = existing.TryGetValue(DefaultModPresetName, out var prev)
+                    ? prev
+                    : new ModPresetState();
+            }
+            if (string.IsNullOrWhiteSpace(activeModPreset) || !dict.ContainsKey(activeModPreset))
+                activeModPreset = dict.ContainsKey(DefaultModPresetName)
+                    ? DefaultModPresetName
+                    : dict.Keys.First();
+            PersistModPresets(dict);
+            LogActivity("[PRESETS] Mod presets updated.");
+            SendDataToWeb(deferHeavyWork: true);
+        }
+        catch (Exception ex)
+        {
+            LogError($"[PRESETS] Update failed: {ex.Message}");
+        }
     }
+
+    private void HandleSetActiveModPreset(string name)
+    {
+        var presets = LoadModPresetsDictionary();
+        EnsureModPresetsInitialized();
+        presets = LoadModPresetsDictionary();
+        if (string.IsNullOrWhiteSpace(name) || !presets.ContainsKey(name))
+        {
+            LogError($"[PRESETS] Unknown preset '{name}'.");
+            return;
+        }
+        activeModPreset = name;
+        SaveSettings();
+        SendDataToWeb(deferHeavyWork: true);
+    }
+
+    private void HandleApplyModPreset(string name)
+    {
+        try
+        {
+            EnsureModPresetsInitialized();
+            var presets = LoadModPresetsDictionary();
+            if (string.IsNullOrWhiteSpace(name) || !presets.TryGetValue(name, out var preset))
+            {
+                LogError($"[PRESETS] Cannot apply unknown preset '{name}'.");
+                return;
+            }
+
+            activeModPreset = name;
+            ApplyPresetEnabledSet(preset);
+
+            SaveSettings();
+            RefreshConflictCount();
+            var enabledCount = (preset.Enabled ?? new List<string>()).Count;
+            LogActivity($"[PRESETS] Applied preset '{name}' ({enabledCount} enabled snapshot).");
+            SendStatusMessage("success", $"Applied preset {name}.", "applied_mod_preset", new object[] { name });
+            SendDataToWeb();
+        }
+        catch (Exception ex)
+        {
+            LogError($"[PRESETS] Apply failed: {ex.Message}");
+            SendStatusMessage("error", "Failed to apply preset.", "preset_apply_failed");
+        }
+    }
+
+    private void ApplyPresetEnabledSet(ModPresetState preset)
+    {
+        var members = (preset.Mods ?? new List<string>())
+            .Select(NormalizePresetModKey)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var wantEnabled = (preset.Enabled ?? new List<string>())
+            .Select(NormalizePresetModKey)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (dynamic m in _modManager.GetModsList().ToList())
+        {
+            string original = (string)m.originalName;
+            if (string.IsNullOrWhiteSpace(original)) continue;
+            if (IsStringModFileName(Path.GetFileName(original.Replace('\\', '/')))) continue;
+            if (IsConfigListKey(NormalizePresetModKey(original))) continue;
+            string key = NormalizePresetModKey(original);
+            bool currentlyEnabled = string.Equals((string)m.status, "enabled", StringComparison.OrdinalIgnoreCase);
+            bool shouldEnable = members.Count > 0 && members.Contains(key) && wantEnabled.Contains(key);
+            if (currentlyEnabled == shouldEnable) continue;
+            if (!_modManager.ToggleModEnabled(original, shouldEnable, out string? err) &&
+                !string.IsNullOrWhiteSpace(err))
+            {
+                LogActivity($"[PRESETS] Toggle '{original}' → {shouldEnable} failed: {err}");
+            }
+        }
+    }
+
+    private void HandleExportModPreset(string name)
+    {
+        try
+        {
+            EnsureModPresetsInitialized();
+            var presets = LoadModPresetsDictionary();
+            if (string.IsNullOrWhiteSpace(name) || !presets.TryGetValue(name, out var preset))
+            {
+                SendStatusMessage("error", "Preset not found.", "preset_not_found");
+                return;
+            }
+
+            using var sfd = new SaveFileDialog
+            {
+                Title = "Export Mod Preset Pack",
+                Filter = "F76 Manager Preset Pack (*.f76presetpack)|*.f76presetpack|Preset metadata only (*.f76preset)|*.f76preset",
+                FileName = SanitizeFileName(name) + ".f76presetpack",
+                AddExtension = true,
+                DefaultExt = "f76presetpack"
+            };
+            if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+            string ext = Path.GetExtension(sfd.FileName);
+            bool metadataOnly = ext.Equals(".f76preset", StringComparison.OrdinalIgnoreCase)
+                                || ext.Equals(".json", StringComparison.OrdinalIgnoreCase);
+
+            if (metadataOnly)
+            {
+                var payload = new
+                {
+                    format = "f76preset",
+                    version = 1,
+                    name,
+                    mods = preset.Mods,
+                    enabled = preset.Enabled
+                };
+                File.WriteAllText(sfd.FileName, JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
+                LogActivity($"[PRESETS] Exported metadata-only '{name}' to {sfd.FileName}");
+                SendStatusMessage("success", "Preset exported.", "preset_exported");
+                return;
+            }
+
+            SyncAppPaths();
+            var modKeys = preset.Mods ?? new List<string>();
+            var fileEntries = _modManager.CollectModsBackupEntriesForListKeys(modKeys);
+            var metaSubset = _modManager.GetMetadataSubsetForListKeys(modKeys);
+
+            string outPath = sfd.FileName;
+            if (!outPath.EndsWith(".f76presetpack", StringComparison.OrdinalIgnoreCase))
+                outPath += ".f76presetpack";
+
+            if (File.Exists(outPath)) File.Delete(outPath);
+
+            using (var archive = ZipFile.Open(outPath, ZipArchiveMode.Create))
+            {
+                var presetPayload = new
+                {
+                    format = "f76presetpack",
+                    version = 2,
+                    name,
+                    mods = preset.Mods,
+                    enabled = preset.Enabled
+                };
+                var presetEntry = archive.CreateEntry("preset.json", CompressionLevel.Optimal);
+                using (var writer = new StreamWriter(presetEntry.Open()))
+                    writer.Write(JsonSerializer.Serialize(presetPayload, new JsonSerializerOptions { WriteIndented = true }));
+
+                var metaEntry = archive.CreateEntry("Settings/mods.json", CompressionLevel.Optimal);
+                using (var writer = new StreamWriter(metaEntry.Open()))
+                    writer.Write(JsonSerializer.Serialize(metaSubset, new JsonSerializerOptions { WriteIndented = true }));
+
+                var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                int filesAdded = 0;
+                foreach (var (sourcePath, entryName) in fileEntries)
+                {
+                    if (!added.Add(entryName)) continue;
+                    try
+                    {
+                        archive.CreateEntryFromFile(sourcePath, entryName, CompressionLevel.Optimal);
+                        filesAdded++;
+                    }
+                    catch (Exception fileEx)
+                    {
+                        LogError($"[PRESETS] Skipped pack file '{sourcePath}': {fileEx.Message}");
+                    }
+                }
+
+                LogActivity($"[PRESETS] Exported pack '{name}' ({filesAdded} file(s), {metaSubset.Count} meta) to {outPath}");
+            }
+
+            SendStatusMessage(
+                "success",
+                "Preset pack exported (mods + Nexus metadata).",
+                "preset_pack_exported");
+        }
+        catch (Exception ex)
+        {
+            LogError($"[PRESETS] Export failed: {ex.Message}");
+            SendStatusMessage("error", "Preset export failed.", "preset_export_failed");
+        }
+    }
+
+    private void HandleImportModPreset()
+    {
+        try
+        {
+            using var ofd = new OpenFileDialog
+            {
+                Title = "Import Mod Preset",
+                Filter = "F76 Manager Preset (*.f76presetpack;*.f76preset;*.json;*.zip)|*.f76presetpack;*.f76preset;*.json;*.zip|All files (*.*)|*.*",
+                Multiselect = false
+            };
+            if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+            string path = ofd.FileName;
+            string ext = Path.GetExtension(path);
+
+            if (ext.Equals(".f76presetpack", StringComparison.OrdinalIgnoreCase)
+                || ext.Equals(".zip", StringComparison.OrdinalIgnoreCase)
+                || LooksLikeZipFile(path))
+            {
+                ImportModPresetPack(path);
+                return;
+            }
+
+            ImportModPresetMetadataOnly(path);
+        }
+        catch (Exception ex)
+        {
+            LogError($"[PRESETS] Import failed: {ex.Message}");
+            SendStatusMessage("error", "Preset import failed.", "preset_import_failed");
+        }
+    }
+
+    private static bool LooksLikeZipFile(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            if (fs.Length < 4) return false;
+            int b0 = fs.ReadByte(), b1 = fs.ReadByte();
+            return b0 == 0x50 && b1 == 0x4B;
+        }
+        catch { return false; }
+    }
+
+    private void ImportModPresetMetadataOnly(string filePath)
+    {
+        string json = File.ReadAllText(filePath);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        string name = root.TryGetProperty("name", out var n) ? (n.GetString() ?? "") : Path.GetFileNameWithoutExtension(filePath);
+        if (string.IsNullOrWhiteSpace(name)) name = "Imported Preset";
+
+        var state = ParsePresetElement(root);
+        if (state.Mods.Count == 0 && root.TryGetProperty("mods", out var modsArr))
+            state = ParsePresetElement(JsonDocument.Parse($"{{\"mods\":{modsArr.GetRawText()},\"enabled\":{(root.TryGetProperty("enabled", out var en) ? en.GetRawText() : "[]")}}}").RootElement);
+
+        EnsureModPresetsInitialized();
+        var presets = LoadModPresetsDictionary();
+        string finalName = name;
+        int suffix = 2;
+        while (presets.ContainsKey(finalName))
+        {
+            finalName = $"{name} ({suffix})";
+            suffix++;
+        }
+        presets[finalName] = state;
+        activeModPreset = finalName;
+        PersistModPresets(presets);
+
+        var installed = new HashSet<string>(
+            _modManager.GetModsList().Select(m => (string)((dynamic)m).originalName),
+            StringComparer.OrdinalIgnoreCase);
+        int missing = state.Mods.Count(m => !installed.Contains(m) && !installed.Contains("Disabled/" + m)
+            && !(m.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) && installed.Contains(m.Substring("Disabled/".Length))));
+
+        LogActivity($"[PRESETS] Imported metadata '{finalName}' ({state.Mods.Count} mods, {missing} not installed).");
+        if (missing > 0)
+            SendStatusMessage("warning", $"{missing} mods in the preset are not installed.", "preset_import_missing", new object[] { missing });
+        else
+            SendStatusMessage("success", "Preset imported.", "preset_imported");
+        SendDataToWeb(deferHeavyWork: true);
+    }
+
+    private void ImportModPresetPack(string zipPath)
+    {
+        SyncAppPaths();
+        string extractRoot = Path.Combine(Path.GetTempPath(), "F76ManagerPresetPack_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(extractRoot);
+        try
+        {
+            ZipFile.ExtractToDirectory(zipPath, extractRoot, overwriteFiles: true);
+
+            string presetJsonPath = Path.Combine(extractRoot, "preset.json");
+            if (!File.Exists(presetJsonPath))
+            {
+                SendStatusMessage("error", "Preset pack is missing preset.json.", "preset_pack_invalid");
+                return;
+            }
+
+            string presetJson = File.ReadAllText(presetJsonPath);
+            using var doc = JsonDocument.Parse(presetJson);
+            var root = doc.RootElement;
+            string name = root.TryGetProperty("name", out var n) ? (n.GetString() ?? "") : "Imported Preset";
+            if (string.IsNullOrWhiteSpace(name)) name = "Imported Preset";
+            var state = ParsePresetElement(root);
+            if (state.Mods.Count == 0 && root.TryGetProperty("mods", out var modsArr))
+                state = ParsePresetElement(JsonDocument.Parse($"{{\"mods\":{modsArr.GetRawText()},\"enabled\":{(root.TryGetProperty("enabled", out var en) ? en.GetRawText() : "[]")}}}").RootElement);
+
+            string dataSrc = Path.Combine(extractRoot, "Data");
+            if (Directory.Exists(dataSrc))
+            {
+                string dataDest = virtualModMode ? AppPaths.ManagedStagingDataPath : AppPaths.DataPath;
+                CopyDirectoryContentsRecursive(dataSrc, dataDest);
+            }
+
+            string stringsSrc = Path.Combine(extractRoot, "Data", "Strings");
+            if (Directory.Exists(stringsSrc))
+            {
+                string stringsDest = virtualModMode ? AppPaths.ManagedStagingStringsPath : AppPaths.StringsPath;
+                CopyDirectoryContentsRecursive(stringsSrc, stringsDest);
+            }
+
+            string bundlesSrc = Path.Combine(extractRoot, "Bundles");
+            if (Directory.Exists(bundlesSrc))
+                CopyDirectoryContentsRecursive(bundlesSrc, AppPaths.BundlesPath);
+
+            string disabledSrc = Path.Combine(extractRoot, "Disabled Mods");
+            if (Directory.Exists(disabledSrc))
+                CopyDirectoryContentsRecursive(disabledSrc, AppPaths.DisabledModsPath);
+
+            string gameInstallSrc = Path.Combine(extractRoot, "GameInstall");
+            if (Directory.Exists(gameInstallSrc))
+            {
+                CopyDirectoryContentsRecursive(gameInstallSrc, AppPaths.DisabledModsPath);
+            }
+
+            string settingsMeta = Path.Combine(extractRoot, "Settings", "mods.json");
+            if (File.Exists(settingsMeta))
+            {
+                try
+                {
+                    var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                    var incoming = JsonSerializer.Deserialize<Dictionary<string, ModManager.ModMetadata>>(
+                        File.ReadAllText(settingsMeta), options);
+                    if (incoming != null && incoming.Count > 0)
+                        _modManager.MergeMetadataSubset(incoming);
+                }
+                catch (Exception metaEx)
+                {
+                    LogError($"[PRESETS] Failed to merge pack metadata: {metaEx.Message}");
+                }
+            }
+
+            _modManager.InvalidateModsListCache();
+
+            EnsureModPresetsInitialized();
+            var presets = LoadModPresetsDictionary();
+            string finalName = name;
+            int suffix = 2;
+            while (presets.ContainsKey(finalName))
+            {
+                finalName = $"{name} ({suffix})";
+                suffix++;
+            }
+            presets[finalName] = state;
+            activeModPreset = finalName;
+            PersistModPresets(presets);
+
+            LogActivity($"[PRESETS] Imported pack '{finalName}' ({state.Mods.Count} mods in preset).");
+            SendStatusMessage(
+                "success",
+                "Preset pack imported (mods + Nexus metadata).",
+                "preset_pack_imported");
+            SendDataToWeb();
+        }
+        finally
+        {
+            try { if (Directory.Exists(extractRoot)) Directory.Delete(extractRoot, true); } catch { }
+        }
+    }
+
+    private static void CopyDirectoryContentsRecursive(string sourceDir, string destDir)
+    {
+        if (!Directory.Exists(sourceDir)) return;
+        if (!Directory.Exists(destDir)) Directory.CreateDirectory(destDir);
+
+        foreach (string dir in Directory.GetDirectories(sourceDir, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(sourceDir, dir);
+            string target = Path.Combine(destDir, rel);
+            if (!Directory.Exists(target)) Directory.CreateDirectory(target);
+        }
+
+        foreach (string file in Directory.GetFiles(sourceDir, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(sourceDir, file);
+            string destFile = Path.Combine(destDir, rel);
+            string? destParent = Path.GetDirectoryName(destFile);
+            if (!string.IsNullOrEmpty(destParent) && !Directory.Exists(destParent))
+                Directory.CreateDirectory(destParent);
+            File.Copy(file, destFile, true);
+        }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        foreach (char c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return string.IsNullOrWhiteSpace(name) ? "preset" : name.Trim();
+    }
+
     private void HandlePromoteBundleToMod(string bundleName)
     {
         try
@@ -2674,6 +3795,10 @@ public partial class Form1
         string? singleName = null;
         if (TryGetString(root, "originalName", out var oneName)) singleName = oneName;
 
+        bool fullCheck = string.IsNullOrEmpty(singleName);
+        if (fullCheck && Interlocked.CompareExchange(ref _fullModUpdateCheckRunning, 1, 0) != 0)
+            return;
+
         Task.Run(async () =>
         {
             var updates = new List<object>();
@@ -2735,8 +3860,10 @@ public partial class Form1
             this.Invoke(() =>
             {
                 SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_UPDATES_RESULT", updates }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
-                SendDataToWeb();
             });
+        }).ContinueWith(_ =>
+        {
+            if (fullCheck) Interlocked.Exchange(ref _fullModUpdateCheckRunning, 0);
         });
     }
 
@@ -2773,6 +3900,7 @@ public partial class Form1
         ApplyProfileState(newProfile);
         
         SaveProfiles();
+        SaveSettings();
         SendStatusMessage("success", $"Profile '{name}' created ({mode}).", "profile_created", new object[] { name, mode });
         SendDataToWeb();
     }
@@ -2796,6 +3924,7 @@ public partial class Form1
         }
 
         SaveProfiles();
+        SaveSettings();
         SendStatusMessage("success", "Profile deleted.", "profile_deleted");
         SendDataToWeb();
     }
@@ -2816,6 +3945,7 @@ public partial class Form1
         activeProfile = name;
 
         SaveProfiles();
+        SaveSettings();
         SendStatusMessage("success", $"Switched to {name}.", "profile_switched", new object[] { name });
         SendDataToWeb();
     }
@@ -3123,6 +4253,208 @@ public partial class Form1
         LogActivity($"[THEMES] Imported theme '{theme.DisplayName}' ({theme.Id})");
     }
 
+    private void HandleSaveThemePackage(JsonElement root, CoreWebView2? replyTo = null)
+    {
+        try
+        {
+            string mode = "install";
+            if (TryGetString(root, "mode", out var modeVal) && !string.IsNullOrWhiteSpace(modeVal))
+                mode = modeVal.Trim().ToLowerInvariant();
+
+            if (!root.TryGetProperty("manifest", out var manifestEl) || manifestEl.ValueKind != JsonValueKind.Object)
+            {
+                PostThemeSaveResult(false, mode, null, null, "Missing manifest.", replyTo);
+                return;
+            }
+
+            if (!TryGetString(root, "logoDataUrl", out var logoDataUrl) || string.IsNullOrWhiteSpace(logoDataUrl))
+            {
+                PostThemeSaveResult(false, mode, null, null, "Missing logo.", replyTo);
+                return;
+            }
+
+            if (!TryDecodeDataUrl(logoDataUrl, out var logoBytes, out var _) || logoBytes == null || logoBytes.Length == 0)
+            {
+                PostThemeSaveResult(false, mode, null, null, "Could not decode logo image.", replyTo);
+                return;
+            }
+
+            if (logoBytes.Length > ThemePackageValidator.MaxLogoBytes)
+            {
+                PostThemeSaveResult(false, mode, null, null, "Logo too large.", replyTo);
+                return;
+            }
+
+            if (!ThemePackageValidator.TryValidateLogoImage(logoBytes, out var ext, out var logoErr))
+            {
+                PostThemeSaveResult(false, mode, null, null, logoErr ?? "Invalid logo.", replyTo);
+                return;
+            }
+
+            string manifestJson = manifestEl.GetRawText();
+            if (!ThemePackageValidator.TryValidateManifest(manifestJson, out var manifest, out var manErr) || manifest == null)
+            {
+                PostThemeSaveResult(false, mode, null, null, manErr ?? "Invalid manifest.", replyTo);
+                return;
+            }
+
+            if (ThemeIds.IsBuiltIn(manifest.Id))
+            {
+                PostThemeSaveResult(false, mode, null, null,
+                    $"Theme id '{manifest.Id}' is reserved for a built-in theme.", replyTo);
+                return;
+            }
+
+            var packageManifest = new Dictionary<string, object>
+            {
+                ["formatVersion"] = ThemePackageValidator.FormatVersion,
+                ["id"] = manifest.Id,
+                ["displayName"] = manifest.DisplayName,
+                ["tokens"] = manifest.Tokens.ToDictionary(kv => kv.Key, kv => kv.Value),
+                ["logoLayout"] = manifest.LogoLayout,
+            };
+            string cleanManifestJson = JsonSerializer.Serialize(packageManifest, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+            });
+
+            string fileName = $"{ThemePackageValidator.SanitizeExportFileName(manifest.DisplayName)}.f76theme";
+            string? destPath = null;
+
+            if (mode == "export")
+            {
+                using var sfd = new SaveFileDialog
+                {
+                    Filter = "F76 Theme Package (*.f76theme)|*.f76theme",
+                    Title = "Export theme package",
+                    FileName = fileName,
+                };
+                if (sfd.ShowDialog() != DialogResult.OK)
+                    return;
+                destPath = sfd.FileName;
+                if (!destPath.EndsWith(".f76theme", StringComparison.OrdinalIgnoreCase))
+                    destPath += ".f76theme";
+            }
+            else
+            {
+                Directory.CreateDirectory(AppPaths.ThemesFolder);
+                destPath = Path.Combine(AppPaths.ThemesFolder, fileName);
+            }
+
+            WriteThemePackageZip(destPath!, cleanManifestJson, logoBytes, ext);
+
+            if (mode == "export")
+            {
+                PostThemeSaveResult(true, mode, manifest.Id, manifest.DisplayName, null, replyTo);
+                LogActivity($"[THEMES] Exported theme '{manifest.DisplayName}' to {Path.GetFileName(destPath)}");
+                return;
+            }
+
+            foreach (var existing in Directory.EnumerateFiles(AppPaths.ThemesFolder, "*.f76theme", SearchOption.TopDirectoryOnly))
+            {
+                if (string.Equals(existing, destPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (ThemePackageReader.TryRead(existing, out var content, out _)
+                    && content != null
+                    && content.Id == manifest.Id)
+                {
+                    try { File.Delete(existing); } catch { }
+                }
+            }
+
+            _themePackageLoader.ReloadWithResult();
+            var installed = _themePackageLoader.GetTheme(manifest.Id);
+            if (installed == null)
+            {
+                PostThemeSaveResult(false, mode, null, null, "Theme saved but failed to reload.", replyTo);
+                return;
+            }
+
+            uiTheme = NormalizeUiTheme(installed.Id);
+            ApplyWindowChromeFromTheme(uiTheme);
+            SaveSettings();
+            SendDataToWeb();
+            LogActivity($"[THEMES] Saved theme '{installed.DisplayName}' ({installed.Id})");
+
+            if (replyTo != null && _themeCreator != null && !_themeCreator.IsDisposed
+                && ReferenceEquals(replyTo, _themeCreator.CoreWebView))
+            {
+                OnThemeCreatorInstallSuccess(installed.Id, installed.DisplayName, replyTo);
+            }
+            else
+            {
+                PostThemeSaveResult(true, mode, installed.Id, installed.DisplayName, null, replyTo);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"[THEMES] Save failed: {ex.Message}");
+            PostThemeSaveResult(false, "install", null, null, ex.Message, replyTo);
+        }
+    }
+
+    private void PostThemeSaveResult(bool ok, string mode, string? themeId, string? displayName, string? error, CoreWebView2? replyTo = null)
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            type = "THEME_SAVE_RESULT",
+            ok,
+            mode,
+            themeId,
+            displayName,
+            error,
+        });
+        if (replyTo != null)
+        {
+            try { replyTo.PostWebMessageAsJson(json); return; }
+            catch { }
+        }
+        SendMessageToWeb(json);
+    }
+
+    private static bool TryDecodeDataUrl(string dataUrl, out byte[]? bytes, out string? mime)
+    {
+        bytes = null;
+        mime = null;
+        try
+        {
+            const string prefix = "data:";
+            if (!dataUrl.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+            int comma = dataUrl.IndexOf(',');
+            if (comma < 0) return false;
+            string meta = dataUrl[prefix.Length..comma];
+            string payload = dataUrl[(comma + 1)..];
+            if (!meta.Contains("base64", StringComparison.OrdinalIgnoreCase))
+                return false;
+            int semi = meta.IndexOf(';');
+            mime = semi > 0 ? meta[..semi] : meta;
+            bytes = Convert.FromBase64String(payload);
+            return bytes.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void WriteThemePackageZip(string path, string manifestJson, byte[] logoBytes, string logoExt)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        if (File.Exists(path)) File.Delete(path);
+
+        using var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        using var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create);
+        var manEntry = zip.CreateEntry("manifest.json", System.IO.Compression.CompressionLevel.Optimal);
+        using (var sw = new StreamWriter(manEntry.Open(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+            sw.Write(manifestJson);
+
+        var logoName = "logo" + (logoExt.StartsWith('.') ? logoExt : "." + logoExt);
+        var logoEntry = zip.CreateEntry(logoName, System.IO.Compression.CompressionLevel.Optimal);
+        using (var ls = logoEntry.Open())
+            ls.Write(logoBytes, 0, logoBytes.Length);
+    }
+
     private void HandleOpenThemesFolder()
     {
         try
@@ -3144,10 +4476,78 @@ public partial class Form1
         {
             type = "THEME_RELOAD_RESULT",
             themesFolder = result.ThemesFolder,
-            loaded = result.Loaded.Select(t => new { t.Id, t.DisplayName, fileName = t.FileName }).ToArray(),
+            loaded = result.Loaded.Select(t => new { id = t.Id, displayName = t.DisplayName, fileName = t.FileName }).ToArray(),
             rejected = result.Rejected.Select(t => new { fileName = t.FileName, error = t.Error }).ToArray(),
         }));
         LogActivity($"[THEMES] Reloaded {result.Loaded.Count} theme(s), {result.Rejected.Count} rejected.");
+    }
+
+    private void HandleDeleteUserTheme(string themeId)
+    {
+        void PostResult(bool ok, string? displayName, string? error) =>
+            SendMessageToWeb(JsonSerializer.Serialize(new
+            {
+                type = "THEME_DELETE_RESULT",
+                ok,
+                themeId,
+                displayName,
+                activeTheme = uiTheme,
+                error,
+            }));
+
+        try
+        {
+            themeId = (themeId ?? "").Trim();
+            var theme = _themePackageLoader.GetTheme(themeId);
+            if (theme == null || ThemeIds.IsBuiltIn(themeId))
+            {
+                PostResult(false, null, "Only custom themes can be deleted.");
+                return;
+            }
+
+            var toDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(theme.SourceFile) && File.Exists(theme.SourceFile))
+                toDelete.Add(theme.SourceFile);
+            if (Directory.Exists(AppPaths.ThemesFolder))
+            {
+                foreach (var file in Directory.EnumerateFiles(AppPaths.ThemesFolder, "*.f76theme", SearchOption.TopDirectoryOnly))
+                {
+                    if (ThemePackageReader.TryRead(file, out var content, out _) && content?.Id == themeId)
+                        toDelete.Add(file);
+                }
+            }
+
+            foreach (var file in toDelete)
+                File.Delete(file);
+
+            try
+            {
+                var cacheDir = Path.Combine(AppPaths.ThemesCacheFolder, themeId);
+                if (Directory.Exists(cacheDir)) Directory.Delete(cacheDir, true);
+            }
+            catch (Exception ex)
+            {
+                LogError($"[THEMES] Could not clear cache for '{themeId}': {ex.Message}");
+            }
+
+            _themePackageLoader.ReloadWithResult();
+
+            if (string.Equals(uiTheme, themeId, StringComparison.Ordinal))
+            {
+                uiTheme = NormalizeUiTheme(null);
+                ApplyWindowChromeFromTheme(uiTheme);
+                SaveSettings();
+            }
+
+            SendDataToWeb();
+            PostResult(true, theme.DisplayName, null);
+            LogActivity($"[THEMES] Deleted theme '{theme.DisplayName}' ({themeId}), {toDelete.Count} package file(s).");
+        }
+        catch (Exception ex)
+        {
+            LogError($"[THEMES] Delete failed for '{themeId}': {ex.Message}");
+            PostResult(false, null, ex.Message);
+        }
     }
 
     private void HandleBrowseExecutable(string target, string? requestedPath)
@@ -3192,31 +4592,117 @@ public partial class Form1
         SendDataToWeb();
     }
 
-    private void RefreshConflictCount(bool showModal = false, bool sendDataUpdate = true)
+    private void RefreshConflictCount(bool showModal = false, bool sendDataUpdate = true, bool quickSync = false)
     {
         Task.Run(() => {
             try {
-                SyncAppPaths();
+                SyncAppPaths(quick: quickSync);
                 
                 var enabledModPaths = _modManager.GetEnabledModPaths();
+#if DEBUG
                 LogActivity($"[UI] Enabled Mod Paths for Scan: {string.Join(", ", enabledModPaths.Select(Path.GetFileName))}");
+#endif
                 var searchPaths = new List<string> { AppPaths.DataPath };
                 
                 LogActivity($"[UI] Refreshing conflict count for {enabledModPaths.Count} enabled mods.");
                 
                 var conflicts = _conflictManager.DetectConflicts(enabledModPaths, searchPaths);
-                if (showModal && conflicts != null && conflicts.Count > 0) {
-                    var enabledMods = _modManager.GetModsList()
-                        .Where(m => (string)((dynamic)m).status == "enabled")
-                        .Select(m => (string)((dynamic)m).originalName)
-                        .ToList();
+                var realCount = conflicts?.Count(c =>
+                    !string.Equals(c.Status, "identical", StringComparison.OrdinalIgnoreCase)) ?? 0;
+                if (showModal && realCount > 0) {
+                    var enabledMods = ResolveActivePresetDeployList();
                     var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-                    SendMessageToWeb(JsonSerializer.Serialize(new { type = "conflicts_found", conflicts = conflicts, requestedMods = enabledMods, isFromDeploy = false }, options));
+                    SendMessageToWeb(JsonSerializer.Serialize(new {
+                        type = "conflicts_found",
+                        conflicts = conflicts,
+                        identicalDuplicates = conflicts?.Count(c => string.Equals(c.Status, "identical", StringComparison.OrdinalIgnoreCase)) ?? 0,
+                        requestedMods = enabledMods,
+                        isFromDeploy = false
+                    }, options));
                 }
                 
                 if (sendDataUpdate) SendDataToWeb();
             } catch (Exception ex) {
                 LogError($"RefreshConflictCount Error: {ex.Message}");
+            }
+        });
+    }
+
+    private void HandleNexusResolveModLink(JsonElement root)
+    {
+        long modId = 0;
+        string url = "";
+        if (TryGetInt64(root, "modId", out var mid) && mid > 0)
+            modId = mid;
+        if (TryGetString(root, "url", out var urlVal) && !string.IsNullOrWhiteSpace(urlVal))
+            url = urlVal.Trim();
+        long? currentFileId = null;
+        if (TryGetInt64(root, "fileId", out var fidVal) && fidVal > 0)
+            currentFileId = fidVal;
+        string? currentVersion = null;
+        if (TryGetString(root, "version", out var verVal) && !string.IsNullOrWhiteSpace(verVal))
+            currentVersion = verVal.Trim();
+
+        if (modId <= 0 && !string.IsNullOrWhiteSpace(url))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                url,
+                @"nexusmods\.com/fallout76/mods/(\d+)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success && long.TryParse(m.Groups[1].Value, out var fromUrl) && fromUrl > 0)
+                modId = fromUrl;
+        }
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                if (_nexusManager == null || !nexusLoggedIn)
+                {
+                    SendMessageToWeb(JsonSerializer.Serialize(new
+                    {
+                        type = "NEXUS_RESOLVE_MOD_LINK_RESULT",
+                        ok = false,
+                        error = "Not logged in to Nexus Mods."
+                    }));
+                    return;
+                }
+
+                if (modId <= 0)
+                {
+                    SendMessageToWeb(JsonSerializer.Serialize(new
+                    {
+                        type = "NEXUS_RESOLVE_MOD_LINK_RESULT",
+                        ok = false,
+                        error = "Enter a Nexus mod ID or URL first."
+                    }));
+                    return;
+                }
+
+                var resolved = await _nexusManager.ResolveModLinkAsync(modId, currentFileId, currentVersion);
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "NEXUS_RESOLVE_MOD_LINK_RESULT",
+                    ok = resolved.Ok,
+                    error = resolved.Error,
+                    nexusModId = resolved.NexusModId,
+                    nexusFileId = resolved.NexusFileId,
+                    nexusFileVersion = resolved.NexusFileVersion,
+                    fileName = resolved.FileName,
+                    nexusFileUploaded = resolved.NexusFileUploaded,
+                    url = resolved.Url,
+                    hasUpdate = resolved.HasUpdate
+                }));
+            }
+            catch (Exception ex)
+            {
+                LogError($"[NEXUS] Resolve mod link failed: {ex.Message}");
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "NEXUS_RESOLVE_MOD_LINK_RESULT",
+                    ok = false,
+                    error = ex.Message
+                }));
             }
         });
     }
@@ -3239,6 +4725,7 @@ public partial class Form1
     private void HandleNexusLogout()
     {
         nexusLoggedIn = false;
+        NexusCredentialStore.Clear();
         InitializeNexusManager(null);
         SaveSettings();
         SanitizeProfileCredentialSettings();
@@ -3313,9 +4800,7 @@ public partial class Form1
                 if (string.IsNullOrWhiteSpace(originalName)) continue;
 
                 string lower = originalName.ToLowerInvariant();
-                if (!lower.EndsWith(".ini", StringComparison.OrdinalIgnoreCase) &&
-                    !lower.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
-                    !lower.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+                if (!ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(lower)))
                     continue;
 
                 string src = _modManager.ResolveListKeyToFullPath(originalName);
@@ -3361,11 +4846,7 @@ public partial class Form1
 
     private static bool IsConfigListKey(string originalName)
     {
-        if (string.IsNullOrWhiteSpace(originalName)) return false;
-        string lower = originalName.ToLowerInvariant();
-        return lower.EndsWith(".ini", StringComparison.OrdinalIgnoreCase) ||
-               lower.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
-               lower.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
+        return ConfigFileMerger.IsRootLooseConfigPath(originalName);
     }
 
     private static bool IsProtectedCoreConfigKey(string originalName) =>
@@ -3490,6 +4971,19 @@ public partial class Form1
 
                     backedUpCount += AddOptionalFileToArchive(archive, AppPaths.ModsMetadataFile, "Settings/mods.json");
                     backedUpCount += AddOptionalFileToArchive(archive, AppPaths.ProfilesFile, "Profiles/profiles.json");
+
+                    try
+                    {
+                        string presetsJson = GetModPresetsBackupJson();
+                        var entry = archive.CreateEntry("Settings/presets.json", CompressionLevel.Optimal);
+                        using var writer = new StreamWriter(entry.Open());
+                        writer.Write(presetsJson);
+                        backedUpCount++;
+                    }
+                    catch (Exception presetsEx)
+                    {
+                        LogError($"[BACKUP] Failed to write presets.json: {presetsEx.Message}");
+                    }
                 }
 
                 if (backedUpCount > 0)
@@ -3571,6 +5065,7 @@ public partial class Form1
             File.WriteAllText(logErrorPath, string.Empty);
             LogActivity("[LOGS] Error log cleared by user.");
             SendDataToWeb();
+            NotifyLogsPopoutData();
         }
         catch (Exception ex)
         {
@@ -3607,8 +5102,6 @@ public partial class Form1
         catch { return ""; }
     }
 
-    /// <summary>Resolves a platform's mod storage locations (Data, Strings, GameRoot, Documents, INI prefix)
-    /// for the active mode (Virtual Mod Mode staging vs. the live game folders).</summary>
     private (string data, string strings, string gameRoot, string docs, string prefix) ResolvePlatformModLocation(GamePlatform platform)
     {
         bool isXboxPlat = platform == GamePlatform.Xbox;
@@ -3634,8 +5127,6 @@ public partial class Form1
         return (data, sp, gameRoot, docs, prefix);
     }
 
-    /// <summary>Merges the source platform's [Archive] load lists into the destination platform's Custom.ini
-    /// (dedup, excluding vanilla). Preserves manual entries that loose-file mods like UniMap/TZMap require.</summary>
     private int MergeArchiveIniEntries(string srcDocs, string srcPrefix, string dstDocs, string dstPrefix)
     {
         if (string.IsNullOrWhiteSpace(srcDocs) || string.IsNullOrWhiteSpace(dstDocs)) return 0;
@@ -3664,7 +5155,6 @@ public partial class Form1
 
             if (addedThisKey > 0)
             {
-                // Fallout 76 requires no spaces after commas in the archive list.
                 _configManager.UpdateBothInis("Archive", key, string.Join(",", result),
                     overrideDocsPath: dstDocs, onlyCustom: true, overridePrefix: dstPrefix);
             }
@@ -3819,16 +5309,8 @@ public partial class Form1
         {
             case "gamePath": 
                 gamePath = val.GetString() ?? ""; 
-                if (gamePath.Contains("XboxGames", StringComparison.OrdinalIgnoreCase) || 
-                    gamePath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) || 
-                    gamePath.Contains("ModifiableWindowsApps", StringComparison.OrdinalIgnoreCase))
-                {
-                    _platformManager.SetPlatform(GamePlatform.Xbox);
-                }
-                else
-                {
-                    _platformManager.SetPlatform(GamePlatform.Steam);
-                }
+                _platformManager.SetPlatform(
+                    PlatformManager.DetectPlatformFromGamePath(gamePath, _platformManager.CurrentPlatform));
                 SyncAppPaths();
                 break;
             case "documentsPath": documentsPath = val.GetString() ?? ""; SyncAppPaths(); break;
@@ -3840,16 +5322,32 @@ public partial class Form1
                 SyncAppPaths();
                 break;
             case "minimizeToTray": minimizeToTray = val.GetBoolean(); break;
-            case "uiAnimations": uiAnimations = val.GetBoolean(); break;
+            case "uiAnimations":
+                uiAnimations = val.GetBoolean();
+                NotifyLogsPopoutTheme();
+                break;
+            case "hideKofi": hideKofi = val.GetBoolean(); break;
+            case "logsPopoutReopenOnLaunch": logsPopoutReopenOnLaunch = val.GetBoolean(); break;
+            case "logsPopoutKeepOpen": logsPopoutKeepOpen = val.GetBoolean(); break;
             case "platformBadgeGlow": platformBadgeGlow = val.GetBoolean(); break;
             case "configEditorSpellCheck": configEditorSpellCheck = val.GetBoolean(); break;
             case "confirmBeforeDeleteMod": confirmBeforeDeleteMod = val.GetBoolean(); break;
             case "confirmBeforeRemoveOldModOnUpdate": confirmBeforeRemoveOldModOnUpdate = val.GetBoolean(); break;
+            case "updateModsInAllPresets": updateModsInAllPresets = val.GetBoolean(); break;
             case "virtualModMode":
             case "managedVanillaMode":
+            {
+                bool previous = virtualModMode;
                 virtualModMode = val.GetBoolean();
                 SyncAppPaths();
+                if (previous != virtualModMode)
+                {
+                    ApplyVirtualModModeTransition(previous, virtualModMode);
+                    if (previous == virtualModMode)
+                        SaveSettings();
+                }
                 break;
+            }
             default:
                 string sVal = "";
                 if (val.ValueKind == JsonValueKind.String)
@@ -3888,6 +5386,52 @@ public partial class Form1
         void WriteCustomIni(string section, string iniKey, string iniVal)
         {
             if (writeIni) _configManager.UpdateBothInis(section, iniKey, iniVal, onlyCustom: true);
+        }
+        void WriteCustomIniIfExists(string section, string iniKey, string iniVal)
+        {
+            if (writeIni) _configManager.UpdateCustomIniKeyIfExists(section, iniKey, iniVal);
+        }
+        int? WriteFovCustomIfSafe(string section, string iniKey, string iniVal)
+        {
+            if (!writeIni) return int.TryParse(iniVal, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedOnly) ? parsedOnly : null;
+            string customPath = Path.Combine(documentsPath, $"{AppPaths.IniPrefix}Custom.ini");
+            string? existing = _configManager.ReadIniValue(customPath, section, iniKey);
+            if (float.TryParse(existing, NumberStyles.Float, CultureInfo.InvariantCulture, out float existingF)
+                && float.TryParse(iniVal, NumberStyles.Float, CultureInfo.InvariantCulture, out float incomingF)
+                && existingF > incomingF
+                && incomingF <= 120f)
+            {
+                LogActivity($"[FOV] Preserved Custom.ini {iniKey}={existing} (ignored lower tweak value {iniVal}).");
+                _configManager.EnsureCustomFovStable();
+                return (int)Math.Round(existingF);
+            }
+            _configManager.UpdateCustomIniKeyIfExists(section, iniKey, iniVal);
+            _configManager.EnsureCustomFovStable();
+            if (float.TryParse(iniVal, NumberStyles.Float, CultureInfo.InvariantCulture, out float writtenF))
+                return (int)Math.Round(writtenF);
+            return null;
+        }
+        int? WriteWorldFovCustomIfSafe(string displayedVal)
+        {
+            if (!float.TryParse(displayedVal, NumberStyles.Float, CultureInfo.InvariantCulture, out float displayedF))
+                return null;
+            if (!writeIni) return (int)Math.Round(displayedF);
+            string customPath = Path.Combine(documentsPath, $"{AppPaths.IniPrefix}Custom.ini");
+            string? existing = _configManager.ReadIniValue(customPath, "Display", "fDefaultWorldFOV");
+            if (float.TryParse(existing, NumberStyles.Float, CultureInfo.InvariantCulture, out float existingEngine))
+            {
+                float existingDisplayed = WorldFovEngineToDisplayed(existingEngine);
+                if (existingDisplayed > 120f && displayedF <= 120f && existingDisplayed > displayedF)
+                {
+                    LogActivity($"[FOV] Preserved Custom.ini fDefaultWorldFOV={existing} (in-game {existingDisplayed:0.#}; ignored lower tweak value {displayedVal}).");
+                    _configManager.EnsureCustomFovStable();
+                    return (int)Math.Round(existingDisplayed);
+                }
+            }
+            string engineVal = WorldFovDisplayedToEngine(displayedF).ToString("0.####", CultureInfo.InvariantCulture);
+            _configManager.UpdateCustomIniKeyIfExists("Display", "fDefaultWorldFOV", engineVal);
+            _configManager.EnsureCustomFovStable();
+            return (int)Math.Round(displayedF);
         }
         void ScrubPipboyCrtFromPrefs()
         {
@@ -3941,21 +5485,27 @@ public partial class Form1
                 if (_platformManager.IsXbox()) xboxDof = mb; else steamDof = mb;
                 break;
             case "fov":
-                WriteBothInis("Display", "fDefaultWorldFOV", val);
-                if (int.TryParse(val, out int fovVal)) {
-                    if (_platformManager.IsXbox()) xboxFov = fovVal; else steamFov = fovVal;
+                {
+                    int? kept = WriteWorldFovCustomIfSafe(val);
+                    if (kept.HasValue) {
+                        if (_platformManager.IsXbox()) xboxFov = kept.Value; else steamFov = kept.Value;
+                    }
                 }
                 break;
             case "fov1st":
-                WriteBothInis("Display", "fDefault1stPersonFOV", val);
-                if (int.TryParse(val, out int fov1Val)) {
-                    if (_platformManager.IsXbox()) xboxFov1st = fov1Val; else steamFov1st = fov1Val;
+                {
+                    int? kept1 = WriteFovCustomIfSafe("Display", "fDefault1stPersonFOV", val);
+                    if (kept1.HasValue) {
+                        if (_platformManager.IsXbox()) xboxFov1st = kept1.Value; else steamFov1st = kept1.Value;
+                    }
                 }
                 break;
             case "fovpipboy":
-                WriteBothInis("Display", "fPipboy1stFOV", val);
-                if (int.TryParse(val, out int fovPbVal)) {
-                    if (_platformManager.IsXbox()) xboxFovPipboy = fovPbVal; else steamFovPipboy = fovPbVal;
+                {
+                    int? keptPb = WriteFovCustomIfSafe("Display", "fPipboy1stFOV", val);
+                    if (keptPb.HasValue) {
+                        if (_platformManager.IsXbox()) xboxFovPipboy = keptPb.Value; else steamFovPipboy = keptPb.Value;
+                    }
                 }
                 break;
             case "shadows":
@@ -4331,7 +5881,7 @@ public partial class Form1
                     gammaVal = gammaInt / 10.0;
                 else if (!double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out gammaVal))
                     break;
-                gammaVal = Math.Clamp(gammaVal, 0.8, 1.4);
+                gammaVal = Math.Max(gammaVal, 0.1);
                 string gammaStr = gammaVal.ToString("0.0000", CultureInfo.InvariantCulture);
                 WriteBothInis("Display", "fGamma", gammaStr);
                 if (_platformManager.IsXbox()) xboxGamma = gammaVal; else steamGamma = gammaVal;
@@ -4397,7 +5947,52 @@ public partial class Form1
     private void HandleRenameMod(string currentName, string newName, string details = "")
     {
         _modManager.RenameMod(currentName, newName, details);
+        if (!string.IsNullOrWhiteSpace(_modManager.LastRenameFrom) &&
+            !string.IsNullOrWhiteSpace(_modManager.LastRenameTo))
+        {
+            ReplaceModKeyEverywhere(_modManager.LastRenameFrom, _modManager.LastRenameTo);
+        }
         SendDataToWeb();
+    }
+
+    private void ReplaceModKeyEverywhere(string oldKey, string newKey)
+    {
+        bool changed = false;
+        var presets = LoadModPresetsDictionary();
+        foreach (var preset in presets.Values)
+        {
+            if (ReplaceModKeyInList(preset.Mods, oldKey, newKey)) changed = true;
+            if (ReplaceModKeyInList(preset.Enabled, oldKey, newKey)) changed = true;
+        }
+        if (changed) PersistModPresets(presets);
+
+        bool profilesChanged = false;
+        foreach (var profile in profiles)
+        {
+            if (ReplaceModKeyInList(profile.ProfileMods, oldKey, newKey)) profilesChanged = true;
+            if (ReplaceModKeyInList(profile.EnabledMods, oldKey, newKey)) profilesChanged = true;
+        }
+        if (changed || profilesChanged) SaveSettings();
+    }
+
+    private static bool ReplaceModKeyInList(List<string> list, string oldKey, string newKey)
+    {
+        if (list == null || list.Count == 0) return false;
+        bool changed = false;
+        for (int i = 0; i < list.Count; i++)
+        {
+            string stored = list[i] ?? "";
+            string norm = stored.Replace('\\', '/').Trim();
+            bool disabled = norm.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase);
+            if (disabled) norm = norm.Substring("Disabled/".Length);
+            string oldNorm = (oldKey ?? "").Replace('\\', '/').Trim();
+            if (oldNorm.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
+                oldNorm = oldNorm.Substring("Disabled/".Length);
+            if (!string.Equals(norm, oldNorm, StringComparison.OrdinalIgnoreCase)) continue;
+            list[i] = disabled ? "Disabled/" + newKey : newKey;
+            changed = true;
+        }
+        return changed;
     }
 
     private void HandleSaveModDetails(string name, string details = "")
@@ -4418,6 +6013,12 @@ public partial class Form1
         error = "";
         try
         {
+            if (_modManager == null)
+            {
+                error = "Mod manager not ready.";
+                return false;
+            }
+
             if (string.IsNullOrWhiteSpace(modKey) || string.IsNullOrWhiteSpace(relativePath))
             {
                 error = "Missing mod key or file path.";
@@ -4437,65 +6038,38 @@ public partial class Form1
                 return false;
             }
 
-            var allMeta = _modManager.GetType()
-                .GetMethod("LoadMetadata", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                ?.Invoke(_modManager, null) as Dictionary<string, ModManager.ModMetadata>;
-
-            if (allMeta == null)
-            {
-                error = "Failed to read mod metadata.";
-                return false;
-            }
-
             string modKeyNorm = modKey.Replace("\\", "/").Trim();
-            bool modKeyLooksLikeListKey =
-                modKeyNorm.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.StartsWith("GameRoot/", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.EndsWith(".ini", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
-                modKeyNorm.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
 
-            string resolvedKey = "";
-            if (modKeyLooksLikeListKey && allMeta.ContainsKey(modKeyNorm))
-            {
-                resolvedKey = modKeyNorm;
-            }
-            else
-            {
-                resolvedKey = _modManager.GetType()
-                    .GetMethod("ResolveMetadataKey", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                    ?.Invoke(_modManager, new object[] { allMeta, modKeyNorm }) as string ?? "";
-            }
+            bool selfOwnedConfig =
+                string.Equals(modKeyNorm, relNorm, StringComparison.OrdinalIgnoreCase) ||
+                (modKeyNorm.EndsWith("/" + Path.GetFileName(relNorm), StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(Path.GetFileName(modKeyNorm), Path.GetFileName(relNorm), StringComparison.OrdinalIgnoreCase));
 
-            if (string.IsNullOrWhiteSpace(resolvedKey) || !allMeta.TryGetValue(resolvedKey, out var meta) || meta == null)
+            if (!selfOwnedConfig)
             {
-                error = "Mod metadata record not found.";
-                return false;
+                var meta = _modManager.GetMetadataForMod(modKeyNorm);
+                if (meta == null)
+                {
+                    error = "Mod metadata record not found.";
+                    LogActivity($"[MOD_FILE] No metadata for key='{modKeyNorm}' rel='{relNorm}'");
+                    return false;
+                }
+
+                bool owned = (meta.Files ?? new List<string>())
+                    .Any(f => string.Equals((f ?? "").Replace("\\", "/").Trim(), relNorm, StringComparison.OrdinalIgnoreCase));
+                if (!owned)
+                {
+                    error = "This file is not part of that mod.";
+                    LogActivity($"[MOD_FILE] Not owned: key='{modKeyNorm}' rel='{relNorm}' files=[{string.Join(", ", meta.Files ?? new List<string>())}]");
+                    return false;
+                }
             }
 
-            bool owned = (meta.Files ?? new List<string>())
-                .Any(f => string.Equals((f ?? "").Replace("\\", "/").Trim(), relNorm, StringComparison.OrdinalIgnoreCase));
-            if (!owned)
-            {
-                error = "This file is not part of that mod.";
-                return false;
-            }
-
-            var getFullPath = _modManager.GetType()
-                .GetMethod("GetFullPath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            if (getFullPath == null)
-            {
-                error = "Path resolver not available.";
-                return false;
-            }
-
-            string? resolvedFull = getFullPath.Invoke(_modManager, new object[] { relNorm }) as string;
+            string? resolvedFull = _modManager.ResolveListKeyToFullPath(relNorm);
             if (string.IsNullOrWhiteSpace(resolvedFull))
             {
                 error = "Failed to resolve file path.";
+                LogActivity($"[MOD_FILE] Path resolve failed for '{relNorm}'");
                 return false;
             }
 
@@ -4505,6 +6079,7 @@ public partial class Form1
         catch (Exception ex)
         {
             error = ex.Message;
+            LogError($"[MOD_FILE] Resolve failed: {ex.Message}");
             return false;
         }
     }
@@ -4515,6 +6090,7 @@ public partial class Form1
         {
             if (!TryResolveOwnedEditableFile(modKey, relativePath, out var fullPath, out var error))
             {
+                LogActivity($"[MOD_FILE] READ failed key='{modKey}' rel='{relativePath}': {error}");
                 SendMessageToWeb(JsonSerializer.Serialize(new
                 {
                     type = "MOD_FILE_CONTENT",
@@ -4530,6 +6106,7 @@ public partial class Form1
                 ? File.ReadAllText(fullPath, System.Text.Encoding.UTF8)
                 : "";
 
+            LogActivity($"[MOD_FILE] READ ok key='{modKey}' path='{fullPath}' bytes={content.Length}");
             SendMessageToWeb(JsonSerializer.Serialize(new
             {
                 type = "MOD_FILE_CONTENT",
@@ -4540,6 +6117,7 @@ public partial class Form1
         }
         catch (Exception ex)
         {
+            LogError($"[MOD_FILE] READ exception: {ex.Message}");
             SendMessageToWeb(JsonSerializer.Serialize(new
             {
                 type = "MOD_FILE_CONTENT",
@@ -4551,7 +6129,7 @@ public partial class Form1
         }
     }
 
-    private void HandleWriteModFile(string modKey, string relativePath, string content)
+    private void HandleWriteModFile(string modKey, string relativePath, string content, bool applyToIni = false)
     {
         try
         {
@@ -4597,13 +6175,46 @@ public partial class Form1
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
 
-            File.WriteAllText(fullPath, content ?? "", System.Text.Encoding.UTF8);
+            if (applyToIni && AppPaths.IsF76AddToOverlayFileName(relativePath) &&
+                string.IsNullOrWhiteSpace(AppPaths.DocumentsPath))
+            {
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "MOD_FILE_WRITE_RESULT",
+                    ok = false,
+                    name = modKey,
+                    relativePath = relativePath,
+                    error = "Documents path is not set. Configure it in Settings, then try again."
+                }));
+                return;
+            }
+
+            if (string.Equals(ext, ".ini", StringComparison.OrdinalIgnoreCase))
+                GameConfigManager.WriteIniTextNoBom(fullPath, content ?? "");
+            else
+                File.WriteAllText(fullPath, content ?? "", new UTF8Encoding(false));
+
+            int? applied = null;
+            string? appliedTarget = null;
+            if (applyToIni && AppPaths.IsF76AddToOverlayFileName(relativePath))
+            {
+                string overlayName = Path.GetFileName(relativePath) ?? relativePath;
+                applied = _configManager.ApplyF76AddToOverlay(overlayName, out appliedTarget);
+                LogActivity($"[F76-Manager-AddTo] Saved overlay and applied {applied} key(s) → {appliedTarget ?? "(unknown)"}.");
+            }
+            else
+            {
+                _modManager.RefreshLiveRuntimeConfigCopy(relativePath ?? "");
+            }
+
             SendMessageToWeb(JsonSerializer.Serialize(new
             {
                 type = "MOD_FILE_WRITE_RESULT",
                 ok = true,
                 name = modKey,
-                relativePath = relativePath
+                relativePath = relativePath,
+                applied = applied,
+                appliedTarget = appliedTarget
             }));
 
             RefreshConflictCount();
@@ -4782,7 +6393,7 @@ public partial class Form1
         }
         catch (Exception ex)
         {
-            SendStatusMessage("error", $"Failed to load INI: {ex.Message}", "ini_load_error");
+            SendStatusMessage("error", $"Failed to load INI: {ex.Message}", "ini_load_error", new object[] { ex.Message });
         }
     }
 
@@ -4798,7 +6409,7 @@ public partial class Form1
                 try { File.Copy(path, path + ".bak", true); } catch (Exception ex) { LogError($"[INI-SAVE] Failed to create backup for {fileName}: {ex.Message}"); }
             }
 
-            File.WriteAllText(path, content, System.Text.Encoding.UTF8);
+            GameConfigManager.WriteIniTextNoBom(path, content);
             
             SendStatusMessage("success", $"{fileName} saved successfully.", "ini_save_success");
             
@@ -4853,6 +6464,28 @@ public partial class Form1
   "auto_detect": "Auto Detect",
   "welcome_back_hero": "Welcome back, {0}.",
   "hero_desc": "Appalachia is waiting. Your configuration is optimal.",
+  "hero_desc_attention": "Appalachia is waiting. Your configuration needs attention.",
+  "update_title": "App update",
+  "update_desc": "Check Nexus Mods for a newer F76 Manager. Your mods, tweaks, bundles, and profiles stay on disk. Only the app and Tools folder are replaced.",
+  "update_installed": "Installed version",
+  "update_latest": "Latest on Nexus",
+  "update_checking": "Checking Nexus Mods…",
+  "update_up_to_date": "You are on the latest version.",
+  "update_available": "Version {0} is available.",
+  "update_install": "Download and install",
+  "update_open_nexus": "Update F76 Manager",
+  "update_login_required": "Sign in with Nexus Mods in Settings to check for updates.",
+  "update_go_settings": "Open Settings",
+  "update_nxm_started": "F76 Manager update received from Nexus. Installing…",
+  "update_installing": "Downloading update… {0}%",
+  "update_preparing": "Preparing update. The app will close and reopen.",
+  "update_failed": "Update failed: {0}",
+  "update_cancel": "Cancel update",
+  "update_cancelling": "Cancelling update…",
+  "update_cancelled": "Update cancelled.",
+  "update_badge": "New",
+  "update_changelog": "Changelog",
+  "update": "Update",
   "play_fallout_76": "Play Fallout 76",
   "launch_game_with_mods": "Launch the game with current mods",
   "apply_changes": "Apply Changes",
@@ -4898,6 +6531,13 @@ public partial class Form1
   "settings": "Settings",
   "cancel": "Cancel",
   "delete": "Delete",
+  "create": "Create",
+  "edit": "Edit",
+  "enable": "Enable",
+  "disable": "Disable",
+  "ok": "OK",
+  "name": "Name",
+  "save": "Save",
   "apply": "Apply",
   "reset": "Reset",
   "refresh": "Refresh",
@@ -4911,7 +6551,23 @@ public partial class Form1
   "no_mods_hint": "Drag and drop mods here or use the \"Add Mod\" button to get started.",
   "add_first_mod": "Add Your First Mod",
   "new_preset_prompt": "Enter new preset name:",
-  "delete_preset_confirm": "Delete preset \"{0}\"? Mods will remain in your list.",
+  "delete_preset": "Delete Preset",
+  "delete_preset_confirm": "Delete Preset \"{0}\"? Mods will remain in your list.",
+  "cannot_delete_default_preset": "The Default preset cannot be deleted.",
+  "preset_add_to": "Add to \"{0}\"",
+  "preset_remove_from": "Remove from \"{0}\"",
+  "preset_in_all_presets": "Already in every preset",
+  "preset_added_to": "Added to preset \"{0}\".",
+  "preset_imported": "Preset imported.",
+  "preset_import_missing": "Preset imported. {0} mod(s) in the preset are not installed.",
+  "preset_import_failed": "Preset import failed.",
+  "preset_exported": "Preset exported.",
+  "preset_export_failed": "Preset export failed.",
+  "preset_pack_exported": "Preset pack exported (mods + Nexus metadata).",
+  "preset_pack_imported": "Preset pack imported (mods + Nexus metadata).",
+  "preset_pack_invalid": "Preset pack is missing preset.json.",
+  "preset_not_found": "Preset not found.",
+  "preset_apply_failed": "Failed to apply preset.",
   "cat_performance": "Performance",
   "cat_graphics": "Graphics",
   "cat_network": "Network",
@@ -4925,7 +6581,8 @@ public partial class Form1
   "tweak_fastload_desc": "Reduces fade-in times, skips intro splash, and loads into worlds faster.",
   "tweak_fastload_warning": "May freeze on startup. If that happens, close the game completely and launch again.",
   "version": "Version",
-  "mod_update_available": "Update available on Nexus",
+  "mod_update_available": "Update This Mod",
+  "mod_already_up_to_date": "This mod is already up to date.",
   "mod_nexus_link_unverified": "Nexus link not verified — add file ID in Edit",
   "rename_mod_nexus_file_id_label": "Nexus file ID",
   "rename_mod_nexus_file_id_placeholder": "e.g. 98765",
@@ -4968,7 +6625,7 @@ public partial class Form1
   "no_changes_to_save": "No changes to save.",
   "discard_changes": "Discard Changes",
   "tweak_fov": "World / Third-Person FOV",
-  "tweak_fov_desc": "Fallout76Custom.ini [Display] fDefaultWorldFOV — third-person / world camera (default in-game often 70).",
+  "tweak_fov_desc": "Third-person / world camera FOV as shown in game on 16:9. Saved to Fallout76Custom.ini [Display] fDefaultWorldFOV as the engine value (in-game × 3/4, e.g. 135 → 101.25).",
   "tweak_motionblur": "Motion Blur",
   "tweak_motionblur_desc": "Enable or disable background blur, radial blur, lens flare, and bokeh effects.",
   "tweak_dof": "Depth of Field",
@@ -5098,7 +6755,7 @@ public partial class Form1
   "config_reset": "Configuration reset to defaults.",
   "reset_failed": "Reset failed: {0}",
   "cache_cleared": "Application cache cleared.",
-  "deploy_success": "Successfully deployed {0} mods!",
+  "deploy_success": "Successfully deployed {0} archives!",
   "deploy_failed": "Deployment failed: {0}",
   "delete_default_profile_error": "Cannot delete Default Profile.",
   "import_no_valid_files": "Import failed: No valid mod files found (or all were duplicates).",
@@ -5108,6 +6765,12 @@ public partial class Form1
   "health_ini_verified": "INI integrity verified",
   "health_mod_files_present": "Mod files present",
   "health_profile_synced": "Profile synced",
+  "health_status_needs_attention": "Needs attention",
+  "health_missing_summary": "{0} mod file missing: {1}",
+  "health_missing_summary_plural": "{0} mod files missing: {1}",
+  "health_missing_summary_count": "{0} mod file(s) missing",
+  "health_profile_out_of_sync": "Profile out of sync",
+  "health_ini_issue": "INI check needs attention",
   "stat_mods_active": "Mods Active",
   "stat_active_mod_storage": "Active Mod Storage",
   "stat_conflicts": "Conflicts",
@@ -5147,6 +6810,14 @@ public partial class Form1
   "bundle_format": "Format",
   "bundle_format_general": "General (non-texture)",
   "bundle_format_dds": "DDS (texture only)",
+  "bundle_format_auto": "Auto (general + textures)",
+  "bundle_format_auto_dds": "Detected texture-only content — switched Format to DDS.",
+  "bundle_format_auto_mixed": "Mixed content detected — Format set to Auto.",
+  "loose_mod_expand": "Show files",
+  "loose_mod_collapse": "Hide files",
+  "loose_mod_file_count": "{0} files",
+  "loose_mod_file_count_one": "1 file",
+  "loose_mod_no_files": "No files listed",
   "compression_level_1": "1 (Fast decompression)",
   "compression_level_2": "2",
   "compression_level_3": "3",

@@ -5,23 +5,25 @@ const DEFAULTS_BY_EXT = {
     ba2: { bg: '#1a2832', fg: '#90caf9', glow: false },
     esp: { bg: '#1c281e', fg: '#a5d6a7', glow: false },
     esm: { bg: '#2a2318', fg: '#ffcc80', glow: false },
+    loose: { bg: '#1a2420', fg: '#9ccc65', glow: false },
     strings: { bg: '#261d2a', fg: '#e1bee7', glow: false },
     dlstrings: { bg: '#261d2a', fg: '#e1bee7', glow: false },
     ilstrings: { bg: '#261d2a', fg: '#e1bee7', glow: false },
     ini: { bg: '#1e2430', fg: '#7eb8da', glow: false },
     json: { bg: '#1a2a1e', fg: '#8bc34a', glow: false },
     txt: { bg: '#2a2520', fg: '#d7ccc8', glow: false },
+    toml: { bg: '#2a211d', fg: '#ffab91', glow: false },
 };
 
 const FALLBACK_DEFAULT = { bg: '#2a2a2e', fg: '#a0a0a8', glow: false };
 
-const CONFIG_TAB_TYPES = new Set(['ini', 'json', 'txt']);
+const CONFIG_TAB_TYPES = new Set(['ini', 'json', 'txt', 'toml']);
 
 export const MODS_TAB_TYPE_KEYS = Object.keys(DEFAULTS_BY_EXT)
     .filter((k) => !CONFIG_TAB_TYPES.has(k))
     .sort((a, b) => a.localeCompare(b));
 
-export const CONFIGS_TAB_TYPE_KEYS = ['ini', 'json', 'txt'];
+export const CONFIGS_TAB_TYPE_KEYS = ['ini', 'json', 'toml', 'txt'];
 
 export function sanitizeExt(raw) {
     const s = String(raw || '').toLowerCase().trim();

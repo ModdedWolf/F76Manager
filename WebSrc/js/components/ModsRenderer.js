@@ -34,7 +34,7 @@ export function buildModUpdateButtonHtml(mod) {
     }
 
     return `
-        <button type="button" class="btn-icon btn-mod-update btn-mod-state-off" title="No Nexus update" disabled>
+        <button type="button" class="btn-icon btn-mod-update-none btn-mod-state-off" title="${escapeAttr(window._t('mod_already_up_to_date') || 'Already up to date')}" disabled>
             <i data-lucide="arrow-down"></i>
         </button>`;
 }
@@ -65,14 +65,14 @@ export const ModsRenderer = {
 
         let filteredMods = mods.filter(m => {
             const original = String(m?.originalName || '').toLowerCase();
-            if (original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt')) return false;
+            if (original.endsWith('.ini') || original.endsWith('.json') || original.endsWith('.txt') || original.endsWith('.toml')) return false;
 
             if (m.isBundle && m.status === 'disabled') return false;
 
-            if (manager.currentPreset === 'uncategorized') {
-                return !m.group;
-            } else if (manager.currentPreset !== 'all') {
-                return m.group === manager.currentPreset;
+            const baseName = original.split('/').pop() || '';
+            const isStringMod = /\.(strings|dlstrings|ilstrings)$/i.test(baseName);
+            if (!isStringMod && manager.modGroupsManager && !manager.modGroupsManager.shouldShowMod(m.originalName, m.files)) {
+                return false;
             }
             return true;
         });
@@ -83,7 +83,19 @@ export const ModsRenderer = {
             return loA - loB;
         });
 
-        const enabledCount = mods.filter(m => m.status === 'enabled').length;
+        const enabledCount = filteredMods.filter(m => m.status === 'enabled').length;
+        const presetNames = manager.modGroupsManager?.listNames?.()
+            ?? Object.keys(data?.modPresets ?? data?.modGroups ?? {});
+        const activePreset = manager.modGroupsManager?.getActiveName?.() ?? manager.currentPreset;
+        const isDefaultPreset = manager.modGroupsManager?.isDefaultPreset?.(activePreset)
+            ?? String(activePreset || '').localeCompare('Default', undefined, { sensitivity: 'accent' }) === 0;
+        const updateModsInAllPresets = !!(data?.managerSettings?.updateModsInAllPresets);
+        const receiveUpdatesOn = updateModsInAllPresets
+            || !!(manager.modGroupsManager?.getReceiveUpdates?.(activePreset));
+        const receiveUpdatesDisabled = updateModsInAllPresets;
+        const receiveUpdatesTitle = receiveUpdatesDisabled
+            ? (window._t('preset_receive_updates_global_hint') || "Controlled by 'Update mods in all presets' in Settings")
+            : (window._t('preset_receive_updates') || 'Receive mod updates');
 
         return `
             <div class="mods-page animate-fade">
@@ -104,22 +116,36 @@ export const ModsRenderer = {
                             </button>
                         </div>
                         
-                        <div class="preset-controls">
-                            <div class="preset-select-wrapper">
-                                <select id="preset-select" class="preset-select">
-                                    <option value="all" ${manager.currentPreset === 'all' ? 'selected' : ''}>${window._t('all_mods')}</option>
-                                    <option value="uncategorized" ${manager.currentPreset === 'uncategorized' ? 'selected' : ''}>${window._t('uncategorized')}</option>
-                                    ${Object.keys(data?.modGroups ?? {}).map(g => `
-                                        <option value="${escapeAttr(g)}" ${manager.currentPreset === g ? 'selected' : ''}>${escapeHtml(g)}</option>
-                                    `).join('')}
-                                    <option value="__NEW__">${window._t('new_preset')}</option>
-                                </select>
-                            </div>
-                            ${manager.currentPreset !== 'all' && manager.currentPreset !== 'uncategorized' ? `
-                                <button id="btn-delete-preset" class="btn-icon danger" style="width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; border-radius: 8px; margin-left: 8px;" title="${window._t('delete_preset')}">
-                                    <i data-lucide="x"></i>
+                        <div class="preset-menu-wrap">
+                            <button type="button" class="preset-menu-trigger" id="btn-preset-menu" aria-haspopup="true" aria-expanded="false" title="${escapeAttr(window._t('presets_label') || 'Presets')}">
+                                <span id="preset-menu-label">${escapeHtml(activePreset)}</span>
+                                <i data-lucide="chevron-down"></i>
+                            </button>
+                            <div class="preset-menu-dropdown" id="preset-menu-dropdown" hidden>
+                                ${presetNames.map(g => `
+                                    <button type="button" class="preset-menu-item ${activePreset === g ? 'active' : ''}" data-preset="${escapeAttr(g)}">
+                                        <span>${escapeHtml(g)}</span>
+                                        ${activePreset === g ? '<i data-lucide="check"></i>' : ''}
+                                    </button>
+                                `).join('')}
+                                <div class="preset-menu-sep"></div>
+                                <button type="button" class="preset-menu-item" data-preset-action="new">
+                                    <span>${window._t('new_preset')}</span>
+                                    <i data-lucide="plus"></i>
                                 </button>
-                            ` : ''}
+                                <button type="button" class="preset-menu-item${receiveUpdatesOn ? ' active' : ''}" data-preset-action="receive-updates"
+                                    ${receiveUpdatesDisabled ? 'disabled' : ''}
+                                    title="${escapeAttr(receiveUpdatesTitle)}"
+                                    aria-checked="${receiveUpdatesOn ? 'true' : 'false'}">
+                                    <span>${window._t('preset_receive_updates') || 'Receive mod updates'}</span>
+                                    ${receiveUpdatesOn ? '<i data-lucide="check"></i>' : '<i data-lucide="download-cloud"></i>'}
+                                </button>
+                                ${isDefaultPreset ? '' : `
+                                <button type="button" class="preset-menu-item danger" data-preset-action="delete">
+                                    <span>${window._t('delete_preset')}</span>
+                                    <i data-lucide="trash-2"></i>
+                                </button>`}
+                            </div>
                         </div>
                     </div>
                     <div class="tool-buttons mods-toolbar-actions">
@@ -144,6 +170,33 @@ export const ModsRenderer = {
                                     <i data-lucide="archive"></i>
                                     <span>${window._t('backup_mods')}</span>
                                 </button>
+                                <div class="mods-actions-divider" role="separator"></div>
+                                <button type="button" class="mods-actions-item" id="mods-action-preset-rename">
+                                    <i data-lucide="pencil"></i>
+                                    <span>${window._t('preset_rename')}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="mods-action-preset-new">
+                                    <i data-lucide="plus"></i>
+                                    <span>${window._t('new_preset')}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="mods-action-preset-duplicate">
+                                    <i data-lucide="copy"></i>
+                                    <span>${window._t('preset_duplicate')}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="mods-action-preset-export">
+                                    <i data-lucide="upload"></i>
+                                    <span>${window._t('preset_export')}</span>
+                                </button>
+                                <button type="button" class="mods-actions-item" id="mods-action-preset-import">
+                                    <i data-lucide="download"></i>
+                                    <span>${window._t('preset_import')}</span>
+                                </button>
+                                ${isDefaultPreset ? '' : `
+                                <button type="button" class="mods-actions-item danger" id="mods-action-preset-delete">
+                                    <i data-lucide="trash-2"></i>
+                                    <span>${window._t('delete_preset')}</span>
+                                </button>`}
+                                <div class="mods-actions-divider" role="separator"></div>
                                 <button type="button" class="mods-actions-item" id="mods-action-transfer-to-other">
                                     <i data-lucide="arrow-right-left"></i>
                                     <span>${window._t('transfer_mods_to_other')}</span>
@@ -152,6 +205,7 @@ export const ModsRenderer = {
                                     <i data-lucide="arrow-right-left"></i>
                                     <span>${window._t('transfer_mods_from_other')}</span>
                                 </button>
+                                <div class="mods-actions-divider" role="separator"></div>
                                 <button type="button" class="mods-actions-item" id="mods-action-badge-color">
                                     <i data-lucide="palette"></i>
                                     <span>${window._t('edit_badge_color')}</span>
@@ -166,7 +220,7 @@ export const ModsRenderer = {
                 </div>
                 <div class="mods-list-container">
                     <div class="mods-table-container">
-                        ${filteredMods.length === 0 ? this.renderNoMods(data) : `
+                        ${filteredMods.length === 0 ? this.renderNoMods(data, manager) : `
                             <table class="mods-table">
                                 <colgroup>
                                     <col class="col-drag-handle">
@@ -189,7 +243,7 @@ export const ModsRenderer = {
                                     </tr>
                                 </thead>
                                 <tbody id="mods-list-body">
-                                    ${filteredMods.map(m => this.renderModRow(m)).join('')}
+                                    ${filteredMods.map(m => this.renderModRow(m, manager)).join('')}
                                 </tbody>
                             </table>
                         `}
@@ -201,14 +255,19 @@ export const ModsRenderer = {
 
 
 
-    renderModRow(mod) {
+    renderModRow(mod, manager) {
         const isEnabled = mod.status === 'enabled';
+        const isLoose = !!(mod.isLoose || mod.type === 'loose');
         const origPath = mod.originalName || '';
-        let displayName = (mod.name || origPath || '').replace(/^Disabled\//, '');
+        let displayName = (mod.name || origPath || '').replace(/^Disabled\//, '').replace(/^Loose\//, '');
         if (/GameRoot\//i.test(origPath) && !(mod.name || '').trim()) {
             displayName = origPath.split('/').filter(Boolean).pop() || displayName;
         }
-        const searchText = (displayName + ' ' + (mod.originalName || '')).toLowerCase();
+        const files = Array.isArray(mod.files) ? mod.files.filter(Boolean) : [];
+        const fileCount = files.length;
+        const searchText = (
+            displayName + ' ' + (mod.originalName || '') + ' ' + files.join(' ')
+        ).toLowerCase();
         const originalName = mod.originalName || '';
         const safeOriginalNameAttr = escapeAttr(originalName);
         const safeDisplayName = escapeHtml(displayName);
@@ -222,8 +281,41 @@ export const ModsRenderer = {
         const safeVersion = escapeHtml(displayVersion);
         const updateSlotHtml = buildModUpdateButtonHtml(mod);
         const unverifiedSlotHtml = buildModUnverifiedButtonHtml(mod);
+        const expanded = isLoose && manager?.expandedLooseKeys?.has?.(originalName);
+        const fileCountLabel = fileCount === 1
+            ? (window._t('loose_mod_file_count_one') || '1 file')
+            : (window._t('loose_mod_file_count', fileCount) || `${fileCount} files`);
+
+        const expandBtn = isLoose ? `
+            <button type="button"
+                    class="mod-loose-expand ${expanded ? 'is-expanded' : ''}"
+                    data-name="${safeOriginalNameAttr}"
+                    title="${escapeAttr(expanded ? (window._t('loose_mod_collapse') || 'Collapse files') : (window._t('loose_mod_expand') || 'Show files'))}"
+                    aria-expanded="${expanded ? 'true' : 'false'}"
+                    onclick="window.toggleLooseModExpand && window.toggleLooseModExpand(this); event.stopPropagation();"
+                    onpointerdown="event.stopPropagation();"
+                    onmousedown="event.stopPropagation();">
+                <i data-lucide="chevron-right"></i>
+            </button>` : '';
+
+        const nameMeta = isLoose ? `
+            <span class="mod-loose-file-count" aria-hidden="true">· ${escapeHtml(fileCountLabel)}</span>
+        ` : '';
+
+        const childRow = (isLoose && expanded) ? `
+            <tr class="mod-loose-files-row ${isEnabled ? '' : 'mod-disabled'}" data-parent="${safeOriginalNameAttr}">
+                <td colspan="6">
+                    <ul class="mod-loose-files-list">
+                        ${files.length === 0
+                            ? `<li class="mod-loose-files-empty">${escapeHtml(window._t('loose_mod_no_files') || 'No files listed')}</li>`
+                            : files.map(f => `<li title="${escapeAttr(f)}">${escapeHtml(f)}</li>`).join('')}
+                    </ul>
+                </td>
+            </tr>
+        ` : '';
+
         return `
-            <tr class="mod-row ${isEnabled ? '' : 'mod-disabled'}" data-name="${safeOriginalNameAttr}" data-search-text="${escapeAttr(searchText)}" draggable="false">
+            <tr class="mod-row ${isEnabled ? '' : 'mod-disabled'}${isLoose ? ' mod-row-loose' : ''}" data-name="${safeOriginalNameAttr}" data-search-text="${escapeAttr(searchText)}" data-is-loose="${isLoose ? '1' : '0'}" draggable="false">
                 <td class="drag-handle-cell">
                     <div class="drag-handle-wrapper" draggable="true" data-name="${safeOriginalNameAttr}">
                         <i data-lucide="grip-vertical"></i>
@@ -233,8 +325,10 @@ export const ModsRenderer = {
                     <input type="checkbox" class="mod-select" ${isEnabled ? 'checked' : ''} onclick="window.handleModToggle(this, '${safeToggleArg}'); event.stopPropagation();">
                 </td>
                 <td class="mod-name-cell">
-                    <div class="mod-name-wrapper">
+                    <div class="mod-name-wrapper${isLoose ? ' mod-name-wrapper--loose' : ''}">
+                        ${expandBtn}
                         <span class="mod-name" title="${safeDisplayTitle}">${safeDisplayName}</span>
+                        ${nameMeta}
                         <span class="mod-sep" style="display:none">/</span>
                         <span class="mod-filename" title="${safeOriginalTitle}" style="display:none">${safeFileName}</span>
                     </div>
@@ -255,21 +349,53 @@ export const ModsRenderer = {
                             </button>
                         </span>
                         <span class="action-slot action-slot-delete">
-                            <button type="button" class="btn-icon btn-delete-mod" title="Delete" data-name="${safeOriginalNameAttr}" onclick="window.nuclearDelete(this); event.stopPropagation();" onpointerdown="event.stopPropagation();" onmousedown="event.stopPropagation();" style="position: relative; z-index: 50; color: #ef4444;">
+                            <button type="button" class="btn-icon btn-delete-mod" title="Delete" data-name="${safeOriginalNameAttr}" onclick="window.nuclearDelete(this); event.stopPropagation();" onpointerdown="event.stopPropagation();" onmousedown="event.stopPropagation();" style="position: relative; z-index: 50; color: var(--danger-red);">
                                 <i data-lucide="trash-2"></i>
                             </button>
                         </span>
                     </div>
                 </td>
             </tr>
+            ${childRow}
         `;
     },
 
 
-    renderNoMods(data) {
+    renderNoMods(data, manager) {
+        const allMods = data?.mods || [];
+        const hasLibraryMods = allMods.some(m => {
+            const o = String(m?.originalName || '').toLowerCase();
+            return !o.endsWith('.ini') && !o.endsWith('.json') && !o.endsWith('.txt') && !o.endsWith('.toml');
+        });
+        const activeMembers = manager?.modGroupsManager?.getActive()?.mods || [];
+        const membershipEmpty = activeMembers.length === 0;
+        const membershipMatchesLibrary = activeMembers.some(name =>
+            allMods.some(m => String(m?.originalName || '') === String(name || ''))
+        );
+        const presetEmpty = !!(manager?.modGroupsManager
+            && hasLibraryMods
+            && (membershipEmpty || !membershipMatchesLibrary));
+
+        if (presetEmpty) {
+            const name = manager.modGroupsManager.getActiveName();
+            return `
+                <div class="empty-state-container polished" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 16px; text-align: center; padding: 48px;">
+                    <div class="empty-state-icon" style="width: 80px; height: 80px; background: rgba(var(--primary-rgb), 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
+                        <i data-lucide="folder-open" style="width: 40px; height: 40px; color: var(--primary-green);"></i>
+                    </div>
+                    <h3>${escapeHtml(window._t('preset_empty_title') || 'Preset is empty')}</h3>
+                    <p style="color: var(--text-muted); max-width: 400px; line-height: 1.6; margin-bottom: 32px;">${escapeHtml(window._t('preset_empty_hint_files', name) || `No mods in ${name} yet. Add files from Explorer to build this loadout.`)}</p>
+                    <button type="button" class="btn primary" id="btn-preset-add-from-files" style="padding: 12px 24px; font-size: 1rem;">
+                        <i data-lucide="folder-plus"></i>
+                        ${escapeHtml(window._t('preset_add_from_files') || 'Add mods from files…')}
+                    </button>
+                </div>
+            `;
+        }
+
         return `
             <div class="empty-state-container polished" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 16px; text-align: center; padding: 48px;">
-                <div class="empty-state-icon" style="width: 80px; height: 80px; background: rgba(184, 197, 164, 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
+                <div class="empty-state-icon" style="width: 80px; height: 80px; background: rgba(var(--primary-rgb), 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
                     <i data-lucide="package-open" style="width: 40px; height: 40px; color: var(--primary-green);"></i>
                 </div>
                 <h3>${window._t('no_mods_found')}</h3>

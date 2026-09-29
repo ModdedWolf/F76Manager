@@ -280,7 +280,7 @@ public partial class Form1
             }
             else
             {
-                SendStatusMessage("error", "Unknown backup type.", "backup_restore_failed");
+                SendStatusMessage("error", "Unknown backup type.", "backup_restore_failed", new object[] { "Unknown backup type." });
                 return;
             }
 
@@ -296,7 +296,7 @@ public partial class Form1
         catch (Exception ex)
         {
             LogError($"[BACKUP] Restore failed: {ex.Message}");
-            SendStatusMessage("error", $"Restore failed: {ex.Message}", "backup_restore_failed");
+            SendStatusMessage("error", $"Restore failed: {ex.Message}", "backup_restore_failed", new object[] { ex.Message });
         }
     }
 
@@ -397,6 +397,19 @@ public partial class Form1
 
             backedUpCount += AddOptionalFileToArchive(archive, AppPaths.ModsMetadataFile, "Settings/mods.json");
             backedUpCount += AddOptionalFileToArchive(archive, AppPaths.ProfilesFile, "Profiles/profiles.json");
+
+            try
+            {
+                string presetsJson = GetModPresetsBackupJson();
+                var entry = archive.CreateEntry("Settings/presets.json", CompressionLevel.Optimal);
+                using var writer = new StreamWriter(entry.Open());
+                writer.Write(presetsJson);
+                backedUpCount++;
+            }
+            catch (Exception presetsEx)
+            {
+                LogError($"[BACKUP] Pre-restore failed to write presets.json: {presetsEx.Message}");
+            }
         }
 
         if (skippedCount > 0)
@@ -437,9 +450,7 @@ public partial class Form1
             if (string.IsNullOrWhiteSpace(originalName)) continue;
 
             string lower = originalName.ToLowerInvariant();
-            if (!lower.EndsWith(".ini", StringComparison.OrdinalIgnoreCase) &&
-                !lower.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
-                !lower.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+            if (!ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(lower)))
                 continue;
 
             string src = _modManager.ResolveListKeyToFullPath(originalName);
@@ -531,6 +542,13 @@ public partial class Form1
             string settingsMeta = Path.Combine(extractRoot, "Settings", "mods.json");
             if (File.Exists(settingsMeta))
                 File.Copy(settingsMeta, AppPaths.ModsMetadataFile, true);
+
+            string presetsFile = Path.Combine(extractRoot, "Settings", "presets.json");
+            if (File.Exists(presetsFile))
+            {
+                try { ApplyModPresetsBackupJson(File.ReadAllText(presetsFile)); }
+                catch (Exception ex) { LogError($"[RESTORE] Failed to restore presets.json: {ex.Message}"); }
+            }
 
             string profilesFile = Path.Combine(extractRoot, "Profiles", "profiles.json");
             if (File.Exists(profilesFile))

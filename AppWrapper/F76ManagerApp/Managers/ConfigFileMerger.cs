@@ -10,7 +10,15 @@ public static class ConfigFileMerger
     {
         ".json",
         ".txt",
-        ".ini"
+        ".ini",
+        ".toml"
+    };
+
+    public static readonly HashSet<string> KnownDataAssetFolders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "meshes", "textures", "materials", "scripts", "sound", "sounds", "music", "strings",
+        "interface", "programs", "video", "lodsettings", "facegen", "misc", "shadersfx",
+        "vis", "geo", "terrain", "grass"
     };
 
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
@@ -31,6 +39,65 @@ public static class ConfigFileMerger
         if (string.IsNullOrEmpty(extension)) return false;
         if (!extension.StartsWith('.')) extension = "." + extension;
         return LooseConfigExtensions.Contains(extension);
+    }
+
+    public static bool IsRootLooseConfigPath(string? relativePath)
+    {
+        string rel = (relativePath ?? "").Replace("\\", "/").Trim().TrimStart('/');
+        if (string.IsNullOrEmpty(rel)) return false;
+
+        if (rel.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
+            rel = rel.Substring("Disabled/".Length);
+        if (rel.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase))
+            return IsLooseConfigExtension(Path.GetExtension(rel));
+
+        if (!IsLooseConfigExtension(Path.GetExtension(rel)))
+            return false;
+
+        var parts = rel.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            if (KnownDataAssetFolders.Contains(parts[i]))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static readonly HashSet<string> ManagerReservedTopFolders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Strings", "Bundles", "GameRoot", "CoreIni", "Loose"
+    };
+
+    public static bool IsNonAssetDataFolderPath(string? relativePath)
+    {
+        var parts = SplitDataRelativePath(relativePath);
+        return parts.Length >= 2 && IsNonAssetFolderChain(parts, parts.Length - 1);
+    }
+
+    public static bool IsNonAssetDataDirectory(string? relativeDirectory)
+    {
+        var parts = SplitDataRelativePath(relativeDirectory);
+        return parts.Length >= 1 && IsNonAssetFolderChain(parts, parts.Length);
+    }
+
+    private static string[] SplitDataRelativePath(string? relativePath)
+    {
+        string rel = (relativePath ?? "").Replace("\\", "/").Trim().Trim('/');
+        if (rel.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
+            rel = rel.Substring("Disabled/".Length);
+        return rel.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    private static bool IsNonAssetFolderChain(string[] parts, int folderCount)
+    {
+        if (ManagerReservedTopFolders.Contains(parts[0])) return false;
+        for (int i = 0; i < folderCount; i++)
+        {
+            if (KnownDataAssetFolders.Contains(parts[i]))
+                return false;
+        }
+        return true;
     }
 
     public static bool TryMergeAdditive(
@@ -60,6 +127,7 @@ public static class ConfigFileMerger
                 ".ini" => TryMergeIni(existing, incoming, out mergedContent, out summary),
                 ".txt" => TryMergeTxt(existing, incoming, out mergedContent, out summary),
                 ".json" => TryMergeJson(existing, incoming, out mergedContent, out summary),
+                ".toml" => KeepExisting(existing, out mergedContent, out summary),
                 _ => false
             };
         }
@@ -68,6 +136,13 @@ public static class ConfigFileMerger
             summary = ex.Message;
             return false;
         }
+    }
+
+    private static bool KeepExisting(string existing, out string mergedContent, out string summary)
+    {
+        mergedContent = existing;
+        summary = "No new keys merged (kept existing file)";
+        return true;
     }
 
     public static void WriteMergedFile(string destPath, string mergedContent)
@@ -80,6 +155,9 @@ public static class ConfigFileMerger
 
     private static bool TryMergeIni(string existing, string incoming, out string mergedContent, out string summary)
     {
+        if (!IniHasSections(existing) && !IniHasSections(incoming))
+            return TryMergeIniLineList(existing, incoming, out mergedContent, out summary);
+
         mergedContent = "";
         summary = "";
 
@@ -124,6 +202,54 @@ public static class ConfigFileMerger
             mergedContent += Environment.NewLine;
 
         summary = added == 0 ? "No new INI keys" : $"Added {added} INI key{(added == 1 ? "" : "s")}";
+        return true;
+    }
+
+    private static bool IniHasSections(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return false;
+        foreach (var rawLine in content.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            string trimmed = rawLine.Trim();
+            if (trimmed.StartsWith('[') && trimmed.EndsWith(']') && trimmed.Length > 2)
+                return true;
+        }
+        return false;
+    }
+
+    private static bool TryMergeIniLineList(string existing, string incoming, out string mergedContent, out string summary)
+    {
+        mergedContent = "";
+        summary = "";
+
+        var lines = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Consider(string? raw, bool countAdds, ref int added)
+        {
+            if (raw == null) return;
+            string trimmed = raw.Trim();
+            if (trimmed.Length == 0) return;
+            if (trimmed.StartsWith(';') || trimmed.StartsWith('#'))
+            {
+                if (!countAdds)
+                    lines.Add(raw.TrimEnd());
+                return;
+            }
+            if (seen.Contains(trimmed)) return;
+            seen.Add(trimmed);
+            lines.Add(trimmed);
+            if (countAdds) added++;
+        }
+
+        int added = 0;
+        foreach (var rawLine in (existing ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+            Consider(rawLine, countAdds: false, ref added);
+        foreach (var rawLine in (incoming ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+            Consider(rawLine, countAdds: true, ref added);
+
+        mergedContent = lines.Count == 0 ? "" : string.Join(Environment.NewLine, lines) + Environment.NewLine;
+        summary = added == 0 ? "No new INI list entries" : $"Added {added} INI list entr{(added == 1 ? "y" : "ies")}";
         return true;
     }
 
@@ -305,6 +431,11 @@ public static class ConfigFileMerger
                 {
                     result[prop.Key] = MergeJsonNodes(existingChild, prop.Value, ref addedCount);
                 }
+                else if (existingChild is JsonArray exChildArr && prop.Value is JsonArray inChildArr &&
+                         IsStringArray(exChildArr) && IsStringArray(inChildArr))
+                {
+                    result[prop.Key] = MergeJsonNodes(exChildArr, inChildArr, ref addedCount);
+                }
             }
             return result;
         }
@@ -335,6 +466,9 @@ public static class ConfigFileMerger
 
         return existing.DeepClone();
     }
+
+    private static bool IsStringArray(JsonArray array) =>
+        array.All(item => item is JsonValue value && value.GetValueKind() == JsonValueKind.String);
 
     private static bool JsonNodesDeepEqual(JsonNode? a, JsonNode? b)
     {

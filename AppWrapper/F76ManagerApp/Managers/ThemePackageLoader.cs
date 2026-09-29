@@ -69,13 +69,9 @@ public sealed class ThemePackageLoader
 
     public ThemeReloadResult ReloadWithResult()
     {
-        lock (_lock)
-        {
-            _themes.Clear();
-        }
-
         var loaded = new List<ThemeLoadEntry>();
         var rejected = new List<ThemeRejectEntry>();
+        var nextThemes = new List<LoadedUserTheme>();
         var themesFolder = AppPaths.ThemesFolder;
 
         try
@@ -87,6 +83,7 @@ public sealed class ThemePackageLoader
         {
             _log("", $"[THEMES] Failed to create Themes folder: {ex.Message}");
             rejected.Add(new ThemeRejectEntry { FileName = "(folder)", Error = ex.Message });
+            lock (_lock) _themes.Clear();
             return new ThemeReloadResult
             {
                 ThemesFolder = themesFolder,
@@ -95,14 +92,39 @@ public sealed class ThemePackageLoader
             };
         }
 
+        void Warn(string message) => _log("", message);
+        var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var path in Directory.EnumerateFiles(AppPaths.ThemesFolder, "*.f76theme", SearchOption.TopDirectoryOnly))
         {
             var fileName = Path.GetFileName(path);
             try
             {
-                if (TryLoadPackage(path, out var theme, out var err))
+                if (TryLoadPackage(path, out var theme, out var err, Warn))
                 {
-                    lock (_lock) _themes.Add(theme!);
+                    int dup = nextThemes.FindIndex(t => t.Id == theme!.Id);
+                    if (dup >= 0)
+                    {
+                        var keep = File.GetLastWriteTimeUtc(nextThemes[dup].SourceFile) >= File.GetLastWriteTimeUtc(path)
+                            ? nextThemes[dup]
+                            : theme!;
+                        var skipped = ReferenceEquals(keep, theme) ? nextThemes[dup] : theme!;
+                        nextThemes[dup] = keep;
+                        duplicateIds.Add(keep.Id);
+                        int loadedIdx = loaded.FindIndex(l => l.Id == keep.Id);
+                        if (loadedIdx >= 0)
+                        {
+                            loaded[loadedIdx] = new ThemeLoadEntry
+                            {
+                                Id = keep.Id,
+                                DisplayName = keep.DisplayName,
+                                FileName = Path.GetFileName(keep.SourceFile),
+                            };
+                        }
+                        _log("", $"[THEMES] Duplicate theme id '{theme!.Id}': using {Path.GetFileName(keep.SourceFile)}, ignoring {Path.GetFileName(skipped.SourceFile)}");
+                        continue;
+                    }
+                    nextThemes.Add(theme!);
                     loaded.Add(new ThemeLoadEntry
                     {
                         Id = theme!.Id,
@@ -125,6 +147,26 @@ public sealed class ThemePackageLoader
             }
         }
 
+        for (int i = 0; i < nextThemes.Count; i++)
+        {
+            if (!duplicateIds.Contains(nextThemes[i].Id)) continue;
+            try
+            {
+                if (TryLoadPackage(nextThemes[i].SourceFile, out var reloaded, out _, Warn) && reloaded != null)
+                    nextThemes[i] = reloaded;
+            }
+            catch (Exception ex)
+            {
+                _log("", $"[THEMES] Could not refresh logo for duplicate id '{nextThemes[i].Id}': {ex.Message}");
+            }
+        }
+
+        lock (_lock)
+        {
+            _themes.Clear();
+            _themes.AddRange(nextThemes);
+        }
+
         return new ThemeReloadResult
         {
             ThemesFolder = themesFolder,
@@ -134,6 +176,9 @@ public sealed class ThemePackageLoader
     }
 
     public static bool TryLoadPackage(string packagePath, out LoadedUserTheme? theme, out string? error)
+        => TryLoadPackage(packagePath, out theme, out error, warn: null);
+
+    public static bool TryLoadPackage(string packagePath, out LoadedUserTheme? theme, out string? error, Action<string>? warn)
     {
         theme = null;
         error = null;
@@ -216,27 +261,55 @@ public sealed class ThemePackageLoader
             return false;
 
         var cacheDir = Path.Combine(AppPaths.ThemesCacheFolder, manifest!.Id);
+        var logoDest = Path.Combine(cacheDir, $"logo{ext}");
         try
         {
-            if (Directory.Exists(cacheDir)) Directory.Delete(cacheDir, true);
             Directory.CreateDirectory(cacheDir);
-            File.WriteAllBytes(Path.Combine(cacheDir, $"logo{ext}"), logoBytes);
+
+            bool needsWrite = true;
+            if (File.Exists(logoDest))
+            {
+                try
+                {
+                    var existing = File.ReadAllBytes(logoDest);
+                    if (existing.AsSpan().SequenceEqual(logoBytes))
+                        needsWrite = false;
+                }
+                catch
+                {
+                }
+            }
+
+            if (needsWrite)
+            {
+                var tmp = logoDest + ".tmp";
+                File.WriteAllBytes(tmp, logoBytes);
+                File.Move(tmp, logoDest, overwrite: true);
+
+                foreach (var stale in Directory.EnumerateFiles(cacheDir, "logo.*"))
+                {
+                    if (string.Equals(stale, logoDest, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (stale.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) continue;
+                    try { File.Delete(stale); } catch { }
+                }
+            }
         }
         catch (Exception ex)
         {
-            error = ex.Message;
-            return false;
+            warn?.Invoke($"[THEMES] Could not refresh logo cache for '{manifest.Id}': {ex.Message}");
         }
 
         var logoLayout = ThemePackageValidator.NormalizeLogoLayout(
             System.Text.Json.JsonDocument.Parse(manifestJson).RootElement);
         var css = ThemePackageValidator.BuildThemeCssBlock(manifest.Id, manifest.Tokens, logoLayout);
 
+        var revision = fi.LastWriteTimeUtc.Ticks.ToString("x");
+
         theme = new LoadedUserTheme
         {
             Id = manifest.Id,
             DisplayName = manifest.DisplayName,
-            LogoVirtualPath = $"user-theme-logo/{manifest.Id}",
+            LogoVirtualPath = $"user-theme-logo/{manifest.Id}?r={revision}",
             CssBlock = css,
             SourceFile = packagePath,
         };
@@ -254,7 +327,7 @@ public sealed class ThemePackageLoader
             return false;
         }
 
-        if (!TryLoadPackage(sourcePath, out var preview, out error))
+        if (!TryLoadPackage(sourcePath, out var preview, out error, msg => _log("", msg)))
             return false;
 
         try
@@ -263,8 +336,10 @@ public sealed class ThemePackageLoader
 
             foreach (var existing in Directory.EnumerateFiles(AppPaths.ThemesFolder, "*.f76theme", SearchOption.TopDirectoryOnly))
             {
-                if (!TryLoadPackage(existing, out var loaded, out _) || loaded == null) continue;
-                if (loaded.Id == preview!.Id && !string.Equals(existing, sourcePath, StringComparison.OrdinalIgnoreCase))
+                if (ThemePackageReader.TryRead(existing, out var content, out _)
+                    && content != null
+                    && content.Id == preview!.Id
+                    && !string.Equals(existing, sourcePath, StringComparison.OrdinalIgnoreCase))
                 {
                     try { File.Delete(existing); } catch { }
                 }
@@ -272,7 +347,7 @@ public sealed class ThemePackageLoader
 
             var fileName = Path.GetFileName(sourcePath);
             if (!fileName.EndsWith(".f76theme", StringComparison.OrdinalIgnoreCase))
-                fileName = $"F76Manager-Theme-{ThemePackageValidator.SanitizeExportFileName(preview.DisplayName)}.f76theme";
+                fileName = $"{ThemePackageValidator.SanitizeExportFileName(preview.DisplayName)}.f76theme";
 
             var destPath = Path.Combine(AppPaths.ThemesFolder, fileName);
             File.Copy(sourcePath, destPath, overwrite: true);
@@ -303,7 +378,7 @@ public sealed class ThemePackageLoader
         var id = virtualPath[prefix.Length..].Split('?')[0].Trim('/');
         if (!ThemePackageValidator.IsValidThemeId(id)) return null;
 
-        foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".webp" })
+        foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".webp", ".gif" })
         {
             var p = Path.Combine(AppPaths.ThemesCacheFolder, id, $"logo{ext}");
             if (File.Exists(p)) return p;

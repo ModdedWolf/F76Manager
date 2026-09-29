@@ -30,14 +30,14 @@ Built-in theme logo (sidebar icon):
     Dropping a .f76theme in bundled-themes alone does not change the sidebar until sync + deploy.
   - Replace logo file:
       python new-theme.py set-logo {id} path/to/logo.png
-    Or after exporting from Theme Creator:
-      python new-theme.py pull-logo {id} path/to/F76Manager-Theme-....f76theme
-    Or drop F76Manager-Theme-{Display Name}.f76theme in WebSrc/bundled-themes/ and run sync
+    Or after exporting from Theme Creator (Settings → ⋯ → Theme Creator):
+      python new-theme.py pull-logo {id} path/to/{Display Name}.f76theme
+    Or drop {Display Name}.f76theme in WebSrc/bundled-themes/ and run sync
     (sync imports newer package logos into assets/themes/ before repacking).
   - Then deploy.ps1 so Release embeds the updated asset.
   - Built-in packages use the same names as Theme Creator:
-      F76Manager-Theme-{Display Name}.f76theme
-      (zip contains manifest.json + logo.png|.webp|.jpg)
+      {Display Name}.f76theme
+      (zip contains manifest.json + logo.png|.webp|.jpg|.gif, max 2 MB)
   - Runtime UI colors/logos still load from embedded www (css + assets)
   - deploy.ps1 copies WebSrc -> www and bundled-themes -> Release/BundledThemes/
 
@@ -58,7 +58,7 @@ Startup theme (no flash on launch):
   WebSrc/bundled-themes/ is only for packaging built-in themes into the installer (sync output).
 
   To use a custom .f76theme in the manager:
-    python new-theme.py install-user path/to/F76Manager-Theme-....f76theme
+    python new-theme.py install-user path/to/{Display Name}.f76theme
     (copies to Release/Themes/, then restart F76Manager.exe)
   Or: Settings -> Import theme, or copy manually into {install}\Themes\
   After copying while the app is running: Settings -> Refresh themes (rescans Themes\).
@@ -70,7 +70,7 @@ Startup theme (no flash on launch):
     you change "id" in manifest.json to a unique id (not fallout, vault-tec, etc.).
     Renaming the .f76theme file only changes the filename; id/displayName are inside the zip.
 
-  Create packages with F76ThemeCreator\Release\F76ThemeCreator.exe (or theme-studio.bat)
-  Export produces F76Manager-Theme-{name}.f76theme
+  Create packages with Settings → theme menu (⋯) → Theme Creator.
+  Export / Save produces {Display Name}.f76theme
 
 Do not add user theme CSS or JS under WebSrc.
