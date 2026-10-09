@@ -145,6 +145,9 @@ export class Settings {
                                         <i data-lucide="more-horizontal"></i>
                                     </button>
                                     <div class="mods-actions-dropdown advanced-maintenance-dropdown" hidden>
+                                        <button type="button" class="mods-actions-item" data-action="backup-all">
+                                            <i data-lucide="layers"></i><span>${t('backup_all')}</span>
+                                        </button>
                                         <button type="button" class="mods-actions-item" data-action="backup-ini">
                                             <i data-lucide="copy"></i><span>${t('backup_inis')}</span>
                                         </button>
@@ -649,43 +652,12 @@ export class Settings {
         panel.addEventListener('click', (e) => {
             const actionEl = e.target.closest('[data-action]');
             if (actionEl) {
-                this.closeAdvancedMaintenanceMenu();
-                const action = actionEl.getAttribute('data-action');
-                switch (action) {
-                    case 'backup-ini':
-                        this.postToHost('BACKUP_INI');
-                        break;
-                    case 'backup-mods':
-                        this.postToHost('BACKUP_MODS');
-                        break;
-                    case 'backup-configs':
-                        this.postToHost('BACKUP_CONFIGS');
-                        break;
-                    case 'delete-all-backups':
-                        void this.handleDeleteAllBackupsClick();
-                        break;
-                    case 'clear-cache':
-                        this.postToHost('CLEAR_CACHE');
-                        break;
-                    case 'transfer-to-other':
-                        void this.handleTransferMods('to-other');
-                        break;
-                    case 'transfer-from-other':
-                        void this.handleTransferMods('from-other');
-                        break;
-                    default:
-                        break;
-                }
+                this.runAdvancedMaintenanceAction(actionEl.getAttribute('data-action'));
                 return;
             }
 
             if (e.target.closest('#btn-refresh-backups')) {
                 this.requestBackupsList();
-                return;
-            }
-
-            if (e.target.closest('[data-action="reset-config"]')) {
-                this.postToHost('RESET_CONFIG');
             }
         });
 
@@ -1003,6 +975,41 @@ export class Settings {
         }, { signal });
     }
 
+    runAdvancedMaintenanceAction(action) {
+        this.closeAdvancedMaintenanceMenu();
+        switch (action) {
+            case 'backup-all':
+                this.postToHost('BACKUP_ALL');
+                break;
+            case 'backup-ini':
+                this.postToHost('BACKUP_INI');
+                break;
+            case 'backup-mods':
+                this.postToHost('BACKUP_MODS');
+                break;
+            case 'backup-configs':
+                this.postToHost('BACKUP_CONFIGS');
+                break;
+            case 'delete-all-backups':
+                void this.handleDeleteAllBackupsClick();
+                break;
+            case 'clear-cache':
+                this.postToHost('CLEAR_CACHE');
+                break;
+            case 'transfer-to-other':
+                void this.handleTransferMods('to-other');
+                break;
+            case 'transfer-from-other':
+                void this.handleTransferMods('from-other');
+                break;
+            case 'reset-config':
+                this.postToHost('RESET_CONFIG');
+                break;
+            default:
+                break;
+        }
+    }
+
     mountAdvancedMaintenanceMenu() {
         const trigger = document.querySelector('.advanced-maintenance-actions-trigger');
         const dropdown = document.querySelector('.advanced-maintenance-dropdown');
@@ -1013,25 +1020,74 @@ export class Settings {
             const open = dropdown.hidden;
             this.closeAdvancedMaintenanceMenu();
             this.closeBackupActionMenus();
-            dropdown.hidden = !open;
-            trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-            if (open && window.lucide) window.lucide.createIcons();
+            if (!open) return;
+            this.positionAdvancedMaintenanceMenu(trigger, dropdown);
+            trigger.setAttribute('aria-expanded', 'true');
+            if (window.lucide) window.lucide.createIcons();
+        };
+
+        dropdown.onclick = (e) => {
+            const actionEl = e.target.closest('[data-action]');
+            if (!actionEl || !dropdown.contains(actionEl)) return;
+            e.stopPropagation();
+            this.runAdvancedMaintenanceAction(actionEl.getAttribute('data-action'));
         };
 
         if (!this._advancedMenuCloseBound) {
             this._advancedMenuCloseBound = true;
             document.addEventListener('click', (e) => {
-                if (!e.target.closest('.advanced-maintenance-menu-wrap')) {
+                if (!e.target.closest('.advanced-maintenance-menu-wrap') &&
+                    !e.target.closest('.advanced-maintenance-dropdown')) {
                     this.closeAdvancedMaintenanceMenu();
                 }
             });
+            window.addEventListener('resize', () => this.closeAdvancedMaintenanceMenu());
         }
+    }
+
+    positionAdvancedMaintenanceMenu(trigger, menu) {
+        const wrap = trigger.closest('.advanced-maintenance-menu-wrap');
+        if (menu.parentElement !== document.body) document.body.appendChild(menu);
+        menu.classList.add('mods-actions-dropdown--fixed');
+        menu.hidden = false;
+
+        const edge = 8;
+        const gap = 6;
+        const rect = trigger.getBoundingClientRect();
+        const spaceBelow = window.innerHeight - rect.bottom - gap - edge;
+        const spaceAbove = rect.top - gap - edge;
+        const openUp = spaceBelow < 160 && spaceAbove > spaceBelow;
+        const maxH = Math.max(120, Math.floor(openUp ? spaceAbove : spaceBelow));
+        menu.style.maxHeight = `${maxH}px`;
+        menu.style.visibility = 'hidden';
+        const menuW = menu.offsetWidth || 220;
+        const menuH = Math.min(menu.scrollHeight || maxH, maxH);
+        menu.style.visibility = '';
+
+        let left = rect.right - menuW;
+        if (left < edge) left = edge;
+        if (left + menuW > window.innerWidth - edge) left = window.innerWidth - menuW - edge;
+        const top = openUp ? rect.top - gap - menuH : rect.bottom + gap;
+
+        menu.style.top = `${Math.round(top)}px`;
+        menu.style.left = `${Math.round(left)}px`;
+        menu.style.right = 'auto';
+        menu._advancedMenuWrap = wrap;
     }
 
     closeAdvancedMaintenanceMenu() {
         const dropdown = document.querySelector('.advanced-maintenance-dropdown');
         const trigger = document.querySelector('.advanced-maintenance-actions-trigger');
-        if (dropdown) dropdown.hidden = true;
+        if (dropdown) {
+            dropdown.hidden = true;
+            dropdown.classList.remove('mods-actions-dropdown--fixed');
+            dropdown.style.top = '';
+            dropdown.style.left = '';
+            dropdown.style.right = '';
+            dropdown.style.maxHeight = '';
+            const wrap = dropdown._advancedMenuWrap || document.querySelector('.advanced-maintenance-menu-wrap');
+            if (wrap && dropdown.parentElement !== wrap) wrap.appendChild(dropdown);
+        }
         if (trigger) trigger.setAttribute('aria-expanded', 'false');
     }
 

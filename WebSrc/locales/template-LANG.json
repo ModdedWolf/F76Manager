@@ -59,6 +59,7 @@
   "done": "Done",
   "advanced_maintenance": "Advanced Maintenance",
   "save_changes": "Save Changes",
+  "backup_all": "Backup All",
   "backup_inis": "Backup INIs",
   "backup_mods": "Backup Mods",
   "backup_configs": "Backup Configs",

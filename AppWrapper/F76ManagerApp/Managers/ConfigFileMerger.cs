@@ -393,11 +393,76 @@ public static class ConfigFileMerger
         if (existingNode == null || incomingNode == null)
             return false;
 
-        int added = 0;
-        JsonNode merged = MergeJsonNodes(existingNode, incomingNode, ref added);
-        mergedContent = merged.ToJsonString(JsonWriteOptions);
+        var additions = new List<JsoncText.Addition>();
+        CollectJsonAdditions(existingNode, incomingNode, new List<object>(), additions);
+        int added = additions.Count;
+
+        if (added == 0)
+        {
+            mergedContent = existing;
+        }
+        else
+        {
+            int mergeCount = 0;
+            JsonNode merged = MergeJsonNodes(existingNode, incomingNode, ref mergeCount);
+            string? patched = string.IsNullOrWhiteSpace(existing) ? null : JsoncText.ApplyAdditions(existing, additions);
+            if (patched != null && JsonNodesDeepEqual(ParseJsonLenient(patched), merged))
+            {
+                mergedContent = patched;
+            }
+            else if (JsoncText.ContainsComments(existing))
+            {
+                mergedContent = existing;
+                summary = $"Kept existing file to preserve comments ({added} JSON key{(added == 1 ? "" : "s")} not merged)";
+                return true;
+            }
+            else
+            {
+                mergedContent = merged.ToJsonString(JsonWriteOptions);
+            }
+        }
+
         summary = added == 0 ? "No new JSON keys" : $"Added {added} JSON key{(added == 1 ? "" : "s")}";
         return true;
+    }
+
+    private static void CollectJsonAdditions(JsonNode existing, JsonNode incoming, List<object> path, List<JsoncText.Addition> additions)
+    {
+        if (existing is JsonObject exObj && incoming is JsonObject inObj)
+        {
+            foreach (var prop in inObj)
+            {
+                if (!exObj.TryGetPropertyValue(prop.Key, out var existingChild))
+                {
+                    additions.Add(new JsoncText.Addition(path.ToList(), prop.Key, prop.Value?.DeepClone()));
+                }
+                else if (existingChild == null)
+                {
+                    additions.Add(new JsoncText.Addition(path.ToList(), prop.Key, prop.Value?.DeepClone(), Replace: true));
+                }
+                else if (existingChild is JsonObject && prop.Value is JsonObject)
+                {
+                    CollectJsonAdditions(existingChild, prop.Value, new List<object>(path) { prop.Key }, additions);
+                }
+                else if (existingChild is JsonArray exChildArr && prop.Value is JsonArray inChildArr &&
+                         IsStringArray(exChildArr) && IsStringArray(inChildArr))
+                {
+                    CollectJsonAdditions(exChildArr, inChildArr, new List<object>(path) { prop.Key }, additions);
+                }
+            }
+            return;
+        }
+
+        if (existing is JsonArray exArr && incoming is JsonArray inArr)
+        {
+            var seen = exArr.ToList();
+            foreach (var item in inArr)
+            {
+                if (seen.Any(s => JsonNodesDeepEqual(s, item))) continue;
+                seen.Add(item);
+                additions.Add(new JsoncText.Addition(path.ToList(), null, item?.DeepClone()));
+            }
+        }
     }
 
     private static JsonNode? ParseJsonLenient(string text)

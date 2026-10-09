@@ -1186,6 +1186,11 @@ public partial class Form1
                     case "SET_WINDOW_CHROME":
                         HandleSetWindowChrome(root);
                         break;
+                    case "BACKUP_ALL":
+                        HandleBackupIni();
+                        HandleBackupConfigs();
+                        HandleBackupMods();
+                        break;
                     case "BACKUP_INI": HandleBackupIni(); break;
                     case "BACKUP_MODS": HandleBackupMods(); break;
                     case "BACKUP_CONFIGS": HandleBackupConfigs(); break;
@@ -3095,6 +3100,8 @@ public partial class Form1
             foreach (var p in profiles)
             {
                 if (p == null) continue;
+                p.ProfileMods ??= new List<string>();
+                p.EnabledMods ??= new List<string>();
                 int beforeProfile = p.ProfileMods.Count;
                 int beforeEnabled = p.EnabledMods.Count;
                 p.ProfileMods.RemoveAll(x =>
@@ -3114,7 +3121,7 @@ public partial class Form1
             SendDataToWeb();
             RefreshConflictCount(false, sendDataUpdate: true);
         } catch (Exception ex) {
-            LogError($"[DELETE_FAIL] {ex.Message}");
+            LogError($"[DELETE_FAIL] {ex}");
             SendStatusMessage("error", $"Delete failed: {ex.Message}", "delete_mod_failed", new object[] { ex.Message });
         }
     }
@@ -6435,6 +6442,7 @@ public partial class Form1
   "virtual_mod_mode": "Virtual Mod Mode",
   "advanced_maintenance": "Advanced Maintenance",
   "save_changes": "Save Changes",
+  "backup_all": "Backup All",
   "backup_inis": "Backup INIs",
   "backup_mods": "Backup Mods",
   "backup_configs": "Backup Configs",

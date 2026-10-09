@@ -22,8 +22,15 @@ public partial class Form1
         _tweakIniDebounceTimer.Tick += (_, _) =>
         {
             _tweakIniDebounceTimer?.Stop();
-            SyncTweakValuesFromIni();
-            SendDataToWeb();
+            try
+            {
+                SyncTweakValuesFromIni();
+                SendDataToWeb();
+            }
+            catch (Exception ex)
+            {
+                LogError($"[INI-WATCH] Refresh after ini change failed: {ex}");
+            }
         };
 
         _tweakIniWatcher = new FileSystemWatcher(documentsPath)

@@ -4,6 +4,7 @@ import { escapeAttr } from '../utils/htmlSafe.js';
 import { applyStylesheet as applyModTypeBadgeStylesheet } from '../utils/modTypeBadgeTheme.js';
 import { openTabBadgeColorModal } from '../utils/badgeColorModal.js';
 import { JsonTreeEditor } from '../utils/jsonTreeEditor.js';
+import * as jsonc from '../utils/jsonc.js';
 
 let _modsGlobalEventsAttached = false;
 let _deleteModInFlight = false;
@@ -200,19 +201,10 @@ export class ModsManager {
     }
 
     _parseJsonRelaxed(text) {
-        const raw = String(text ?? '');
         try {
-            return { ok: true, value: JSON.parse(raw) };
-        } catch (_) {
-            try {
-                let s = raw;
-                s = s.replace(/\/\*[\s\S]*?\*\//g, '');
-                s = s.replace(/(^|[^:\\])\/\/.*$/gm, '$1');
-                s = s.replace(/,\s*([}\]])/g, '$1');
-                return { ok: true, value: JSON.parse(s) };
-            } catch (e2) {
-                return { ok: false, error: (e2 && e2.message) ? e2.message : String(e2) };
-            }
+            return { ok: true, value: jsonc.parse(text) };
+        } catch (e) {
+            return { ok: false, error: (e && e.message) ? e.message : String(e) };
         }
     }
 
@@ -1701,7 +1693,7 @@ export class ModsManager {
                         setConfigStatus(`Invalid JSON: ${parsed.error}`, 'error');
                         return;
                     }
-                    configEditor.value = JSON.stringify(parsed.value, null, 2);
+                    configEditor.value = jsonc.format(configEditor.value || '', 2);
                     updateConfigHighlighting();
                     setConfigStatus('Formatted JSON.', 'success');
                 } catch (e) {
@@ -1718,19 +1710,24 @@ export class ModsManager {
             const viewTreeBtn = document.getElementById('mod-config-view-tree');
             const viewTextBtn = document.getElementById('mod-config-view-text');
             const foldBtn = document.getElementById('mod-config-tree-fold');
-            let sourceHadExtras = false;
-            let extrasWarned = false;
-
             const tree = new JsonTreeEditor(configTreeEl, {
-                onChange: (value) => {
-                    configEditor.value = JSON.stringify(value, null, 2);
-                    updateConfigHighlighting();
-                    if (sourceHadExtras && !extrasWarned) {
-                        extrasWarned = true;
-                        setConfigStatus('Comments and trailing commas from the original file are removed when editing in Tree view.');
-                    } else if (!extrasWarned) {
+                onChange: (value, edit) => {
+                    const current = configEditor.value || '';
+                    const patched = edit ? jsonc.applyEdit(current, edit) : null;
+                    if (patched !== null) {
+                        configEditor.value = patched;
+                        tree.setComments(jsonc.commentMap(patched));
                         setConfigStatus('');
+                    } else if (jsonc.hasComments(current)) {
+                        tree.setValue(jsonc.parse(current), jsonc.commentMap(current));
+                        syncFoldButton();
+                        setConfigStatus("This change can't be made without removing comments. Use Text view for this edit.", 'error');
+                        return;
+                    } else {
+                        configEditor.value = JSON.stringify(value, null, 2);
+                        tree.setComments(new Map());
                     }
+                    updateConfigHighlighting();
                 }
             });
             this._configJsonTree = tree;
@@ -1753,13 +1750,7 @@ export class ModsManager {
                         setConfigStatus(`Invalid JSON: ${parsed.error}`, 'error');
                         view = 'text';
                     } else {
-                        try {
-                            JSON.parse(text);
-                            sourceHadExtras = false;
-                        } catch (_) {
-                            sourceHadExtras = true;
-                        }
-                        tree.setValue(parsed.value);
+                        tree.setValue(parsed.value, jsonc.commentMap(text));
                         syncFoldButton();
                     }
                 }

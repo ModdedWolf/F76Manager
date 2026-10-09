@@ -357,6 +357,18 @@ public partial class Form1
 
     private void CoreWebView2_WebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
+        try
+        {
+            HandleWebResourceRequested(e);
+        }
+        catch (Exception ex)
+        {
+            try { LogError($"[WEBVIEW] Resource request failed: {ex}"); } catch { }
+        }
+    }
+
+    private void HandleWebResourceRequested(CoreWebView2WebResourceRequestedEventArgs e)
+    {
         string uri = e.Request.Uri;
 
         if (uri.StartsWith("file:", StringComparison.OrdinalIgnoreCase))

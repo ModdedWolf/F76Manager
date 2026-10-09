@@ -73,6 +73,10 @@ static class Program
         StartupTrace.Mark("Main: single-instance mutex acquired");
 
         ApplicationConfiguration.Initialize();
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, args) => LogUnhandled("UI", args.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            LogUnhandled("AppDomain", args.ExceptionObject as Exception);
         StartupTrace.Mark("Main: ApplicationConfiguration.Initialize done");
         
         Application.ApplicationExit += (s, e) => {
@@ -104,5 +108,20 @@ static class Program
         catch { }
 
         return CoreWebView2Environment.CreateAsync(null, Form1.GetDefaultWebViewUserDataFolder(), null);
+    }
+
+    private static void LogUnhandled(string source, Exception? ex)
+    {
+        try
+        {
+            string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+            Directory.CreateDirectory(dir);
+            string text = $"[{DateTime.Now:T}] [UNHANDLED:{source}] {ex}\r\n";
+            File.AppendAllText(Path.Combine(dir, "error.log"), text);
+            File.AppendAllText(Path.Combine(dir, "activity.log"), text);
+        }
+        catch
+        {
+        }
     }
 }

@@ -663,6 +663,7 @@ public partial class Form1
                 return enriched.Where(m =>
                 {
                     string key = (string)((dynamic)m).originalName;
+                    if (string.IsNullOrEmpty(key)) return false;
                     return key.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) || ProfileAllowsMod(allowed, key);
                 }).ToList();
             }

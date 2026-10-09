@@ -466,7 +466,11 @@ public partial class Form1
 
         var runtimeTimer = new System.Windows.Forms.Timer { Interval = 10000 };
 
-        runtimeTimer.Tick += (s, e) => _endorsementManager.Tick(10);
+        runtimeTimer.Tick += (_, _) =>
+        {
+            try { _endorsementManager.Tick(10); }
+            catch (Exception ex) { LogError($"[ENDORSE] Tick failed: {ex}"); }
+        };
 
         runtimeTimer.Start();
 

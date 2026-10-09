@@ -2,6 +2,7 @@ const COLOR_RE = /^(#)([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$|^(0x)([0-9a-f]{6})$
 const LARGE_TREE_NODES = 1500;
 const LARGE_TREE_OPEN_DEPTH = 2;
 const INDENT_PX = 18;
+const COMMENT_GUTTER_PX = 18;
 
 const isContainer = (v) => v !== null && typeof v === 'object';
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -65,6 +66,7 @@ export class JsonTreeEditor {
         this.container = container;
         this.onChange = typeof onChange === 'function' ? onChange : () => {};
         this.value = null;
+        this.comments = new Map();
         this.collapsed = new WeakSet();
         this.allExpanded = true;
         this._menu = null;
@@ -74,8 +76,13 @@ export class JsonTreeEditor {
         container.addEventListener('click', this._onClick);
     }
 
-    setValue(value) {
+    setComments(comments) {
+        this.comments = comments instanceof Map ? comments : new Map();
+    }
+
+    setValue(value, comments) {
         this.value = value;
+        this.setComments(comments);
         this.collapsed = new WeakSet();
         this.allExpanded = true;
         if (countNodes(value) > LARGE_TREE_NODES) {
@@ -138,16 +145,19 @@ export class JsonTreeEditor {
         else meta.parent[meta.key] = v;
     }
 
-    _emit() {
-        this.onChange(this.value);
+    _emit(edit) {
+        this.onChange(this.value, edit);
     }
 
-    _renderNode(parent, key, depth) {
+    _renderNode(parent, key, depth, path = []) {
         const value = parent == null ? this.value : parent[key];
         const type = typeOf(value);
         const node = document.createElement('div');
         node.className = 'jt-node';
-        node._jt = { parent, key, depth };
+        node._jt = { parent, key, depth, path };
+        const notes = this.comments.get(JSON.stringify(path));
+
+        if (notes) this._appendCommentLines(node, notes.leading, depth);
 
         const row = document.createElement('div');
         row.className = 'jt-row';
@@ -211,6 +221,13 @@ export class JsonTreeEditor {
             row.appendChild(valEl);
         }
 
+        if (notes && notes.trailing.length) {
+            const inline = document.createElement('span');
+            inline.className = 'jt-comment-inline';
+            inline.textContent = notes.trailing.join(' ');
+            row.appendChild(inline);
+        }
+
         const actions = document.createElement('span');
         actions.className = 'jt-actions';
         if (container || parent != null) {
@@ -235,16 +252,31 @@ export class JsonTreeEditor {
             const kids = document.createElement('div');
             kids.className = 'jt-children';
             for (const k of Object.keys(value)) {
-                kids.appendChild(this._renderNode(value, Array.isArray(value) ? Number(k) : k, depth + 1));
+                const childKey = Array.isArray(value) ? Number(k) : k;
+                kids.appendChild(this._renderNode(value, childKey, depth + 1, [...path, childKey]));
             }
             node.appendChild(kids);
+        }
+        if (notes && (open || !container)) {
+            this._appendCommentLines(node, notes.footer, container ? depth + 1 : depth);
         }
         return node;
     }
 
+    _appendCommentLines(node, lines, depth) {
+        for (const text of lines || []) {
+            const el = document.createElement('div');
+            el.className = 'jt-comment';
+            el.style.paddingLeft = `${depth * INDENT_PX + COMMENT_GUTTER_PX}px`;
+            el.textContent = text;
+            node.appendChild(el);
+        }
+    }
+
     _rerender(node) {
-        const { parent, key, depth } = node._jt;
-        const fresh = this._renderNode(parent, key, depth);
+        if (!this.container.contains(node)) return null;
+        const { parent, key, depth, path } = node._jt;
+        const fresh = this._renderNode(parent, key, depth, path);
         node.replaceWith(fresh);
         return fresh;
     }
@@ -266,6 +298,7 @@ export class JsonTreeEditor {
         const t = e.target;
         if (!(t instanceof Element)) return;
         if (t.closest('.jt-menu') || t.closest('.jt-input')) return;
+        if (t.closest('.jt-comment') || t.closest('.jt-comment-inline')) return;
         const node = t.closest('.jt-node');
         if (!node || !this.container.contains(node)) return;
         const meta = node._jt;
@@ -298,8 +331,8 @@ export class JsonTreeEditor {
         if (t.classList.contains('jt-value')) {
             if (typeof value === 'boolean') {
                 this._setValueAt(meta, !value);
+                this._emit({ op: 'set', path: meta.path, value: !value });
                 this._rerender(node);
-                this._emit();
                 return;
             }
             this._editValue(node, t);
@@ -352,15 +385,15 @@ export class JsonTreeEditor {
                     return;
                 }
                 this._setValueAt(meta, next);
+                this._emit({ op: 'set', path: meta.path, value: next });
                 this._rerender(node);
-                this._emit();
             },
             onCancel: () => this._rerender(node),
         });
     }
 
     _editKey(node, keyEl) {
-        const { parent, key } = node._jt;
+        const { parent, key, path } = node._jt;
         this._inlineInput(keyEl, key, {
             onCommit: (text, input) => {
                 if (text === key) {
@@ -380,21 +413,21 @@ export class JsonTreeEditor {
                 }
                 replaceEntries(parent, Object.entries(parent).map(([k, v]) => [k === key ? text : k, v]));
                 const parentNode = this._parentNode(node);
+                this._emit({ op: 'rename', path, newKey: text });
                 if (parentNode) this._rerender(parentNode);
-                this._emit();
             },
             onCancel: () => this._rerender(node),
         });
     }
 
     _remove(node) {
-        const { parent, key } = node._jt;
+        const { parent, key, path } = node._jt;
         if (parent == null) return;
         if (Array.isArray(parent)) parent.splice(key, 1);
         else delete parent[key];
         const parentNode = this._parentNode(node);
+        this._emit({ op: 'remove', path });
         if (parentNode) this._rerender(parentNode);
-        this._emit();
     }
 
     _uniqueKey(obj) {
@@ -409,10 +442,14 @@ export class JsonTreeEditor {
         let target;
         let targetNode;
         let newKey;
+        let containerPath;
+        let index;
 
         if (mode === 'child') {
             target = this._valueAt(node._jt);
             targetNode = node;
+            containerPath = node._jt.path;
+            index = Object.keys(target).length;
             if (Array.isArray(target)) {
                 target.push(fresh);
                 newKey = target.length - 1;
@@ -422,14 +459,17 @@ export class JsonTreeEditor {
             }
             this.collapsed.delete(target);
         } else {
-            const { parent, key } = node._jt;
+            const { parent, key, path } = node._jt;
             target = parent;
             targetNode = this._parentNode(node);
+            containerPath = path.slice(0, -1);
             if (Array.isArray(parent)) {
                 parent.splice(key + 1, 0, fresh);
                 newKey = key + 1;
+                index = key + 1;
             } else {
                 newKey = this._uniqueKey(parent);
+                index = Object.keys(parent).indexOf(key) + 1;
                 const entries = [];
                 for (const [k, v] of Object.entries(parent)) {
                     entries.push([k, v]);
@@ -439,8 +479,15 @@ export class JsonTreeEditor {
             }
         }
         if (!targetNode) return;
+        this._emit({
+            op: 'insert',
+            path: containerPath,
+            index,
+            key: Array.isArray(target) ? undefined : newKey,
+            value: fresh,
+        });
         const rendered = this._rerender(targetNode);
-        this._emit();
+        if (!rendered) return;
 
         const added = this._childNode(rendered, newKey);
         if (!added) return;
@@ -528,8 +575,8 @@ export class JsonTreeEditor {
             picker.remove();
             if (next === this._valueAt(meta)) return;
             this._setValueAt(meta, next);
+            this._emit({ op: 'set', path: meta.path, value: next });
             this._rerender(node);
-            this._emit();
         });
         picker.click();
     }

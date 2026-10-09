@@ -1753,6 +1753,18 @@ input:checked+.slider:before {
 
 .json-tree .jt-row:hover { background: rgba(var(--primary-rgb), 0.06); }
 
+.json-tree .jt-comment,
+.json-tree .jt-comment-inline {
+    color: var(--text-muted);
+    opacity: 0.8;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: pre;
+    cursor: default;
+}
+
+.json-tree .jt-comment { min-height: 20px; }
+.json-tree .jt-comment-inline { margin-left: 10px; }
+
 .json-tree .jt-caret {
     flex: 0 0 16px;
     width: 16px;

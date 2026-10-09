@@ -53,7 +53,7 @@ public partial class Form1 : Form, IMessageFilter
     private bool _webViewRecoveryAttempted = false;
     private bool _ipcServerStarted;
     private bool _ipcHandleCreatedHooked;
-    public const string CurrentVersion = "1.1.0";
+    public const string CurrentVersion = "1.1.1";
 
     public static string GetRunningProductVersion()
     {
@@ -709,16 +709,22 @@ public partial class Form1 : Form, IMessageFilter
         if (action == null) return;
         if (IsDisposed || Disposing) return;
 
+        void Safe()
+        {
+            try { action(); }
+            catch (Exception ex) { LogError($"[UI] {ex}"); }
+        }
+
         try
         {
             if (InvokeRequired)
             {
                 if (!IsHandleCreated) return;
-                BeginInvoke(action);
+                BeginInvoke(Safe);
             }
             else
             {
-                action();
+                Safe();
             }
         }
         catch (ObjectDisposedException)
