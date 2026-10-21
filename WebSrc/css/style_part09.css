@@ -58,7 +58,7 @@
 .tweaks-page {
     padding: 0;
     height: 100%;
-    color: #e0e0e0;
+    color: var(--text-main);
     font-family: 'Inter', sans-serif;
     display: flex;
     flex-direction: column;
@@ -79,14 +79,14 @@
 .presets-label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: #888;
+    color: var(--text-muted);
     white-space: nowrap;
 }
 
 .preset-btn {
     background: transparent;
     border: 1px solid var(--border-color);
-    color: #aaa;
+    color: var(--text-muted);
     padding: 5px 15px;
     border-radius: 20px;
     font-size: 0.8rem;
@@ -98,7 +98,7 @@
 
 .preset-btn:hover {
     border-color: #555;
-    color: #fff;
+    color: var(--text-main);
 }
 
 .preset-btn.active {
@@ -169,12 +169,12 @@
 .tweak-label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: #e0e0e0;
+    color: var(--text-main);
 }
 
 .tweak-desc {
     font-size: 0.75rem;
-    color: #888;
+    color: var(--text-muted);
     line-height: 1.2;
 }
 
@@ -621,7 +621,7 @@ input:checked+.slider:before {
 }
 
 .log-content {
-    color: #e0e0e0;
+    color: var(--text-main);
 }
 
 .empty-terminal {
@@ -1109,7 +1109,7 @@ input:checked+.slider:before {
 .mod-name {
     font-weight: 700;
     font-size: 1.15rem;
-    color: #fff;
+    color: var(--text-main);
     letter-spacing: -0.2px;
 }
 

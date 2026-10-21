@@ -107,11 +107,11 @@ export const ConfigRenderer = {
                                 <div class="mods-actions-divider" role="separator"></div>
                                 <button type="button" class="mods-actions-item" id="config-action-transfer-to-other">
                                     <i data-lucide="arrow-right-left"></i>
-                                    <span>${escapeHtml(window._t?.('transfer_configs_to_other') ?? 'Copy Configs To Other Platform')}</span>
+                                    <span>${escapeHtml(window._t?.('transfer_configs_to_other') ?? 'Copy Configs To Another Install')}</span>
                                 </button>
                                 <button type="button" class="mods-actions-item" id="config-action-transfer-from-other">
                                     <i data-lucide="arrow-right-left"></i>
-                                    <span>${escapeHtml(window._t?.('transfer_configs_from_other') ?? 'Import Configs From Other Platform')}</span>
+                                    <span>${escapeHtml(window._t?.('transfer_configs_from_other') ?? 'Import Configs From Another Install')}</span>
                                 </button>
                                 <div class="mods-actions-divider" role="separator"></div>
                                 <button type="button" class="mods-actions-item" id="config-action-badge-color">

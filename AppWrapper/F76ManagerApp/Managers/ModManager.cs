@@ -12,10 +12,14 @@ public partial class ModManager
 
     public string ArchiveKeyPreference { get; set; } = "auto";
     public bool VirtualModMode { get; set; } = false;
+    public bool IgnoreArchiveIniFiles { get; set; } = false;
 
     public string SevenZipPath { get; set; } = "";
 
     public string RarExtractorPath { get; set; } = "";
+
+    private static string ConfigMergeBackupRoot =>
+        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Backups", "ConfigMerges");
 
     private readonly object _modsListCacheLock = new();
     private List<object>? _modsListCache;
@@ -312,6 +316,13 @@ public partial class ModManager
             siblingKeys.Add($"Disabled/GameRoot/{fileNameOnly}");
         }
 
+        var ownFiles = meta.Files;
+        var ownDirectories = meta.Directories;
+        bool ownEnabled = meta.IsEnabled;
+        bool ownBundle = meta.IsBundle;
+        bool ownLoose = meta.IsLoose;
+        int ownLoadOrder = meta.LoadOrder;
+
         string currentKey = NormalizeMetadataKey(normalizedFile);
         foreach (var sibling in siblingKeys.Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -319,6 +330,13 @@ public partial class ModManager
             if (!metadata.TryGetValue(sibling, out var siblingMeta) || siblingMeta == null) continue;
             meta = MergeMetadataEntries(meta, siblingMeta);
         }
+
+        meta.Files = ownFiles ?? new List<string>();
+        meta.Directories = ownDirectories ?? new List<string>();
+        meta.IsEnabled = ownEnabled;
+        meta.IsBundle = ownBundle;
+        meta.IsLoose = ownLoose;
+        if (ownLoadOrder != UnassignedLoadOrder) meta.LoadOrder = ownLoadOrder;
         return meta;
     }
 
@@ -478,12 +496,36 @@ public partial class ModManager
 
     public bool IsVanillaModFile(string relativePath) => IsVanillaFile(relativePath);
 
+    private static readonly HashSet<string> TransferSkipDataFolders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Terrain",
+        "Video",
+        "Strings",
+        "FO76Edit Backups",
+        "FO76Edit Cache",
+    };
+
     public int TransferModsToPlatform(
         string sourceDataDir, string sourceStringsDir, string sourceGameRootDir,
         string destDataDir, string destStringsDir, string destGameRootDir,
         bool overwrite)
     {
+        return TransferModsToPlatform(
+            sourceDataDir, sourceStringsDir, sourceGameRootDir,
+            destDataDir, destStringsDir, destGameRootDir,
+            overwrite, out _);
+    }
+
+    public int TransferModsToPlatform(
+        string sourceDataDir, string sourceStringsDir, string sourceGameRootDir,
+        string destDataDir, string destStringsDir, string destGameRootDir,
+        bool overwrite,
+        out List<string> copiedRelativeKeys,
+        Func<string, bool>? includeRelative = null,
+        bool includeGameRoot = true)
+    {
         int copied = 0;
+        copiedRelativeKeys = new List<string>();
 
         if (string.IsNullOrWhiteSpace(sourceDataDir) || !Directory.Exists(sourceDataDir))
         {
@@ -499,34 +541,38 @@ public partial class ModManager
             {
                 string fileName = Path.GetFileName(file);
                 if (IsVanillaFile(fileName)) continue;
+                if (includeRelative != null && !includeRelative(fileName)) continue;
                 string dest = Path.Combine(destDataDir, fileName);
-                if (File.Exists(dest) && !overwrite) continue;
+                if (File.Exists(dest))
+                {
+                    if (!overwrite) continue;
+                    if (IsVanillaFile(Path.GetFileName(dest))) continue;
+                }
                 CopyFileOrThrow(file, dest, true);
                 copied++;
+                copiedRelativeKeys.Add(fileName);
             }
 
             foreach (var dir in Directory.GetDirectories(sourceDataDir))
             {
                 string folderName = Path.GetFileName(dir);
-                if (folderName.Equals("Strings", StringComparison.OrdinalIgnoreCase)) continue;
-                copied += CopyDirectoryRecursive(dir, Path.Combine(destDataDir, folderName), overwrite);
+                if (TransferSkipDataFolders.Contains(folderName)) continue;
+                if (folderName.StartsWith("FO76Edit", StringComparison.OrdinalIgnoreCase)) continue;
+                copied += CopyDirectoryRecursive(
+                    dir,
+                    Path.Combine(destDataDir, folderName),
+                    overwrite,
+                    folderName,
+                    copiedRelativeKeys,
+                    includeRelative);
             }
 
             if (!string.IsNullOrWhiteSpace(sourceStringsDir) && Directory.Exists(sourceStringsDir))
             {
-                Directory.CreateDirectory(destStringsDir);
-                foreach (var file in Directory.GetFiles(sourceStringsDir, "*.*", SearchOption.TopDirectoryOnly))
-                {
-                    string ext = Path.GetExtension(file).ToLowerInvariant();
-                    if (ext != ".strings" && ext != ".dlstrings" && ext != ".ilstrings") continue;
-                    string dest = Path.Combine(destStringsDir, Path.GetFileName(file));
-                    if (File.Exists(dest) && !overwrite) continue;
-                    CopyFileOrThrow(file, dest, true);
-                    copied++;
-                }
             }
 
-            if (!string.IsNullOrWhiteSpace(sourceGameRootDir) && Directory.Exists(sourceGameRootDir) &&
+            if (includeGameRoot &&
+                !string.IsNullOrWhiteSpace(sourceGameRootDir) && Directory.Exists(sourceGameRootDir) &&
                 !string.IsNullOrWhiteSpace(destGameRootDir))
             {
                 foreach (string name in GameRootInjectorBaseNames)
@@ -538,6 +584,7 @@ public partial class ModManager
                     if (File.Exists(dest) && !overwrite) continue;
                     CopyFileOrThrow(src, dest, true);
                     copied++;
+                    copiedRelativeKeys.Add($"GameRoot/{name}");
                 }
             }
         }
@@ -559,19 +606,99 @@ public partial class ModManager
         return copied;
     }
 
+    public int MergeMetadataKeysFromFile(string sourceMetadataPath, IEnumerable<string> relativeKeys, string? destMetadataPath = null)
+    {
+        if (string.IsNullOrWhiteSpace(sourceMetadataPath) || !File.Exists(sourceMetadataPath) || relativeKeys == null)
+            return 0;
+        string destPath = string.IsNullOrWhiteSpace(destMetadataPath) ? AppPaths.ModsMetadataFile : destMetadataPath;
+        if (string.Equals(Path.GetFullPath(sourceMetadataPath), Path.GetFullPath(destPath), StringComparison.OrdinalIgnoreCase))
+            return 0;
+
+        try
+        {
+            string json = File.ReadAllText(sourceMetadataPath);
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var source = JsonSerializer.Deserialize<Dictionary<string, ModMetadata>>(json, options)
+                         ?? new Dictionary<string, ModMetadata>(StringComparer.OrdinalIgnoreCase);
+
+            var keySet = new HashSet<string>(
+                relativeKeys.Select(k => NormalizeMetadataKey(k ?? "")).Where(k => !string.IsNullOrWhiteSpace(k)),
+                StringComparer.OrdinalIgnoreCase);
+
+            if (keySet.Count == 0) return 0;
+
+            var dest = LoadMetadataFrom(destPath);
+            int merged = 0;
+            foreach (var kv in source)
+            {
+                string key = NormalizeMetadataKey(kv.Key);
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (!keySet.Contains(key) &&
+                    !(kv.Value?.Files?.Any(f => keySet.Contains(NormalizeMetadataKey(f ?? ""))) ?? false))
+                    continue;
+
+                if (dest.TryGetValue(key, out var existing) && existing != null)
+                    dest[key] = MergeMetadataEntries(existing, kv.Value);
+                else
+                    dest[key] = kv.Value;
+                merged++;
+            }
+
+            if (merged > 0)
+                SaveMetadataTo(destPath, dest);
+            return merged;
+        }
+        catch (Exception ex)
+        {
+            _logger($"[TRANSFER] MergeMetadataKeysFromFile failed: {ex.Message}");
+            return 0;
+        }
+    }
+
     private int CopyDirectoryRecursive(string sourceDir, string destDir, bool overwrite)
     {
+        return CopyDirectoryRecursive(sourceDir, destDir, overwrite, relativePrefix: "", copiedRelativeKeys: null);
+    }
+
+    private int CopyDirectoryRecursive(
+        string sourceDir,
+        string destDir,
+        bool overwrite,
+        string relativePrefix,
+        List<string>? copiedRelativeKeys,
+        Func<string, bool>? includeRelative = null)
+    {
         int count = 0;
-        Directory.CreateDirectory(destDir);
+        if (includeRelative == null) Directory.CreateDirectory(destDir);
         foreach (var file in Directory.GetFiles(sourceDir))
         {
-            string dest = Path.Combine(destDir, Path.GetFileName(file));
-            if (File.Exists(dest) && !overwrite) continue;
+            string fileName = Path.GetFileName(file);
+            if (IsVanillaFile(fileName)) continue;
+            string rel = string.IsNullOrWhiteSpace(relativePrefix)
+                ? fileName
+                : $"{relativePrefix.Replace('\\', '/')}/{fileName}";
+            if (includeRelative != null && !includeRelative(rel)) continue;
+            string dest = Path.Combine(destDir, fileName);
+            if (File.Exists(dest))
+            {
+                if (!overwrite) continue;
+                if (IsVanillaFile(Path.GetFileName(dest))) continue;
+            }
+            Directory.CreateDirectory(destDir);
             CopyFileOrThrow(file, dest, true);
             count++;
+            copiedRelativeKeys?.Add(rel);
         }
         foreach (var sub in Directory.GetDirectories(sourceDir))
-            count += CopyDirectoryRecursive(sub, Path.Combine(destDir, Path.GetFileName(sub)), overwrite);
+        {
+            string subName = Path.GetFileName(sub);
+            if (TransferSkipDataFolders.Contains(subName)) continue;
+            if (subName.StartsWith("FO76Edit", StringComparison.OrdinalIgnoreCase)) continue;
+            string nextPrefix = string.IsNullOrWhiteSpace(relativePrefix)
+                ? subName
+                : $"{relativePrefix.Replace('\\', '/')}/{subName}";
+            count += CopyDirectoryRecursive(sub, Path.Combine(destDir, subName), overwrite, nextPrefix, copiedRelativeKeys, includeRelative);
+        }
         return count;
     }
 
@@ -650,6 +777,8 @@ public partial class ModManager
     private string GetModsListCacheKey() =>
         $"{VirtualModMode}|{GetActiveDataPath()}|{GetActiveStringsPath()}|{AppPaths.BundlesPath}|{AppPaths.DisabledModsPath}";
 
+    public const int UnassignedLoadOrder = 9999;
+
         public class ModMetadata
         {
             public string Name { get; set; } = "Unknown Mod";
@@ -661,7 +790,7 @@ public partial class ModManager
             public bool IsEnabled { get; set; } = false;
             public bool IsBundle { get; set; } = false;
             public bool IsLoose { get; set; } = false;
-            public int LoadOrder { get; set; } = 0;
+            public int LoadOrder { get; set; } = UnassignedLoadOrder;
             public List<string> Files { get; set; } = new List<string>();
             public List<string> Directories { get; set; } = new List<string>();
             public long? NexusModId { get; set; }
@@ -728,9 +857,7 @@ public partial class ModManager
         result.IsBundle = result.IsBundle || source.IsBundle;
         result.IsLoose = result.IsLoose || source.IsLoose;
 
-        bool existingLoadOrderIsDefault = result.LoadOrder == 0 || result.LoadOrder == 9999;
-        bool sourceLoadOrderIsSpecific = source.LoadOrder != 0 && source.LoadOrder != 9999;
-        if (existingLoadOrderIsDefault && sourceLoadOrderIsSpecific)
+        if (result.LoadOrder == UnassignedLoadOrder && source.LoadOrder != UnassignedLoadOrder)
         {
             result.LoadOrder = source.LoadOrder;
         }
@@ -843,31 +970,36 @@ public partial class ModManager
         return metadata.TryGetValue(key, out var meta) ? meta : null;
     }
 
-    private Dictionary<string, ModMetadata> LoadMetadata()
+    private Dictionary<string, ModMetadata> LoadMetadata() => LoadMetadataFrom(AppPaths.ModsMetadataFile);
+
+    private Dictionary<string, ModMetadata> LoadMetadataFrom(string path)
     {
         try {
-            if (File.Exists(AppPaths.ModsMetadataFile)) {
-                string json = File.ReadAllText(AppPaths.ModsMetadataFile);
+            if (File.Exists(path)) {
+                string json = File.ReadAllText(path);
                 var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
                 var loaded = JsonSerializer.Deserialize<Dictionary<string, ModMetadata>>(json, options);
                 var raw = new Dictionary<string, ModMetadata>(loaded ?? new(), StringComparer.OrdinalIgnoreCase);
                 return CanonicalizeMetadata(raw);
             }
         } catch (Exception ex) {
-            _logger($"[ERROR] Failed to load metadata from {AppPaths.ModsMetadataFile}: {ex.Message}");
+            _logger($"[ERROR] Failed to load metadata from {path}: {ex.Message}");
         }
         return new Dictionary<string, ModMetadata>(StringComparer.OrdinalIgnoreCase);
     }
 
-    private void SaveMetadata(Dictionary<string, ModMetadata> metadata)
+    private void SaveMetadata(Dictionary<string, ModMetadata> metadata) => SaveMetadataTo(AppPaths.ModsMetadataFile, metadata);
+
+    private void SaveMetadataTo(string path, Dictionary<string, ModMetadata> metadata)
     {
         try {
             var canonical = CanonicalizeMetadata(metadata);
             string json = JsonSerializer.Serialize(canonical, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(AppPaths.ModsMetadataFile, json);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, json);
             InvalidateModsListCache();
         } catch (Exception ex) {
-            _logger($"[ERROR] Failed to save metadata to {AppPaths.ModsMetadataFile}: {ex.Message}");
+            _logger($"[ERROR] Failed to save metadata to {path}: {ex.Message}");
         }
     }
 
@@ -963,7 +1095,7 @@ public partial class ModManager
             existing.IsEnabled = meta.IsEnabled;
             if (meta.IsBundle) existing.IsBundle = true;
             if (meta.IsLoose) existing.IsLoose = true;
-            if (meta.LoadOrder != 0) existing.LoadOrder = meta.LoadOrder;
+            if (meta.LoadOrder != UnassignedLoadOrder) existing.LoadOrder = meta.LoadOrder;
             if (meta.Files != null && meta.Files.Count > 0) existing.Files = meta.Files;
             
             if (targetKey != originalName)
@@ -2372,10 +2504,9 @@ public partial class ModManager
                         ConfigFileMerger.IsRootLooseConfigPath(listRel) &&
                         File.Exists(destPath))
                     {
-                        if (ConfigFileMerger.TryMergeAdditive(destPath, abs, out var merged, out var mergeSummary))
+                        if (ConfigFileMerger.MergeIntoFile(destPath, abs, ConfigMergeBackupRoot, out var mergeSummary, out bool mergeChanged, out string? mergeBackup))
                         {
-                            ConfigFileMerger.WriteMergedFile(destPath, merged);
-                            _logger($"[IMPORT] Merged config {listRel}: {mergeSummary}");
+                            _logger($"[IMPORT] Merged config {listRel}: {mergeSummary}" + (mergeChanged && mergeBackup != null ? $" (backup: {mergeBackup})" : ""));
                         }
                         else
                         {
@@ -2802,10 +2933,40 @@ public partial class ModManager
         ImportProgressContext progress)
     {
         var normalized = CollectNormalizedExtractedFiles(tempDir, out var emptyDirectories);
+
+        int skippedIniCount = 0;
+        if (IgnoreArchiveIniFiles)
+        {
+            var kept = new List<(string AbsolutePath, string RelativePath)>();
+            foreach (var item in normalized)
+            {
+                if (Path.GetExtension(item.RelativePath).Equals(".ini", StringComparison.OrdinalIgnoreCase))
+                {
+                    skippedIniCount++;
+                    _logger($"[IMPORT] Skipped archive INI (setting ignoreArchiveIniFiles): {item.RelativePath}");
+                }
+                else
+                {
+                    kept.Add(item);
+                }
+            }
+            normalized = kept;
+            if (skippedIniCount > 0 && normalized.Count > 0)
+                _statusReporter("info", $"Skipped {skippedIniCount} INI file(s) inside '{displayArchiveName}' (Ignore INI files in mod archives is on).");
+        }
+
         if (normalized.Count == 0)
         {
-            _logger($"[IMPORT] No valid mod files found in {displayArchiveName} after extraction.");
-            _statusReporter("warning", $"'{displayArchiveName}' extracted but contained no mod files (BA2/ESM/ESP/strings/INI/loose). It may be a FOMOD/installer archive that needs manual placement.");
+            if (skippedIniCount > 0)
+            {
+                _logger($"[IMPORT] Archive {displayArchiveName} contained only INI files, all skipped by the ignoreArchiveIniFiles setting.");
+                _statusReporter("warning", $"'{displayArchiveName}' only contained INI files, which were skipped by your 'Ignore INI files in mod archives' setting. Nothing was installed.");
+            }
+            else
+            {
+                _logger($"[IMPORT] No valid mod files found in {displayArchiveName} after extraction.");
+                _statusReporter("warning", $"'{displayArchiveName}' extracted but contained no mod files (BA2/ESM/ESP/strings/INI/loose). It may be a FOMOD/installer archive that needs manual placement.");
+            }
             LastImportReportedIssue = true;
             return;
         }
@@ -2874,10 +3035,9 @@ public partial class ModManager
 
                 if (File.Exists(destPath))
                 {
-                    if (ConfigFileMerger.TryMergeAdditive(destPath, abs, out var merged, out var mergeSummary))
+                    if (ConfigFileMerger.MergeIntoFile(destPath, abs, ConfigMergeBackupRoot, out var mergeSummary, out bool mergeChanged, out string? mergeBackup))
                     {
-                        ConfigFileMerger.WriteMergedFile(destPath, merged);
-                        _logger($"[IMPORT] Merged config {key}: {mergeSummary}");
+                        _logger($"[IMPORT] Merged config {key}: {mergeSummary}" + (mergeChanged && mergeBackup != null ? $" (backup: {mergeBackup})" : ""));
                         if (!mergeSummary.StartsWith("No new", StringComparison.OrdinalIgnoreCase))
                             _statusReporter?.Invoke("info", $"Merged {key}: {mergeSummary}");
                     }
@@ -2994,11 +3154,18 @@ public partial class ModManager
             if (!ownerShown) continue;
             if (!isLoosePack && kvp.Value.Files.Count <= 1) continue;
 
+            string primaryBare = StripDisabledPrefix(primary);
+            bool primaryIsInjector = IsGameRootInjectorListPath(primary);
+
             foreach (var f in kvp.Value.Files)
             {
                 string norm = NormalizeMetadataKey(f ?? "");
                 if (string.IsNullOrWhiteSpace(norm)) continue;
                 if (string.Equals(norm, primary, StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(StripDisabledPrefix(norm), primaryBare, StringComparison.OrdinalIgnoreCase)) continue;
+                if (primaryIsInjector &&
+                    string.Equals(Path.GetFileName(norm), Path.GetFileName(primary), StringComparison.OrdinalIgnoreCase))
+                    continue;
                 owned.Add(norm);
                 owned.Add(Path.GetFileName(norm));
                 if (norm.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
@@ -3366,10 +3533,9 @@ public partial class ModManager
                 if (!string.Equals(normalizedSource, normalizedDest, StringComparison.OrdinalIgnoreCase)) {
                     if (ConfigFileMerger.IsLooseConfigExtension(ext) && File.Exists(destPath))
                     {
-                        if (ConfigFileMerger.TryMergeAdditive(destPath, file, out var merged, out var mergeSummary))
+                        if (ConfigFileMerger.MergeIntoFile(destPath, file, ConfigMergeBackupRoot, out var mergeSummary, out bool mergeChanged, out string? mergeBackup))
                         {
-                            ConfigFileMerger.WriteMergedFile(destPath, merged);
-                            _logger($"[IMPORT] Merged config {fileName}: {mergeSummary}");
+                            _logger($"[IMPORT] Merged config {fileName}: {mergeSummary}" + (mergeChanged && mergeBackup != null ? $" (backup: {mergeBackup})" : ""));
                             if (!mergeSummary.StartsWith("No new", StringComparison.OrdinalIgnoreCase))
                                 _statusReporter?.Invoke("info", $"Merged {fileName}: {mergeSummary}");
                         }
@@ -3485,11 +3651,13 @@ public partial class ModManager
 
     public string LastRenameFrom { get; private set; } = "";
     public string LastRenameTo { get; private set; } = "";
+    public List<(string From, string To)> LastRenameCompanions { get; } = new List<(string From, string To)>();
 
     public void RenameMod(string currentName, string newName, string details = "")
     {
         LastRenameFrom = "";
         LastRenameTo = "";
+        LastRenameCompanions.Clear();
         try 
         {
             string normCurrent = NormalizeMetadataKey(currentName);
@@ -3539,12 +3707,52 @@ public partial class ModManager
                 return;
             }
 
-            File.Move(currentPath, newPath);
-            _logger($"[MODS] Renamed {currentName} to {newName}");
-
             string removeKey = !string.IsNullOrEmpty(metaKey) && metadata.ContainsKey(metaKey)
                 ? metaKey
                 : (metadata.ContainsKey(normCurrent) ? normCurrent : currentName);
+
+            var companionMoves = new List<(string SrcPath, string DstPath, string OldKey, string NewKey)>();
+            var keptFiles = new List<string>();
+            if (metadata.TryGetValue(removeKey, out var renameMeta) && renameMeta?.IsBundle == true && renameMeta.Files != null)
+            {
+                string oldBase = Path.GetFileNameWithoutExtension(currentPath);
+                string newBase = Path.GetFileNameWithoutExtension(newPath);
+                string srcDir = Path.GetDirectoryName(currentPath) ?? "";
+                string dstDir = Path.GetDirectoryName(newPath) ?? "";
+                string keyDir = (Path.GetDirectoryName(newName) ?? "").Replace('\\', '/');
+                foreach (var f in renameMeta.Files)
+                {
+                    string oldKey = NormalizeMetadataKey(f ?? "");
+                    string fileName = Path.GetFileName(oldKey);
+                    if (string.IsNullOrWhiteSpace(fileName) ||
+                        string.Equals(fileName, Path.GetFileName(currentPath), StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    string srcPath = Path.Combine(srcDir, fileName);
+                    if (!fileName.StartsWith(oldBase, StringComparison.OrdinalIgnoreCase) || !File.Exists(srcPath))
+                    {
+                        keptFiles.Add(oldKey);
+                        continue;
+                    }
+                    string newFileName = newBase + fileName.Substring(oldBase.Length);
+                    string dstPath = Path.Combine(dstDir, newFileName);
+                    if (File.Exists(dstPath))
+                    {
+                        _statusReporter("error", $"A file with the name {newFileName} already exists.");
+                        return;
+                    }
+                    string newKey = string.IsNullOrEmpty(keyDir) ? newFileName : $"{keyDir}/{newFileName}";
+                    companionMoves.Add((srcPath, dstPath, oldKey, newKey));
+                }
+            }
+
+            File.Move(currentPath, newPath);
+            _logger($"[MODS] Renamed {currentName} to {newName}");
+            foreach (var move in companionMoves)
+            {
+                File.Move(move.SrcPath, move.DstPath);
+                LastRenameCompanions.Add((move.OldKey, move.NewKey));
+                _logger($"[MODS] Renamed {move.OldKey} to {move.NewKey}");
+            }
 
             if (metadata.ContainsKey(removeKey))
             {
@@ -3554,6 +3762,8 @@ public partial class ModManager
                 meta.Name = Path.GetFileNameWithoutExtension(newName);
                 meta.Details = details ?? "";
                 meta.Files = new List<string> { newName };
+                meta.Files.AddRange(companionMoves.Select(m => m.NewKey));
+                meta.Files.AddRange(keptFiles);
                 
                 metadata[newName] = meta;
                 SaveMetadata(metadata);
@@ -3571,7 +3781,12 @@ public partial class ModManager
                 SaveMetadata(metadata);
             }
 
+            LastRenameFrom = removeKey;
+            LastRenameTo = newName;
             _statusReporter("success", $"Renamed to {newName}");
+
+            try { SyncArchiveListToCustomIni(); }
+            catch (Exception ex) { _logger($"[MODS] Archive list refresh after rename failed: {ex.Message}"); }
 
         }
         catch (Exception ex)
@@ -4160,6 +4375,33 @@ public partial class ModManager
             }
         }
 
+    public List<string> GetBundleFilePaths(string bundleKey)
+    {
+        var paths = new List<string>();
+        if (string.IsNullOrWhiteSpace(bundleKey)) return paths;
+
+        var metadata = LoadMetadata();
+        string resolvedKey = ResolveMetadataKey(metadata, bundleKey);
+        var fileNames = new List<string>();
+        if (!string.IsNullOrEmpty(resolvedKey) &&
+            metadata.TryGetValue(resolvedKey, out var meta) &&
+            meta?.Files != null)
+        {
+            fileNames.AddRange(meta.Files);
+        }
+        if (fileNames.Count == 0) fileNames.Add(bundleKey);
+
+        foreach (var name in fileNames)
+        {
+            string fileName = Path.GetFileName(NormalizeMetadataKey(name ?? ""));
+            if (string.IsNullOrWhiteSpace(fileName)) continue;
+            string? path = FindBundleFileOnDisk(fileName) ?? FindBundleFileOnDisk(fileName, AppPaths.DataPath);
+            if (path != null && !paths.Contains(path, StringComparer.OrdinalIgnoreCase))
+                paths.Add(path);
+        }
+        return paths;
+    }
+
     public string ResolveListKeyToFullPath(string relativePath) => GetFullPath(relativePath);
 
     private static bool TryParseStringModDiskName(string? fileName, out string canonicalName, out bool disabledSuffix)
@@ -4506,7 +4748,7 @@ public partial class ModManager
             if (oldMeta != null && !IsConfigListKey(key))
             {
                 if (!string.IsNullOrWhiteSpace(oldMeta.Details)) meta.Details = oldMeta.Details;
-                if (oldMeta.LoadOrder != 0) meta.LoadOrder = oldMeta.LoadOrder;
+                if (oldMeta.LoadOrder != UnassignedLoadOrder) meta.LoadOrder = oldMeta.LoadOrder;
                 if (!oldWasLoosePack &&
                     !string.IsNullOrWhiteSpace(oldMeta.Name) && !oldMeta.Name.Equals("Unknown Mod", StringComparison.OrdinalIgnoreCase))
                     meta.Name = oldMeta.Name;

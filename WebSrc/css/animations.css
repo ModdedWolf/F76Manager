@@ -135,6 +135,9 @@ body.no-animations .mod-row:not(.dragging):hover,
 body.no-animations .endorsement-item:hover .heart-icon {
     transform: none !important;
 }
-body.no-animations :is(.color-slider, .modern-slider, .tweak-range)::-webkit-slider-thumb:hover {
+body.no-animations :is(.color-slider, .modern-slider, .tweak-range, .ba2-audio-slider)::-webkit-slider-thumb:hover {
     transform: none !important;
+}
+body.no-animations .ba2-audio-volume {
+    transition: none !important;
 }

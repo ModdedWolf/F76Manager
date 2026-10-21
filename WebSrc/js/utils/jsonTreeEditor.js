@@ -7,6 +7,11 @@ const COMMENT_GUTTER_PX = 18;
 const isContainer = (v) => v !== null && typeof v === 'object';
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
+function tr(key, fallback, ...args) {
+    const v = typeof window._t === 'function' ? window._t(key, ...args) : '';
+    return v && v !== key ? v : fallback;
+}
+
 function typeOf(v) {
     if (v === null) return 'null';
     if (Array.isArray(v)) return 'array';
@@ -49,6 +54,19 @@ function countNodes(v) {
 function replaceEntries(obj, entries) {
     for (const k of Object.keys(obj)) delete obj[k];
     for (const [k, v] of entries) obj[k] = v;
+}
+
+const SORT_KEY_FIELDS = ['name', 'id', 'key', 'title'];
+
+function sortKey(v) {
+    if (isContainer(v) && !Array.isArray(v)) {
+        for (const k of SORT_KEY_FIELDS) {
+            if (typeof v[k] === 'string') return v[k];
+        }
+        return JSON.stringify(v);
+    }
+    if (Array.isArray(v)) return JSON.stringify(v);
+    return String(v);
 }
 
 function coerceEdit(original, text) {
@@ -182,7 +200,7 @@ export class JsonTreeEditor {
         } else {
             keyEl.className = 'jt-key jt-key--editable';
             keyEl.textContent = key;
-            keyEl.title = 'Click to rename';
+            keyEl.title = tr('json_tree_rename_key', 'Click to rename');
         }
         row.appendChild(keyEl);
 
@@ -204,7 +222,7 @@ export class JsonTreeEditor {
                     const sw = document.createElement('span');
                     sw.className = 'jt-swatch';
                     sw.style.background = color.css;
-                    sw.title = 'Pick color';
+                    sw.title = tr('json_tree_pick_color', 'Pick color');
                     row.appendChild(sw);
                 }
             }
@@ -217,7 +235,9 @@ export class JsonTreeEditor {
             } else {
                 valEl.textContent = type === 'string' ? value : String(value);
             }
-            valEl.title = type === 'boolean' ? 'Click to toggle' : 'Click to edit';
+            valEl.title = type === 'boolean'
+                ? tr('json_tree_toggle', 'Click to toggle')
+                : tr('json_tree_edit', 'Click to edit');
             row.appendChild(valEl);
         }
 
@@ -230,12 +250,36 @@ export class JsonTreeEditor {
 
         const actions = document.createElement('span');
         actions.className = 'jt-actions';
+        if (Array.isArray(parent)) {
+            for (const [cls, glyph, label, disabled] of [
+                ['jt-act--up', '\u2191', tr('json_tree_move_up', 'Move up'), key === 0],
+                ['jt-act--down', '\u2193', tr('json_tree_move_down', 'Move down'), key === parent.length - 1],
+            ]) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = `jt-act ${cls}`;
+                btn.textContent = glyph;
+                btn.title = label;
+                btn.disabled = disabled;
+                actions.appendChild(btn);
+            }
+        }
+        if (type === 'array' && value.length > 1) {
+            const sort = document.createElement('button');
+            sort.type = 'button';
+            sort.className = 'jt-act jt-act--sort';
+            sort.textContent = '\u21C5';
+            sort.title = tr('json_tree_sort', 'Sort');
+            actions.appendChild(sort);
+        }
         if (container || parent != null) {
             const add = document.createElement('button');
             add.type = 'button';
             add.className = 'jt-act jt-act--add';
             add.textContent = '+';
-            add.title = container ? 'Add child' : 'Add after';
+            add.title = container
+                ? tr('json_tree_add_child', 'Add child')
+                : tr('json_tree_add_after', 'Add after');
             actions.appendChild(add);
         }
         if (parent != null) {
@@ -243,7 +287,7 @@ export class JsonTreeEditor {
             rm.type = 'button';
             rm.className = 'jt-act jt-act--remove';
             rm.textContent = '\u00D7';
-            rm.title = 'Remove';
+            rm.title = tr('json_tree_remove', 'Remove');
             actions.appendChild(rm);
         }
         row.appendChild(actions);
@@ -318,6 +362,17 @@ export class JsonTreeEditor {
         }
         if (t.classList.contains('jt-act--add')) {
             this._openAddMenu(t, node, isContainer(value) ? 'child' : 'sibling');
+            return;
+        }
+        if (t.classList.contains('jt-act--up') || t.classList.contains('jt-act--down')) {
+            this._move(node, t.classList.contains('jt-act--up') ? -1 : 1);
+            return;
+        }
+        if (t.classList.contains('jt-act--sort')) {
+            this._openMenu(t, [
+                [tr('json_tree_sort_asc', 'Sort A-Z'), () => this._sort(node, 1)],
+                [tr('json_tree_sort_desc', 'Sort Z-A'), () => this._sort(node, -1)],
+            ]);
             return;
         }
         if (t.classList.contains('jt-swatch')) {
@@ -404,7 +459,7 @@ export class JsonTreeEditor {
                     const flash = document.createElement('span');
                     flash.className = 'jt-key jt-key--editable jt-key--error';
                     flash.textContent = key;
-                    flash.title = `"${text}" already exists`;
+                    flash.title = tr('json_tree_key_exists', `"${text}" already exists`, text);
                     input.replaceWith(flash);
                     setTimeout(() => {
                         if (flash.isConnected) this._rerender(node);
@@ -502,18 +557,63 @@ export class JsonTreeEditor {
         }
     }
 
+    _applyOrder(node, order) {
+        const arr = this._valueAt(node._jt);
+        const copy = arr.slice();
+        order.forEach((from, i) => { arr[i] = copy[from]; });
+        this._emit({ op: 'reorder', path: node._jt.path, order });
+        return this._rerender(node);
+    }
+
+    _move(node, delta) {
+        const { parent, key } = node._jt;
+        if (!Array.isArray(parent)) return;
+        const to = key + delta;
+        if (to < 0 || to >= parent.length) return;
+        const parentNode = this._parentNode(node);
+        if (!parentNode) return;
+        const order = parent.map((_, i) => i);
+        order[key] = to;
+        order[to] = key;
+        const rendered = this._applyOrder(parentNode, order);
+        const moved = rendered && this._childNode(rendered, to);
+        if (!moved) return;
+        moved.scrollIntoView({ block: 'nearest' });
+        const btn = moved.querySelector(`:scope > .jt-row .${delta < 0 ? 'jt-act--up' : 'jt-act--down'}`);
+        if (btn && !btn.disabled) btn.focus();
+    }
+
+    _sort(node, dir) {
+        const arr = this._valueAt(node._jt);
+        if (!Array.isArray(arr) || arr.length < 2) return;
+        const keys = arr.map(sortKey);
+        const order = arr.map((_, i) => i).sort((a, b) =>
+            (keys[a].localeCompare(keys[b], undefined, { numeric: true, sensitivity: 'base' }) * dir) || a - b);
+        if (order.every((v, i) => v === i)) return;
+        this.collapsed.delete(arr);
+        this._applyOrder(node, order);
+    }
+
     _openAddMenu(anchor, node, mode) {
+        this._openMenu(anchor, [
+            ['value', tr('json_tree_add_value', 'Value')],
+            ['object', tr('json_tree_add_object', 'Object {}')],
+            ['array', tr('json_tree_add_array', 'Array []')],
+        ].map(([kind, label]) => [label, () => this._insert(node, mode, kind)]));
+    }
+
+    _openMenu(anchor, items) {
         this._closeMenu();
         const menu = document.createElement('div');
         menu.className = 'jt-menu';
-        for (const [kind, label] of [['value', 'Value'], ['object', 'Object {}'], ['array', 'Array []']]) {
+        for (const [label, run] of items) {
             const b = document.createElement('button');
             b.type = 'button';
             b.textContent = label;
             b.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this._closeMenu();
-                this._insert(node, mode, kind);
+                run();
             });
             menu.appendChild(b);
         }

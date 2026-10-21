@@ -518,6 +518,83 @@ h3,
     border-radius: 4px;
 }
 
+.steam-branch-toggle {
+    display: inline-flex;
+    align-items: stretch;
+    height: 32px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid rgba(102, 192, 244, 0.35);
+    background-color: #121a24;
+    user-select: none;
+}
+
+.steam-branch-toggle[hidden] {
+    display: none !important;
+}
+
+.steam-branch-btn {
+    appearance: none;
+    border: 0;
+    margin: 0;
+    padding: 0 10px;
+    min-width: 44px;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.65);
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.steam-branch-btn:hover {
+    color: #fff;
+    background-color: rgba(102, 192, 244, 0.12);
+}
+
+.steam-branch-btn.active {
+    color: #fff;
+    background-color: #1b2838;
+}
+
+.transfer-install-picker {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 10px 12px;
+    margin: 14px 0 4px;
+    text-align: left;
+}
+
+.transfer-install-picker label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-muted, rgba(255, 255, 255, 0.7));
+}
+
+.transfer-install-picker .tweak-select {
+    width: 100%;
+    min-width: 0;
+}
+
+.transfer-install-picker-error {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--danger-red, #e06c6c);
+}
+
+.transfer-install-picker-hint {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.transfer-install-picker-error[hidden] {
+    display: none;
+}
+
 .platform-badge {
     display: flex;
     align-items: center;
@@ -711,7 +788,7 @@ body:not(.no-platform-glow) .platform-badge.xbox {
     margin: 0;
     font-size: 1.4rem;
     font-weight: 800;
-    color: #fff;
+    color: var(--text-main);
     letter-spacing: -0.5px;
 }
 
@@ -820,7 +897,7 @@ body:not(.no-platform-glow) .platform-badge.xbox {
 
 .btn-popup.secondary:hover {
     background: rgba(255, 255, 255, 0.1);
-    color: #fff;
+    color: var(--text-main);
     border-color: rgba(255, 255, 255, 0.2);
 }
 
@@ -942,7 +1019,7 @@ body:not(.no-platform-glow) .platform-badge.xbox {
 
 .checkbox-label strong {
     font-size: 0.9rem;
-    color: #fff;
+    color: var(--text-main);
 }
 
 .checkbox-label span {
@@ -1008,7 +1085,7 @@ body:not(.no-platform-glow) .platform-badge.xbox {
     margin: 0;
     font-size: 1.4rem;
     font-weight: 800;
-    color: #fff;
+    color: var(--text-main);
     letter-spacing: -0.5px;
 }
 
@@ -1085,10 +1162,47 @@ body:not(.no-platform-glow) .platform-badge.xbox {
     color: var(--text-muted);
 }
 
+#confirm-modal .confirm-prompt-field {
+    position: relative;
+}
+
+#confirm-modal .confirm-prompt-clear {
+    position: absolute;
+    right: 6px;
+    top: 0;
+    bottom: 0;
+    margin: auto 0;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+#confirm-modal .confirm-prompt-clear[hidden] {
+    display: none !important;
+}
+
+#confirm-modal .confirm-prompt-clear:hover {
+    color: var(--text-main);
+    background: rgba(var(--primary-rgb), 0.14);
+}
+
+#confirm-modal .confirm-prompt-clear svg {
+    width: 14px;
+    height: 14px;
+}
+
 #confirm-modal .confirm-prompt-input {
     width: 100%;
     box-sizing: border-box;
-    padding: 12px 14px;
+    padding: 12px 36px 12px 14px;
     border-radius: 10px;
     border: 1px solid rgba(var(--primary-rgb), 0.2);
     background: rgba(0, 0, 0, 0.45);
@@ -1102,6 +1216,101 @@ body:not(.no-platform-glow) .platform-badge.xbox {
 #confirm-modal .confirm-prompt-input:focus {
     border-color: var(--primary-green);
     box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.25);
+}
+
+#confirm-modal #confirm-alt[hidden] {
+    display: none !important;
+}
+
+#confirm-modal.confirm-modal--compact.modal-overlay.active {
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: none;
+    padding: 24px;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-content {
+    max-width: 420px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-header {
+    padding: 18px 20px 0;
+    background: none;
+    border-bottom: none;
+}
+
+#confirm-modal.confirm-modal--compact #confirm-icon,
+#confirm-modal.confirm-modal--compact .endorsement-modal-title svg,
+#confirm-modal.confirm-modal--compact #confirm-close-top {
+    display: none;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-title h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-body {
+    padding: 12px 20px 4px;
+}
+
+#confirm-modal.confirm-modal--compact .confirm-prompt-wrap {
+    margin-top: 0;
+    gap: 6px;
+}
+
+#confirm-modal.confirm-modal--compact .confirm-prompt-input {
+    padding: 8px 34px 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-inset);
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    font-size: 0.9rem;
+    box-shadow: none;
+}
+
+#confirm-modal.confirm-modal--compact .confirm-prompt-input:focus {
+    border-color: var(--primary-green);
+    box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2);
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-footer {
+    padding: 16px 20px 18px;
+    background: none;
+    border-top: none;
+    gap: 8px;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-footer .btn-popup {
+    height: 34px;
+    padding: 0 16px !important;
+    box-shadow: none !important;
+    transform: none;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-footer .btn-popup.secondary {
+    background: var(--bg-surface-light) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-main) !important;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-footer .btn-popup.secondary:hover {
+    border-color: rgba(var(--primary-rgb), 0.45) !important;
+    color: var(--primary-green) !important;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-footer .btn-popup.primary {
+    background: var(--primary-green) !important;
+    color: var(--on-primary) !important;
+    border: none !important;
+}
+
+#confirm-modal.confirm-modal--compact .endorsement-modal-footer .btn-popup.primary:hover {
+    background: var(--primary-hover) !important;
 }
     border: 1px solid rgba(var(--primary-rgb), 0.15);
     word-break: break-all;

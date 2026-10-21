@@ -116,7 +116,7 @@ if ($DebugOnly) {
     exit 0
 }
 
-$keepFolders = @("Backups", "Bundles", "BundledThemes", "Disabled Mods", "Logs", "Managed Staging", "Nexus", "Profiles", "Settings", "Themes")
+$keepFolders = @("Backups", "Bundles", "BundledThemes", "Disabled Mods", "Logs", "Managed Staging", "Nexus", "Profiles", "PTS", "Settings", "Themes")
 $procs = @("F76Manager.exe", "F76ManagerApp.exe", "F76MUpdater.exe")
 foreach ($p in $procs) {
     try { cmd /c "taskkill /F /IM $p /T 2>nul" } catch {}
@@ -167,7 +167,7 @@ if (Test-Path $bundledSrc) {
 
 Write-Host "Publishing Release build..." -ForegroundColor Yellow
 Push-Location $sourceDir
-dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:DebugType=none /p:DebugSymbols=false
+dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:DebugType=none /p:DebugSymbols=false /p:SkipWebBundle=true
 if (!$?) { Pop-Location; exit 1 }
 Pop-Location
 

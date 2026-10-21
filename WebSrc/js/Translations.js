@@ -23,6 +23,13 @@ export class Translator {
                  console.warn("[Translator] Failed to load detected language, sticking to fallback.", e);
              }
         }
+        this.applyDocumentLanguage();
+    }
+
+    applyDocumentLanguage() {
+        if (typeof document === 'undefined' || !document.documentElement) return;
+        const lang = String(this.currentLanguage || this.fallbackLanguage);
+        document.documentElement.lang = lang === 'template-LANG' ? this.fallbackLanguage : lang;
     }
 
     async setLanguage(lang) {
@@ -43,6 +50,7 @@ export class Translator {
             console.error(`[Translator] Failed to load ${lang}, falling back to ${this.fallbackLanguage}`);
             this.currentLanguage = this.fallbackLanguage;
         }
+        this.applyDocumentLanguage();
     }
 
     loadLanguage(lang) {

@@ -52,10 +52,11 @@ namespace F76ManagerApp.Managers
 
         public void CreateBundle(string bundleName, List<string> modFiles, List<string>? sourceFolders, List<Ba2PartialSelection>? partialExtractions, string compressionLevel, string format, Action onComplete)
         {
-            CreateBundle(bundleName, modFiles, sourceFolders, partialExtractions, null, compressionLevel, format, onComplete);
+            CreateBundle(bundleName, modFiles, sourceFolders, partialExtractions, null, compressionLevel, format,
+                onComplete == null ? null : (Action<List<string>>)(_ => onComplete()));
         }
 
-        public void CreateBundle(string bundleName, List<string> modFiles, List<string>? sourceFolders, List<Ba2PartialSelection>? partialExtractions, List<FolderPartialSelection>? folderPartialExtractions, string compressionLevel, string format, Action onComplete)
+        public void CreateBundle(string bundleName, List<string> modFiles, List<string>? sourceFolders, List<Ba2PartialSelection>? partialExtractions, List<FolderPartialSelection>? folderPartialExtractions, string compressionLevel, string format, Action<List<string>>? onComplete)
         {
             var folders = sourceFolders ?? new List<string>();
             var partials = partialExtractions ?? new List<Ba2PartialSelection>();
@@ -295,7 +296,7 @@ namespace F76ManagerApp.Managers
                     }
                     _toggleCallback(modsToDisable.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), false);
                     
-                    onComplete?.Invoke();
+                    onComplete?.Invoke(generatedFiles);
                 } catch (Exception ex) {
                     _errorLogger($"[BUNDLE] FAILED: {ex.Message}");
                     _statusCallback?.Invoke("error", $"Failed to create bundle: {ex.Message}");

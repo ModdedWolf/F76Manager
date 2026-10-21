@@ -164,10 +164,11 @@ function renderTreeNode(node, folderPath, manager, depth = 0, readOnly = false) 
                     data-check-type="file"
                     data-file-path="${escapeAttr(normPath)}"
                     ${isChecked ? 'checked' : ''}>`;
+        const isPreviewing = !readOnly && manager.previewPath === normPath;
         html += `
-            <div class="ba2-tree-row ba2-tree-file${readOnly ? ' ba2-tree-row--readonly' : ''}" style="padding-left: ${pad}px">
+            <div class="ba2-tree-row ba2-tree-file${readOnly ? ' ba2-tree-row--readonly' : ''}${isPreviewing ? ' ba2-tree-file--previewing' : ''}" data-preview-path="${escapeAttr(normPath)}" style="padding-left: ${pad}px">
                 ${fileCheckHtml}
-                <i data-lucide="file" class="ba2-tree-file-icon"></i>
+                <i data-lucide="${fileIconName(file.name)}" class="ba2-tree-file-icon"></i>
                 <span class="ba2-tree-file-name">${escapeHtml(file.name)}</span>
                 <span class="ba2-tree-file-size">${escapeHtml(formatBa2Size(file.size))}</span>
             </div>
@@ -258,35 +259,46 @@ function renderStagedRootsHtml(manager) {
     return html;
 }
 
+function getInspectorCountLabel(manager) {
+    const key = manager.getArchiveSelectionKey();
+    if (!key) return '';
+    const hasFilter = Boolean(manager.inspectorFilter);
+    const selectedCount = hasFilter
+        ? manager.getFilteredSelectedCount(key)
+        : manager.getSelectedCount(key);
+    const totalCount = hasFilter
+        ? manager.getFilteredEntryCount()
+        : (manager.ba2TotalPaths.get(key) || manager.inspectorFileCount || 0);
+    if (!totalCount) return '';
+    return hasFilter
+        ? window._t('inspector_selected_count_filtered', selectedCount, totalCount)
+        : window._t('inspector_selected_count', selectedCount, totalCount);
+}
+
+function renderExplorerTreeHtml(manager) {
+    return buildBa2ExplorerTreeHtml(manager, { unified: true });
+}
+
 function renderInspectorToolbar(manager) {
     if (manager.inspectedFolderPath) {
         const pathDisplay = manager.inspectedFolderPath;
         const pathTooltip = escapeAttr(pathDisplay);
         const pathText = escapeHtml(pathDisplay);
         const filterValue = escapeAttr(manager.inspectorFilter || '');
-        const folderKey = manager.getArchiveSelectionKey();
-        const hasFilter = Boolean(manager.inspectorFilter);
-        const selectedCount = folderKey
-            ? (hasFilter ? manager.getFilteredSelectedCount(folderKey) : manager.getSelectedCount(folderKey))
-            : 0;
-        const totalCount = folderKey
-            ? (hasFilter ? manager.getFilteredEntryCount() : (manager.ba2TotalPaths.get(folderKey) || manager.inspectorFileCount || 0))
-            : 0;
-        const countLabel = totalCount
-            ? (hasFilter
-                ? window._t('inspector_selected_count_filtered', selectedCount, totalCount)
-                : window._t('inspector_selected_count', selectedCount, totalCount))
-            : '';
+        const countLabel = getInspectorCountLabel(manager);
 
         return `
         <div class="bundle-inspector-pathbar">
             <div class="bundle-path-bar" title="${pathTooltip}">${pathText}</div>
             <div class="search-box bundle-inspector-search-wrap">
                 <i data-lucide="search"></i>
-                <input type="search" id="ba2-inspector-filter" class="bundle-field" placeholder="${escapeHtml(window._t('inspector_search_placeholder'))}" value="${filterValue}">
+                <input type="text" id="ba2-inspector-filter" class="bundle-field" placeholder="${escapeHtml(window._t('inspector_search_placeholder'))}" value="${filterValue}">
+                <button type="button" class="search-clear" id="ba2-inspector-filter-clear" title="${escapeAttr(window._t('clear_search'))}" aria-label="${escapeAttr(window._t('clear_search'))}" ${manager.inspectorFilter ? '' : 'hidden'}>
+                    <i data-lucide="x"></i>
+                </button>
             </div>
             <div class="bundle-inspector-pathbar-meta">
-                ${countLabel ? `<span>${escapeHtml(countLabel)}</span>` : ''}
+                <span id="ba2-inspector-count">${escapeHtml(countLabel)}</span>
             </div>
             <div class="bundle-inspector-pathbar-actions">
                 <button type="button" class="bundle-text-btn" id="btn-inspector-select-all">${window._t('inspector_select_all')}</button>
@@ -305,19 +317,8 @@ function renderInspectorToolbar(manager) {
     `).join('');
     const filterValue = escapeAttr(manager.inspectorFilter || '');
     const archiveKey = manager.getArchiveSelectionKey();
-    const hasFilter = Boolean(manager.inspectorFilter);
-    const selectedCount = archiveKey
-        ? (hasFilter ? manager.getFilteredSelectedCount(archiveKey) : manager.getSelectedCount(archiveKey))
-        : 0;
-    const totalCount = archiveKey
-        ? (hasFilter ? manager.getFilteredEntryCount() : (manager.ba2TotalPaths.get(archiveKey) || manager.inspectorFileCount || 0))
-        : 0;
     const canExtract = archiveKey && manager.getEffectiveSelectionPaths(archiveKey).length > 0;
-    const countLabel = totalCount
-        ? (hasFilter
-            ? window._t('inspector_selected_count_filtered', selectedCount, totalCount)
-            : window._t('inspector_selected_count', selectedCount, totalCount))
-        : '';
+    const countLabel = getInspectorCountLabel(manager);
     const showStagedSwitcher = stagedSources.length >= 2;
 
     return `
@@ -330,11 +331,14 @@ function renderInspectorToolbar(manager) {
             <div class="bundle-path-bar" title="${pathTooltip}">${pathText}</div>
             <div class="search-box bundle-inspector-search-wrap">
                 <i data-lucide="search"></i>
-                <input type="search" id="ba2-inspector-filter" class="bundle-field" placeholder="${escapeHtml(window._t('inspector_search_placeholder'))}" value="${filterValue}">
+                <input type="text" id="ba2-inspector-filter" class="bundle-field" placeholder="${escapeHtml(window._t('inspector_search_placeholder'))}" value="${filterValue}">
+                <button type="button" class="search-clear" id="ba2-inspector-filter-clear" title="${escapeAttr(window._t('clear_search'))}" aria-label="${escapeAttr(window._t('clear_search'))}" ${manager.inspectorFilter ? '' : 'hidden'}>
+                    <i data-lucide="x"></i>
+                </button>
             </div>
             <div class="bundle-inspector-pathbar-meta">
                 ${manager.inspectorArchiveType ? `<span>${escapeHtml(manager.inspectorArchiveType)}</span>` : ''}
-                ${totalCount ? `<span>${escapeHtml(countLabel)}</span>` : ''}
+                <span id="ba2-inspector-count">${escapeHtml(countLabel)}</span>
             </div>
             <div class="bundle-inspector-pathbar-actions">
                 <button type="button" class="bundle-text-btn" id="btn-inspector-select-all">${window._t('inspector_select_all')}</button>
@@ -460,13 +464,13 @@ function renderInspectorContent(manager) {
     const isInspecting = Boolean(manager.inspectedBa2Path || manager.inspectedFolderPath);
 
     let inspectBlock = '';
-    if (manager.inspectorLoading && isInspecting) {
+    if (isInspecting) {
         inspectBlock = `
-            <div class="ba2-explorer-tree">${buildBa2ExplorerTreeHtml(manager, { unified: true })}</div>
-        `;
-    } else if (isInspecting) {
-        inspectBlock = `
-            <div class="ba2-explorer-tree">${buildBa2ExplorerTreeHtml(manager, { unified: true })}</div>
+            <div class="ba2-inspector-split">
+                <div class="ba2-explorer-tree">${buildBa2ExplorerTreeHtml(manager, { unified: true })}</div>
+                ${renderPreviewPaneHtml(manager)}
+            </div>
+            <div id="ba2-audio-dock-slot">${renderAudioDockHtml(manager)}</div>
         `;
     } else if (stagedBa2s.length > 0) {
         inspectBlock = `
@@ -492,6 +496,379 @@ function renderInspectorContent(manager) {
     `;
 }
 
+function previewFileName(path) {
+    const parts = String(path || '').split('/');
+    return parts[parts.length - 1] || path;
+}
+
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'flac', 'xwm', 'fuz']);
+
+function fileIconName(fileName) {
+    const ext = String(fileName || '').split('.').pop().toLowerCase();
+    return AUDIO_EXTENSIONS.has(ext) ? 'file-audio' : 'file';
+}
+
+function formatAudioDuration(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatSampleRate(hz) {
+    if (!hz) return '';
+    return hz >= 1000 ? `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)} kHz` : `${hz} Hz`;
+}
+
+function renderPreviewPaneHtml(manager) {
+    const canExtract = Boolean(manager.inspectedBa2Path && manager.previewPath);
+    const isAudioResult = manager.previewResult?.kind === 'audio';
+    const extractBtn = canExtract && !isAudioResult
+        ? `<button type="button" class="bundle-text-btn ba2-preview-extract" id="btn-preview-extract">${escapeHtml(window._t('preview_extract_file'))}</button>`
+        : '';
+
+    let body;
+    if (!manager.previewPath) {
+        body = `<div class="ba2-preview-empty">${escapeHtml(window._t('preview_hint'))}</div>`;
+    } else if (manager.previewLoading) {
+        body = `
+            <div class="ba2-preview-header">
+                <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
+            </div>
+            <div class="ba2-preview-empty">${escapeHtml(window._t('preview_loading'))}</div>
+        `;
+    } else if (manager.previewResult?.kind === 'image' && manager.previewResult.dataUrl) {
+        const result = manager.previewResult;
+        const meta = [];
+        if (result.width && result.height) meta.push(`${result.width}×${result.height}`);
+        if (result.format) meta.push(result.format);
+        if (result.mips) meta.push(window._t('preview_mips', result.mips));
+        if (result.size) meta.push(formatBa2Size(result.size));
+        const small = result.width && result.height && Math.max(result.width, result.height) <= 256;
+        body = `
+            <div class="ba2-preview-header">
+                <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
+                <div class="ba2-preview-meta">${escapeHtml(meta.join(' · '))}</div>
+            </div>
+            <div class="ba2-preview-stage${small ? ' ba2-preview-stage--small' : ''}"><img alt="" src="${escapeAttr(result.dataUrl)}"></div>
+        `;
+    } else if (manager.previewResult?.kind === 'audio') {
+        body = renderAudioPreview(manager, manager.previewResult);
+    } else if (manager.previewResult?.kind === 'material') {
+        body = renderMaterialPreview(manager, manager.previewResult);
+    } else if (manager.previewResult?.kind === 'hex') {
+        body = renderHexPreview(manager, manager.previewResult);
+    } else if (manager.previewResult?.kind === 'mesh') {
+        body = renderMeshPreview(manager, manager.previewResult);
+    } else if (manager.previewResult?.kind === 'text') {
+        const result = manager.previewResult;
+        body = `
+            <div class="ba2-preview-header">
+                <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
+                <div class="ba2-preview-meta">${escapeHtml(formatBa2Size(result.size))}</div>
+            </div>
+            ${result.truncated ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_truncated'))}</div>` : ''}
+            <pre class="ba2-preview-text">${escapeHtml(result.text || '')}</pre>
+        `;
+    } else {
+        const result = manager.previewResult;
+        const meta = [];
+        if (result?.format) meta.push(result.format);
+        if (result?.width && result?.height) meta.push(`${result.width}×${result.height}`);
+        if (result?.size) meta.push(formatBa2Size(result.size));
+        const message = result?.error === 'unsupported'
+            ? window._t('preview_unsupported_format')
+            : window._t('preview_unavailable');
+        body = `
+            <div class="ba2-preview-header">
+                <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
+                ${meta.length ? `<div class="ba2-preview-meta">${escapeHtml(meta.join(' · '))}</div>` : ''}
+            </div>
+            <div class="ba2-preview-empty">${escapeHtml(message)}</div>
+        `;
+    }
+
+    const isAudioPreview = isAudioResult || (manager.previewLoading && isAudioPath(manager.previewPath));
+    const hidden = !manager.previewPath || (isAudioPreview && !manager._audioInfoOpen)
+        ? ' ba2-preview-pane--hidden'
+        : '';
+    return `
+        <aside class="ba2-preview-pane${hidden}">
+            ${body}
+            ${extractBtn}
+        </aside>
+    `;
+}
+
+function renderAudioPreview(manager, result) {
+    const audio = result.audio || {};
+    const meta = [];
+    if (audio.codec) meta.push(audio.codec);
+    if (audio.sampleRate) meta.push(formatSampleRate(audio.sampleRate));
+    if (audio.channels === 1) meta.push(window._t('preview_audio_mono'));
+    else if (audio.channels === 2) meta.push(window._t('preview_audio_stereo'));
+    else if (audio.channels) meta.push(window._t('preview_audio_channels', audio.channels));
+    if (audio.duration) meta.push(formatAudioDuration(audio.duration));
+    if (result.size) meta.push(formatBa2Size(result.size));
+
+    const rows = [];
+    if (audio.codec) rows.push([window._t('preview_audio_codec'), audio.codec]);
+    if (audio.sampleRate) rows.push([window._t('preview_audio_sample_rate'), formatSampleRate(audio.sampleRate)]);
+    if (audio.channels) rows.push([window._t('preview_audio_channels_label'),
+        audio.channels === 1 ? window._t('preview_audio_mono')
+            : audio.channels === 2 ? window._t('preview_audio_stereo')
+            : String(audio.channels)]);
+    if (audio.duration) rows.push([window._t('preview_audio_duration'), formatAudioDuration(audio.duration)]);
+    if (result.size) rows.push([window._t('preview_audio_size'), formatBa2Size(result.size)]);
+    const rowsHtml = rows.map(([label, value]) => `
+            <div class="ba2-audio-row">
+                <span class="ba2-audio-label">${escapeHtml(label)}</span>
+                <span class="ba2-audio-value">${escapeHtml(String(value))}</span>
+            </div>`).join('');
+    const lip = audio.lipBytes
+        ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_audio_lip', formatBa2Size(audio.lipBytes)))}</div>`
+        : '';
+    return `
+        ${previewHeader(manager, meta.join(' · '))}
+        ${rowsHtml ? `<div class="ba2-audio-info">${rowsHtml}</div>` : ''}
+        ${lip}
+        <div class="ba2-preview-audio-hint">${escapeHtml(window._t('preview_audio_space_hint'))}</div>
+    `;
+}
+
+function isAudioPath(path) {
+    const ext = String(path || '').split('.').pop().toLowerCase();
+    return AUDIO_EXTENSIONS.has(ext);
+}
+
+function audioDockSubtitle(manager, audio) {
+    const parts = [];
+    const segments = String(manager.previewPath || '').split('/').filter(Boolean);
+    if (segments.length > 1) parts.push(segments[segments.length - 2]);
+    if (audio.codec) parts.push(audio.codec);
+    if (audio.sampleRate) parts.push(formatSampleRate(audio.sampleRate));
+    if (audio.channels === 1) parts.push(window._t('preview_audio_mono'));
+    else if (audio.channels === 2) parts.push(window._t('preview_audio_stereo'));
+    else if (audio.channels) parts.push(window._t('preview_audio_channels', audio.channels));
+    if (audio.silent) parts.push(window._t('preview_audio_silent_label'));
+    return parts.join(' • ');
+}
+
+function renderAudioDockHtml(manager) {
+    const isAudio = manager.previewResult?.kind === 'audio';
+    const isLoading = !isAudio && manager.previewLoading && isAudioPath(manager.previewPath);
+    if (!isAudio && !isLoading) return '';
+
+    const result = isAudio ? manager.previewResult : {};
+    const audio = result.audio || {};
+    const audioUrl = result.audioUrl ? `https://f76manager.app/${result.audioUrl}` : '';
+    const totalLabel = audio.duration ? formatAudioDuration(audio.duration) : '0:00';
+    const volumePercent = Math.round((manager._audioVolume ?? 1) * 100);
+    const playLabel = window._t('preview_audio_play');
+    const subtitle = isLoading ? window._t('preview_loading') : audioDockSubtitle(manager, audio);
+    const disabled = isLoading ? 'disabled' : '';
+    return `
+        <div class="ba2-audio-dock${isLoading ? ' ba2-audio-dock--loading' : ''}">
+            ${isAudio ? `<audio preload="metadata" class="ba2-preview-audio-hidden" id="ba2-preview-audio"
+                data-audio-url="${escapeAttr(audioUrl)}"></audio>` : ''}
+            <input type="range" class="ba2-audio-slider ba2-audio-seek" id="ba2-audio-seek"
+                min="0" max="10000" value="0" step="1" style="--value: 0%" ${disabled}
+                title="${escapeAttr(window._t('preview_audio_seek'))}" aria-label="${escapeAttr(window._t('preview_audio_seek'))}">
+            <div class="ba2-audio-player" id="ba2-audio-player">
+                <div class="ba2-audio-dock-info">
+                    <div class="ba2-audio-dock-art"><i data-lucide="audio-lines"></i></div>
+                    <div class="ba2-audio-dock-text">
+                        <div class="ba2-audio-dock-name" title="${escapeAttr(manager.previewPath || '')}">${escapeHtml(previewFileName(manager.previewPath))}</div>
+                        <div class="ba2-audio-dock-sub">${escapeHtml(subtitle)}</div>
+                    </div>
+                </div>
+                <div class="ba2-audio-dock-controls">
+                    <button type="button" class="ba2-audio-icon-btn" id="ba2-audio-prev"
+                        title="${escapeAttr(window._t('preview_audio_prev'))}" aria-label="${escapeAttr(window._t('preview_audio_prev'))}">
+                        <i data-lucide="skip-back"></i>
+                    </button>
+                    <button type="button" class="ba2-audio-play" id="ba2-audio-play" ${disabled}
+                        title="${escapeAttr(playLabel)} (Space)" aria-label="${escapeAttr(playLabel)}">
+                        <span id="ba2-audio-icon-play"><i data-lucide="play"></i></span>
+                        <span id="ba2-audio-icon-pause" hidden><i data-lucide="pause"></i></span>
+                    </button>
+                    <button type="button" class="ba2-audio-icon-btn" id="ba2-audio-next"
+                        title="${escapeAttr(window._t('preview_audio_next'))}" aria-label="${escapeAttr(window._t('preview_audio_next'))}">
+                        <i data-lucide="skip-forward"></i>
+                    </button>
+                </div>
+                <div class="ba2-audio-dock-right">
+                    ${manager.inspectedBa2Path ? `<button type="button" class="ba2-audio-extract" id="ba2-audio-extract" ${disabled}
+                        title="${escapeAttr(window._t('preview_extract_file'))}" aria-label="${escapeAttr(window._t('preview_extract_file'))}">
+                        <i data-lucide="download"></i><span class="ba2-audio-extract-label">${escapeHtml(window._t('preview_extract_file'))}</span>
+                    </button>` : ''}
+                    <span class="ba2-audio-time" id="ba2-audio-time">0:00 / ${escapeHtml(totalLabel)}</span>
+                    <button type="button" class="ba2-audio-icon-btn" id="ba2-audio-loop" ${disabled}
+                        title="${escapeAttr(window._t('preview_audio_loop'))}" aria-label="${escapeAttr(window._t('preview_audio_loop'))}" aria-pressed="false">
+                        <i data-lucide="repeat"></i>
+                    </button>
+                    <button type="button" class="ba2-audio-icon-btn${manager._audioInfoOpen ? ' ba2-audio-icon-btn--on' : ''}" id="ba2-audio-info"
+                        title="${escapeAttr(window._t('preview_audio_info'))}" aria-label="${escapeAttr(window._t('preview_audio_info'))}" aria-pressed="${manager._audioInfoOpen ? 'true' : 'false'}">
+                        <i data-lucide="info"></i>
+                    </button>
+                    <div class="ba2-audio-volume-group">
+                        <button type="button" class="ba2-audio-icon-btn" id="ba2-audio-mute"
+                            title="${escapeAttr(window._t('preview_audio_mute'))}" aria-label="${escapeAttr(window._t('preview_audio_mute'))}">
+                            <span id="ba2-audio-icon-volume"><i data-lucide="volume-2"></i></span>
+                            <span id="ba2-audio-icon-muted" hidden><i data-lucide="volume-x"></i></span>
+                        </button>
+                        <input type="range" class="ba2-audio-slider ba2-audio-volume" id="ba2-audio-volume"
+                            min="0" max="100" value="${volumePercent}" step="1" style="--value: ${volumePercent}%"
+                            title="${escapeAttr(window._t('preview_audio_volume'))}" aria-label="${escapeAttr(window._t('preview_audio_volume'))}">
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function previewHeader(manager, meta) {
+    return `
+        <div class="ba2-preview-header">
+            <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
+            ${meta ? `<div class="ba2-preview-meta">${escapeHtml(meta)}</div>` : ''}
+        </div>
+    `;
+}
+
+function roleLabel(role) {
+    const key = `preview_role_${role || 'texture'}`;
+    const text = window._t(key);
+    return text === key ? window._t('preview_role_texture') : text;
+}
+
+function renderMaterialPreview(manager, result) {
+    const material = result.material || {};
+    const textures = Array.isArray(material.textures) ? material.textures : [];
+    const zoom = manager.previewMaterialZoom;
+    if (zoom != null && textures[zoom]?.dataUrl) {
+        const tex = textures[zoom];
+        return `
+            ${previewHeader(manager, roleLabel(tex.role))}
+            <button type="button" class="bundle-text-btn" id="btn-preview-material-back">${escapeHtml(window._t('preview_material_back'))}</button>
+            <div class="ba2-preview-stage"><img alt="" src="${escapeAttr(tex.dataUrl)}"></div>
+            <div class="ba2-preview-note">${escapeHtml(tex.path || '')}</div>
+        `;
+    }
+
+    const meta = [material.signature, material.version ? `v${material.version}` : ''].filter(Boolean).join(' ');
+    const rows = textures.map((tex, index) => {
+        const thumb = tex.dataUrl
+            ? `<button type="button" class="ba2-material-thumb" data-material-texture="${index}"><img alt="" src="${escapeAttr(tex.dataUrl)}"></button>`
+            : `<div class="ba2-material-thumb ba2-material-thumb--missing">${escapeHtml(window._t('preview_texture_missing'))}</div>`;
+        const where = tex.found ? (tex.archive || '') : window._t('preview_texture_missing');
+        return `
+            <div class="ba2-material-row">
+                ${thumb}
+                <div class="ba2-material-copy">
+                    <div class="ba2-material-role">${escapeHtml(roleLabel(tex.role))}</div>
+                    <div class="ba2-material-path" title="${escapeAttr(tex.path || '')}">${escapeHtml(tex.path || '')}</div>
+                    <div class="ba2-material-where">${escapeHtml(where)}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+    const template = material.template
+        ? `<div class="ba2-preview-note">${escapeHtml(material.template)}</div>`
+        : '';
+    return `
+        ${previewHeader(manager, meta)}
+        ${template}
+        <div class="ba2-material-list">${rows || `<div class="ba2-preview-empty">${escapeHtml(window._t('preview_unavailable'))}</div>`}</div>
+    `;
+}
+
+function renderHexPreview(manager, result) {
+    const shown = Math.min(result.size || 0, 4096);
+    const note = result.error === 'mesh_too_large'
+        ? window._t('preview_mesh_too_large')
+        : result.error === 'audio_decode_failed'
+            ? window._t('preview_audio_decode_failed')
+            : result.error === 'audio_codec_unsupported'
+                ? window._t('preview_audio_codec_unsupported')
+                : window._t('preview_hex_note', formatBa2Size(shown), formatBa2Size(result.size));
+    return `
+        ${previewHeader(manager, formatBa2Size(result.size))}
+        <div class="ba2-preview-note">${escapeHtml(note)}</div>
+        <pre class="ba2-preview-text ba2-preview-hex">${escapeHtml(formatHexDump(result.hex))}</pre>
+    `;
+}
+
+function formatHexDump(base64) {
+    let bin = '';
+    try { bin = atob(base64 || ''); } catch (_) { return ''; }
+    const lines = [];
+    for (let i = 0; i < bin.length; i += 16) {
+        const hex = [];
+        let ascii = '';
+        for (let j = 0; j < 16; j++) {
+            if (i + j < bin.length) {
+                const code = bin.charCodeAt(i + j);
+                hex.push(code.toString(16).padStart(2, '0'));
+                ascii += code >= 32 && code < 127 ? bin[i + j] : '.';
+            } else {
+                hex.push('  ');
+            }
+        }
+        lines.push(`${i.toString(16).padStart(8, '0')}  ${hex.join(' ')}  ${ascii}`);
+    }
+    return lines.join('\n');
+}
+
+function textureReason(shape) {
+    const status = shape.textureStatus || 'ok';
+    if (status === 'ok') return '';
+    const path = shape.texturePath || shape.material || '';
+    if (status === 'material_not_found') return window._t('preview_tex_material_not_found', path);
+    if (status === 'no_diffuse') return window._t('preview_tex_no_diffuse', path);
+    if (status === 'texture_not_found') return window._t('preview_tex_not_found', path);
+    if (status === 'decode_failed') return window._t('preview_tex_decode_failed', path, shape.textureFormat || '');
+    return window._t('preview_tex_no_material');
+}
+
+function renderMeshPreview(manager, result) {
+    const mesh = result.mesh || {};
+    const shapes = Array.isArray(mesh.shapes) ? mesh.shapes : [];
+    const boneCount = mesh.bones && Array.isArray(mesh.bones.names) ? mesh.bones.names.length : 0;
+    const skeleton = boneCount > 0 && shapes.length === 0;
+    const materials = [...new Set(shapes.map(shape => shape.material).filter(Boolean))];
+    const meta = skeleton
+        ? window._t('preview_skeleton', boneCount)
+        : window._t('preview_mesh_stats', shapes.length, mesh.vertexCount || 0, mesh.triangleCount || 0);
+    const skipped = mesh.skipped
+        ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_shapes_skipped', mesh.skipped))}</div>`
+        : '';
+    const materialNote = materials.length
+        ? `<div class="ba2-preview-note" title="${escapeAttr(materials.join('\n'))}">${escapeHtml(materials[0])}${materials.length > 1 ? ` +${materials.length - 1}` : ''}</div>`
+        : '';
+    const reasons = shapes
+        .map(shape => textureReason(shape))
+        .filter(Boolean);
+    const reasonHtml = reasons.length
+        ? `<ul class="ba2-preview-reasons">${reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>`
+        : '';
+    const wire = skeleton
+        ? ''
+        : `<button type="button" class="bundle-text-btn" id="btn-mesh-wire">${escapeHtml(window._t('preview_wireframe'))}</button>`;
+    return `
+        ${previewHeader(manager, meta)}
+        ${materialNote}
+        ${reasonHtml}
+        ${skipped}
+        <div class="ba2-preview-stage ba2-preview-stage--mesh" id="ba2-mesh-stage"></div>
+        <div class="ba2-preview-mesh-tools">
+            ${wire}
+            <button type="button" class="bundle-text-btn" id="btn-mesh-reset">${escapeHtml(window._t('preview_reset_view'))}</button>
+            <span class="ba2-preview-mesh-hint">${escapeHtml(window._t('preview_mesh_controls'))}</span>
+        </div>
+    `;
+}
+
 function getFilteredInspectorEntries(manager) {
     const filter = manager.inspectorFilter || '';
     let entries = manager.ba2Contents || [];
@@ -512,6 +889,24 @@ function findTreeNodeAtPath(root, folderPath) {
     return node;
 }
 
+function collectFolderPaths(manager, { foldersWithSubfoldersOnly = false } = {}) {
+    const entries = getFilteredInspectorEntries(manager);
+    if (!entries.length) return [];
+    const tree = buildTreeFromEntries(entries);
+    const out = [];
+    const walk = (node, folderPath) => {
+        for (const key of Object.keys(node.folders).sort((a, b) => a.localeCompare(b))) {
+            const child = node.folders[key];
+            const childPath = folderPath ? `${folderPath}/${key}` : key;
+            const hasSubfolders = Object.keys(child.folders).length > 0;
+            if (!foldersWithSubfoldersOnly || hasSubfolders) out.push(childPath);
+            walk(child, childPath);
+        }
+    };
+    walk(tree, '');
+    return out;
+}
+
 function renderFolderChildrenHtml(manager, folderPath) {
     const entries = getFilteredInspectorEntries(manager);
     if (!entries.length) return '';
@@ -525,7 +920,12 @@ function renderFolderChildrenHtml(manager, folderPath) {
 export const BundleRenderer = {
     renderInspectorContent,
     renderInspectorToolbar,
+    renderExplorerTreeHtml,
+    getInspectorCountLabel,
     renderFolderChildrenHtml,
+    collectFolderPaths,
+    renderPreviewPaneHtml,
+    renderAudioDockHtml,
 
     render(manager, data) {
         if (manager.isCreating) {
@@ -717,10 +1117,15 @@ export const BundleRenderer = {
                                     <option value="DDS">${window._t('bundle_format_dds')}</option>
                                 </select>
                             </label>
-                            <label class="bundle-field-group bundle-field-group--grow">
+                            <div class="bundle-field-group bundle-field-group--grow">
                                 <span class="bundle-field-label">${window._t('output_name')}</span>
-                                <input type="text" id="bundle-name-input" placeholder="MyAmazingBundle" class="bundle-field" value="${escapeAttr(manager.bundleName)}" title="${escapeAttr(window._t('created_in_bundles_dir'))}">
-                            </label>
+                                <div class="bundle-input-clear-wrap">
+                                    <input type="text" id="bundle-name-input" placeholder="MyAmazingBundle" class="bundle-field" value="${escapeAttr(manager.bundleName)}" title="${escapeAttr(window._t('created_in_bundles_dir'))}">
+                                    <button type="button" class="search-clear" id="bundle-name-clear" title="${escapeAttr(window._t('clear_text'))}" aria-label="${escapeAttr(window._t('clear_text'))}" ${manager.bundleName ? '' : 'hidden'}>
+                                        <i data-lucide="x"></i>
+                                    </button>
+                                </div>
+                            </div>
                             <label class="bundle-field-group">
                                 <span class="bundle-field-label">${window._t('compression_level')}</span>
                                 <select id="bundle-compression-select" class="bundle-field">

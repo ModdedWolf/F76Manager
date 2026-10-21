@@ -1,0 +1,17 @@
+WmaDecoder is a managed port of parts of FFmpeg's Windows Media Audio
+v1/v2 decoder (libavcodec/wma.c, libavcodec/wmadec.c, libavcodec/wmadata.h,
+libavcodec/aactab.c scale-factor tables, libavformat/xwma.c container logic).
+
+FFmpeg is free software; you can redistribute it and/or modify it under the
+terms of the GNU Lesser General Public License as published by the Free
+Software Foundation; either version 2.1 of the License, or (at your option)
+any later version.
+
+FFmpeg is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for
+more details.
+
+The full text of the GNU LGPL-2.1 is available at
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+Upstream source: https://git.ffmpeg.org/ffmpeg.git

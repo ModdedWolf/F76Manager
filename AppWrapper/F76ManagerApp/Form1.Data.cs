@@ -149,8 +149,12 @@ public partial class Form1
                     platformBadgeGlow = platformBadgeGlow,
                     syncPlatforms = syncPlatforms,
                     autoForceDeploy = autoForceDeploy,
+                    ignoreArchiveIniFiles = ignoreArchiveIniFiles,
                     virtualModMode = virtualModMode,
                     configEditorSpellCheck = configEditorSpellCheck,
+                    configEditorKeepOpen = configEditorKeepOpen,
+                    configEditorFontSize = configEditorFontSize,
+                    configEditorFontFamily = configEditorFontFamily,
                     confirmBeforeDeleteMod = confirmBeforeDeleteMod,
                     confirmBeforeRemoveOldModOnUpdate = confirmBeforeRemoveOldModOnUpdate,
                     updateModsInAllPresets = updateModsInAllPresets,
@@ -172,6 +176,10 @@ public partial class Form1
                 modPresets = GetModPresetsObjectForWeb(),
                 modGroups = GetModPresetsObjectForWeb(),
                 platform = _platformManager.GetPlatformLabel(),
+                steamBranch = (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts) ? "pts" : "live",
+                ptsAvailable = IsPtsPathAvailable(),
+                xboxAvailable = IsXboxPathAvailable(),
+                liveAvailable = IsLivePathAvailable(),
                 conflictsCount = _conflictManager != null ? _conflictManager.LastConflictCount : 0,
                 configHealth = deferHeavyWork ? BuildConfigHealthQuick() : BuildConfigHealth(),
                 importedCollection = BuildImportedCollectionPayload(),
@@ -817,6 +825,9 @@ public partial class Form1
                 if (root.TryGetProperty("steamDocsPath", out var sdp)) steamDocsPath = sdp.GetString() ?? steamDocsPath;
                 if (root.TryGetProperty("steamLocalPath", out var slp)) steamLocalPath = slp.GetString() ?? steamLocalPath;
                 if (root.TryGetProperty("steamStringsPath", out var ssp)) steamStringsPath = ssp.GetString() ?? steamStringsPath;
+                if (root.TryGetProperty("ptsGamePath", out var pgp)) ptsGamePath = pgp.GetString() ?? ptsGamePath;
+                if (root.TryGetProperty("ptsStringsPath", out var psp)) ptsStringsPath = psp.GetString() ?? ptsStringsPath;
+                if (root.TryGetProperty("steamPtsActive", out var spa)) steamPtsActive = spa.GetBoolean();
 
                 if (root.TryGetProperty("xboxGamePath", out var xgp)) xboxGamePath = xgp.GetString() ?? xboxGamePath;
                 if (root.TryGetProperty("xboxDocsPath", out var xdp)) xboxDocsPath = xdp.GetString() ?? xboxDocsPath;
@@ -846,9 +857,13 @@ public partial class Form1
                 if (root.TryGetProperty("platformBadgeGlow", out var pbg)) platformBadgeGlow = pbg.GetBoolean();
                 if (root.TryGetProperty("syncPlatforms", out var spr)) syncPlatforms = spr.GetBoolean();
                 if (root.TryGetProperty("autoForceDeploy", out var afd)) autoForceDeploy = afd.GetBoolean();
+                if (root.TryGetProperty("ignoreArchiveIniFiles", out var iaif)) ignoreArchiveIniFiles = iaif.GetBoolean();
                 if (root.TryGetProperty("virtualModMode", out var vmm)) virtualModMode = vmm.GetBoolean();
                 else if (root.TryGetProperty("managedVanillaMode", out var mvm)) virtualModMode = mvm.GetBoolean();
                 if (root.TryGetProperty("configEditorSpellCheck", out var cesc)) configEditorSpellCheck = cesc.GetBoolean();
+                if (root.TryGetProperty("configEditorKeepOpen", out var ceko)) configEditorKeepOpen = ceko.GetBoolean();
+                if (root.TryGetProperty("configEditorFontSize", out var cefs)) configEditorFontSize = NormalizeConfigEditorFontSize(cefs, configEditorFontSize);
+                if (root.TryGetProperty("configEditorFontFamily", out var ceff)) configEditorFontFamily = NormalizeConfigEditorFontFamily(ceff, configEditorFontFamily);
                 if (root.TryGetProperty("confirmBeforeDeleteMod", out var cbddm)) confirmBeforeDeleteMod = cbddm.GetBoolean();
                 if (root.TryGetProperty("confirmBeforeRemoveOldModOnUpdate", out var cbroou)) confirmBeforeRemoveOldModOnUpdate = cbroou.GetBoolean();
                 if (root.TryGetProperty("updateModsInAllPresets", out var umiap)) updateModsInAllPresets = umiap.GetBoolean();
@@ -872,6 +887,10 @@ public partial class Form1
                     modPresetsJson = mp.GetRawText();
                 if (root.TryGetProperty("activeModPreset", out var amp))
                     activeModPreset = amp.GetString() ?? activeModPreset;
+                if (root.TryGetProperty("ptsModPresets", out var pmp))
+                    ptsModPresetsJson = pmp.GetRawText();
+                if (root.TryGetProperty("ptsActiveModPreset", out var pamp))
+                    ptsActiveModPreset = pamp.GetString() ?? ptsActiveModPreset;
                 if (root.TryGetProperty("activeProfile", out var apProf))
                 {
                     string? savedProfile = apProf.GetString();
@@ -1086,12 +1105,39 @@ public partial class Form1
                     _platformManager.SetPlatform(
                         PlatformManager.DetectPlatformFromGamePath(gamePath, GamePlatform.Steam));
                 }
+
+            if (_platformManager.CurrentPlatform == GamePlatform.Steam)
+                _platformManager.SetPts(steamPtsActive);
+            else
+            {
+                steamPtsActive = false;
+                _platformManager.SetPts(false);
+            }
+
+            if (string.IsNullOrWhiteSpace(liveModPresetsJson))
+            {
+                liveModPresetsJson = modPresetsJson;
+                liveActiveModPreset = activeModPreset;
+            }
+            if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts)
+                LoadModPresetsForBranch(true);
+            else
+                LoadModPresetsForBranch(false);
             
             if (string.IsNullOrEmpty(steamGamePath) && !string.IsNullOrEmpty(gamePath) && 
                 _platformManager.CurrentPlatform == GamePlatform.Steam && 
-                !gamePath.Contains("XboxGames", StringComparison.OrdinalIgnoreCase)) 
+                !_platformManager.IsPts &&
+                !gamePath.Contains("XboxGames", StringComparison.OrdinalIgnoreCase) &&
+                !PlatformManager.LooksLikePtsGamePath(gamePath)) 
             {
                 steamGamePath = gamePath;
+            }
+
+            if (string.IsNullOrEmpty(ptsGamePath) && !string.IsNullOrEmpty(gamePath) &&
+                _platformManager.CurrentPlatform == GamePlatform.Steam &&
+                (_platformManager.IsPts || PlatformManager.LooksLikePtsGamePath(gamePath)))
+            {
+                ptsGamePath = gamePath;
             }
             
             if (string.IsNullOrEmpty(xboxGamePath) && !string.IsNullOrEmpty(gamePath) && 
@@ -1106,15 +1152,31 @@ public partial class Form1
             if (string.IsNullOrEmpty(steamLocalPath) && !string.IsNullOrEmpty(localAppDataPath)) steamLocalPath = localAppDataPath;
             if (string.IsNullOrEmpty(xboxLocalPath) && !string.IsNullOrEmpty(localAppDataPath)) xboxLocalPath = localAppDataPath;
 
-            if (string.IsNullOrEmpty(steamStringsPath) && !string.IsNullOrEmpty(stringsPath)) steamStringsPath = stringsPath;
+            if (string.IsNullOrEmpty(steamStringsPath) && !string.IsNullOrEmpty(stringsPath) && !_platformManager.IsPts)
+                steamStringsPath = stringsPath;
+            if (string.IsNullOrEmpty(ptsStringsPath) && !string.IsNullOrEmpty(stringsPath) && _platformManager.IsPts)
+                ptsStringsPath = stringsPath;
             if (string.IsNullOrEmpty(xboxStringsPath) && !string.IsNullOrEmpty(stringsPath)) xboxStringsPath = stringsPath;
 
-            if (_platformManager.CurrentPlatform == GamePlatform.Steam && !string.IsNullOrEmpty(steamStringsPath))
+            if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts)
+            {
+                if (!string.IsNullOrEmpty(ptsGamePath)) gamePath = ptsGamePath;
+                else if (string.IsNullOrEmpty(gamePath))
+                {
+                    ptsGamePath = _platformManager.GetDefaultPtsGamePath();
+                    gamePath = ptsGamePath;
+                }
+                if (!string.IsNullOrEmpty(ptsStringsPath))
+                    stringsPath = ptsStringsPath;
+                else if (!string.IsNullOrEmpty(gamePath))
+                    stringsPath = GetDefaultStringsPathFromGamePath(gamePath);
+            }
+            else if (_platformManager.CurrentPlatform == GamePlatform.Steam && !string.IsNullOrEmpty(steamStringsPath))
                 stringsPath = steamStringsPath;
             else if (_platformManager.CurrentPlatform == GamePlatform.Xbox && !string.IsNullOrEmpty(xboxStringsPath))
                 stringsPath = xboxStringsPath;
 
-            if (_platformManager.CurrentPlatform == GamePlatform.Steam && string.IsNullOrEmpty(gamePath)) 
+            if (_platformManager.CurrentPlatform == GamePlatform.Steam && !_platformManager.IsPts && string.IsNullOrEmpty(gamePath)) 
                  gamePath = steamGamePath;
             else if (_platformManager.CurrentPlatform == GamePlatform.Xbox && string.IsNullOrEmpty(gamePath))
                  gamePath = xboxGamePath;
@@ -1133,6 +1195,8 @@ public partial class Form1
             s["stringsPath"] = stringsPath;
             
             s["steamGamePath"] = steamGamePath; s["steamDocsPath"] = steamDocsPath; s["steamLocalPath"] = steamLocalPath; s["steamStringsPath"] = steamStringsPath;
+            s["ptsGamePath"] = ptsGamePath; s["ptsStringsPath"] = ptsStringsPath;
+            s["steamPtsActive"] = steamPtsActive && _platformManager.CurrentPlatform == GamePlatform.Steam;
             s["xboxGamePath"] = xboxGamePath; s["xboxDocsPath"] = xboxDocsPath; s["xboxLocalPath"] = xboxLocalPath; s["xboxStringsPath"] = xboxStringsPath;
             s["lastPlatform"] = (int)_platformManager.CurrentPlatform;
             s["minimizeToTray"] = minimizeToTray;
@@ -1155,8 +1219,12 @@ public partial class Form1
             s["platformBadgeGlow"] = platformBadgeGlow;
             s["syncPlatforms"] = syncPlatforms;
             s["autoForceDeploy"] = autoForceDeploy;
+            s["ignoreArchiveIniFiles"] = ignoreArchiveIniFiles;
             s["virtualModMode"] = virtualModMode;
             s["configEditorSpellCheck"] = configEditorSpellCheck;
+            s["configEditorKeepOpen"] = configEditorKeepOpen;
+            s["configEditorFontSize"] = configEditorFontSize;
+            s["configEditorFontFamily"] = configEditorFontFamily;
             s["confirmBeforeDeleteMod"] = confirmBeforeDeleteMod;
             s["confirmBeforeRemoveOldModOnUpdate"] = confirmBeforeRemoveOldModOnUpdate;
             s["updateModsInAllPresets"] = updateModsInAllPresets;
@@ -1164,9 +1232,35 @@ public partial class Form1
             s["uiTheme"] = uiTheme;
             s["sevenZipPath"] = sevenZipPath;
             s["rarExtractorPath"] = rarExtractorPath;
-            try { s["modPresets"] = JsonDocument.Parse(EnsureModPresetsInitialized()).RootElement; }
+            bool ptsActive = _platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts;
+            EnsureModPresetsInitialized();
+            if (ptsActive)
+            {
+                ptsModPresetsJson = modPresetsJson;
+                ptsActiveModPreset = activeModPreset;
+                if (string.IsNullOrWhiteSpace(liveModPresetsJson))
+                    liveModPresetsJson = BuildDefaultModPresetsJson();
+            }
+            else
+            {
+                liveModPresetsJson = modPresetsJson;
+                liveActiveModPreset = activeModPreset;
+            }
+
+            try { s["modPresets"] = JsonDocument.Parse(string.IsNullOrWhiteSpace(liveModPresetsJson) ? EnsureModPresetsInitialized() : liveModPresetsJson).RootElement; }
             catch { s["modPresets"] = BuildDefaultModPresetsObject(); }
-            s["activeModPreset"] = activeModPreset;
+            s["activeModPreset"] = ptsActive
+                ? (string.IsNullOrWhiteSpace(liveActiveModPreset) ? DefaultModPresetName : liveActiveModPreset)
+                : activeModPreset;
+
+            try
+            {
+                string ptsRaw = string.IsNullOrWhiteSpace(ptsModPresetsJson) ? BuildDefaultModPresetsJson() : ptsModPresetsJson;
+                s["ptsModPresets"] = JsonDocument.Parse(ptsRaw).RootElement;
+            }
+            catch { s["ptsModPresets"] = BuildDefaultModPresetsObject(); }
+            s["ptsActiveModPreset"] = string.IsNullOrWhiteSpace(ptsActiveModPreset) ? DefaultModPresetName : ptsActiveModPreset;
+
             s["activeProfile"] = activeProfile;
             try { s["modGroups"] = JsonDocument.Parse(modPresetsJson).RootElement; } catch { s["modGroups"] = new object(); }
 
@@ -2016,7 +2110,7 @@ public partial class Form1
         SaveSettings();
     }
 
-    private void AddImportedKeysToActivePreset(IEnumerable<string> importedKeys)
+    private void AddImportedKeysToActivePreset(IEnumerable<string> importedKeys, bool markEnabled = true, bool persist = true)
     {
         if (importedKeys == null) return;
         try
@@ -2040,14 +2134,17 @@ public partial class Form1
                 if (string.IsNullOrWhiteSpace(key)) continue;
                 if (AppPaths.IsProtectedCoreIniListKey(key)) continue;
                 if (mods.Add(key)) added++;
-                enabled.Add(key);
+                if (markEnabled) enabled.Add(key);
             }
             if (added == 0 && enabled.SetEquals(preset.Enabled ?? new List<string>()))
                 return;
 
             preset.Mods = mods.ToList();
             preset.Enabled = enabled.ToList();
-            PersistModPresets(presets);
+            if (persist)
+                PersistModPresets(presets);
+            else
+                modPresetsJson = JsonSerializer.Serialize(presets);
             LogActivity($"[PRESETS] Added {added} imported mod(s) to '{name}'.");
         }
         catch (Exception ex)

@@ -369,6 +369,50 @@ function applyInsert(src, container, index, key, value) {
     return splice(src, [{ start: pos, end: pos, text: childIndent + item + ',' + eol }]);
 }
 
+function applyReorder(src, container, order) {
+    const kids = container.children;
+    const n = kids.length;
+    if (container.type !== 'array' || !Array.isArray(order) || order.length !== n) return null;
+    if (new Set(order).size !== n || order.some((i) => !Number.isInteger(i) || i < 0 || i >= n)) return null;
+    if (order.every((v, i) => v === i)) return src;
+
+    const tokens = scan(src);
+    const comments = tokens.filter((t) => t.type === 'comment');
+    const sameLine = (a, b) => !/[\r\n]/.test(src.slice(a, b));
+    const bodies = [];
+    const tails = [];
+    let prevEnd = container.start + 1;
+    for (let i = 0; i < n; i++) {
+        const kid = kids[i];
+        let start = kid.start;
+        for (const c of comments) {
+            if (c.start < prevEnd || c.end > kid.start) continue;
+            if (i > 0 && sameLine(prevEnd, c.start)) continue;
+            start = c.start;
+            break;
+        }
+        let end = kid.end;
+        if (kid.comma >= 0) {
+            for (const c of comments) {
+                if (c.start >= kid.end && c.end <= kid.comma) end = Math.max(end, c.end);
+            }
+        }
+        const tailStart = kid.comma >= 0 ? kid.comma + 1 : end;
+        const tailEnd = trailingCommentEnd(tokens, src, tailStart);
+        bodies.push({ start, end });
+        tails.push({ start: tailStart, end: tailEnd });
+        prevEnd = kid.comma >= 0 ? kid.comma + 1 : kid.end;
+    }
+
+    const edits = [];
+    for (let i = 0; i < n; i++) {
+        const from = order[i];
+        edits.push({ start: bodies[i].start, end: bodies[i].end, text: src.slice(bodies[from].start, bodies[from].end) });
+        edits.push({ start: tails[i].start, end: tails[i].end, text: src.slice(tails[from].start, tails[from].end) });
+    }
+    return splice(src, edits);
+}
+
 export function applyEdit(text, edit) {
     const src = String(text ?? '');
     if (!edit || !Array.isArray(edit.path)) return null;
@@ -399,6 +443,10 @@ export function applyEdit(text, edit) {
             if (container.type === 'object' && (edit.key === undefined || edit.key === null)) return null;
             const index = Number.isInteger(edit.index) ? edit.index : container.children.length;
             return applyInsert(src, container, index, edit.key, edit.value);
+        }
+        case 'reorder': {
+            if (!found.node || found.node.type !== 'array') return null;
+            return applyReorder(src, found.node, edit.order);
         }
         default:
             return null;

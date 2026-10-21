@@ -516,7 +516,7 @@
 }
 
 .log-content {
-    color: #d1d1d1;
+    color: var(--text-main);
 }
 
 .log-line.error .log-content {
@@ -1667,7 +1667,7 @@ body.no-animations .btn {
 .hex-input-transparent {
     background: transparent;
     border: none;
-    color: #fff;
+    color: var(--text-main);
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.95rem;
     width: 65px;
@@ -1889,7 +1889,7 @@ body.no-animations .btn {
 .tweaks-page {
     padding: 0;
     height: 100%;
-    color: #e0e0e0;
+    color: var(--text-main);
     font-family: 'Inter', sans-serif;
     display: flex;
     flex-direction: column;
@@ -1910,14 +1910,14 @@ body.no-animations .btn {
 .presets-label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: #888;
+    color: var(--text-muted);
     white-space: nowrap;
 }
 
 .preset-btn {
     background: transparent;
     border: 1px solid var(--border-color);
-    color: #aaa;
+    color: var(--text-muted);
     padding: 5px 15px;
     border-radius: 20px;
     font-size: 0.8rem;
@@ -1929,7 +1929,7 @@ body.no-animations .btn {
 
 .preset-btn:hover {
     border-color: #555;
-    color: #fff;
+    color: var(--text-main);
 }
 
 .preset-btn.active {
@@ -2000,12 +2000,12 @@ body.no-animations .btn {
 .tweak-label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: #e0e0e0;
+    color: var(--text-main);
 }
 
 .tweak-desc {
     font-size: 0.75rem;
-    color: #888;
+    color: var(--text-muted);
     line-height: 1.2;
 }
 
@@ -2452,7 +2452,7 @@ input:checked+.slider:before {
 }
 
 .log-content {
-    color: #e0e0e0;
+    color: var(--text-main);
 }
 
 .empty-terminal {

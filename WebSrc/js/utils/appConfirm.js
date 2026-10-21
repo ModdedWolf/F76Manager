@@ -35,7 +35,11 @@ export function dismissAppConfirm(result = false) {
     _confirmCleanup = null;
     try { cleanup?.(); } catch (_) { }
     const overlay = document.getElementById('confirm-modal');
-    if (overlay) overlay.classList.remove('active');
+    if (overlay) overlay.classList.remove('active', 'confirm-modal--compact');
+    const altBtn = document.getElementById('confirm-alt');
+    if (altBtn) altBtn.hidden = true;
+    const promptClear = document.getElementById('confirm-prompt-clear');
+    if (promptClear) promptClear.hidden = true;
     if (pending) {
         try { pending(result); } catch (_) { }
     }
@@ -49,9 +53,11 @@ export function appConfirm(options = {}) {
         const iconEl = document.getElementById('confirm-icon');
         const okBtn = document.getElementById('confirm-ok');
         const cancelBtn = document.getElementById('confirm-cancel');
+        const altBtn = document.getElementById('confirm-alt');
         const closeTopBtn = document.getElementById('confirm-close-top');
         const promptWrap = document.getElementById('confirm-prompt-wrap');
         const promptInput = document.getElementById('confirm-prompt-input');
+        const promptClear = document.getElementById('confirm-prompt-clear');
         const promptLabel = document.getElementById('confirm-prompt-label');
         if (!overlay || !titleEl || !msgEl || !okBtn || !cancelBtn) {
             console.warn('[appConfirm] #confirm-modal elements missing');
@@ -64,10 +70,15 @@ export function appConfirm(options = {}) {
         const t = window._t;
         const isDanger = !!options.danger;
         const isPrompt = !!options.prompt;
+        overlay.classList.toggle('confirm-modal--compact', !!options.compact);
         titleEl.textContent = options.title ?? 'Confirmation';
         msgEl.innerHTML = _formatConfirmMessageHtml(options.message ?? '');
         msgEl.style.whiteSpace = 'normal';
         msgEl.hidden = isPrompt && !options.message;
+
+        const syncPromptClear = () => {
+            if (promptClear) promptClear.hidden = !isPrompt || !promptInput?.value;
+        };
 
         if (promptWrap && promptInput) {
             if (isPrompt) {
@@ -83,6 +94,7 @@ export function appConfirm(options = {}) {
                 promptWrap.hidden = true;
                 promptInput.value = '';
             }
+            syncPromptClear();
         }
 
         okBtn.textContent = options.okText ?? options.confirmLabel ?? 'OK';
@@ -90,6 +102,11 @@ export function appConfirm(options = {}) {
             ?? (typeof t === 'function' ? t('cancel') : 'Cancel');
         if (closeTopBtn) {
             closeTopBtn.setAttribute('aria-label', cancelBtn.textContent);
+        }
+        const hasAlt = !!(altBtn && options.altText && !isPrompt);
+        if (altBtn) {
+            altBtn.hidden = !hasAlt;
+            altBtn.textContent = hasAlt ? options.altText : '';
         }
 
         if (iconEl) {
@@ -101,19 +118,26 @@ export function appConfirm(options = {}) {
         const cleanupListeners = () => {
             okBtn.removeEventListener('click', onOk);
             cancelBtn.removeEventListener('click', onCancel);
+            if (altBtn) altBtn.removeEventListener('click', onAlt);
             if (closeTopBtn) closeTopBtn.removeEventListener('click', onCancel);
             overlay.removeEventListener('click', onOverlayClick);
             document.removeEventListener('keydown', onKeydown);
-            if (promptInput) promptInput.removeEventListener('keydown', onPromptKeydown);
+            if (promptInput) {
+                promptInput.removeEventListener('keydown', onPromptKeydown);
+                promptInput.removeEventListener('input', onPromptInput);
+            }
+            if (promptClear) promptClear.removeEventListener('click', onClear);
         };
 
         const finish = (value) => {
             if (_confirmPendingResolve !== resolve) return;
             _confirmPendingResolve = null;
             _confirmCleanup = null;
-            overlay.classList.remove('active');
+            overlay.classList.remove('active', 'confirm-modal--compact');
             if (promptWrap) promptWrap.hidden = true;
             if (msgEl) msgEl.hidden = false;
+            if (altBtn) altBtn.hidden = true;
+            if (promptClear) promptClear.hidden = true;
             cleanupListeners();
             resolve(value);
             try {
@@ -136,6 +160,7 @@ export function appConfirm(options = {}) {
             finish(true);
         };
         const onCancel = () => finish(isPrompt ? null : false);
+        const onAlt = () => finish('alt');
         const onOverlayClick = (e) => {
             if (e.target === overlay) finish(isPrompt ? null : false);
         };
@@ -151,16 +176,29 @@ export function appConfirm(options = {}) {
                 onOk();
             }
         };
+        const onPromptInput = () => syncPromptClear();
+        const onClear = (e) => {
+            e.preventDefault();
+            if (!promptInput) return;
+            promptInput.value = '';
+            syncPromptClear();
+            try { promptInput.focus(); } catch (_) { }
+        };
 
         _confirmPendingResolve = resolve;
         _confirmCleanup = cleanupListeners;
 
         okBtn.addEventListener('click', onOk);
         cancelBtn.addEventListener('click', onCancel);
+        if (hasAlt) altBtn.addEventListener('click', onAlt);
         if (closeTopBtn) closeTopBtn.addEventListener('click', onCancel);
         overlay.addEventListener('click', onOverlayClick);
         document.addEventListener('keydown', onKeydown);
-        if (isPrompt && promptInput) promptInput.addEventListener('keydown', onPromptKeydown);
+        if (isPrompt && promptInput) {
+            promptInput.addEventListener('keydown', onPromptKeydown);
+            promptInput.addEventListener('input', onPromptInput);
+        }
+        if (isPrompt && promptClear) promptClear.addEventListener('click', onClear);
 
         overlay.classList.add('active');
         if (window.lucide) {

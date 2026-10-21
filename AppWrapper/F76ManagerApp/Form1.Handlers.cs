@@ -1059,6 +1059,12 @@ public partial class Form1
                             LogError("[RCV] UPDATE_SETTING ignored due to missing/invalid payload.");
                         }
                         break;
+                    case "SAVE_CONFIG_EDITOR_FONT":
+                        HandleSaveConfigEditorFont(root);
+                        break;
+                    case "CONFIG_EDITOR_FIND_ACTIVE":
+                        SetConfigEditorFindActive(root.TryGetProperty("active", out var findActive) && findActive.ValueKind == JsonValueKind.True);
+                        break;
                     case "UPDATE_SETTINGS_BATCH": 
                         string? pn = null;
                         if (root.TryGetProperty("presetName", out var pElem) && pElem.ValueKind == JsonValueKind.String) pn = pElem.GetString();
@@ -1198,11 +1204,23 @@ public partial class Form1
                     case "RESET_CONFIG": HandleResetConfig(); break;
                     case "CLEAR_CACHE": await HandleClearCacheTask(); break;
                     case "SWITCH_PLATFORM": HandleSwitchPlatform(); break;
+                    case "SWITCH_STEAM_BRANCH": HandleSwitchSteamBranch(); break;
                     case "TRANSFER_MODS_ACROSS_PLATFORMS":
                     {
-                        string transferDirection = TryGetString(root, "direction", out var tDir) ? tDir : "to-other";
                         bool transferOverwrite = !TryGetBool(root, "overwrite", out var tOw) || tOw;
-                        HandleTransferModsAcrossPlatforms(transferDirection, transferOverwrite);
+                        string transferScope = TryGetString(root, "scope", out var tScope) ? tScope : "mods";
+                        string transferSource = NormalizeInstallId(TryGetString(root, "source", out var tSrc) ? tSrc : null);
+                        string transferTarget = NormalizeInstallId(TryGetString(root, "target", out var tDst) ? tDst : null);
+                        if (transferSource.Length == 0 || transferTarget.Length == 0)
+                        {
+                            string currentInstall = GetCurrentInstallId();
+                            string otherInstall = GetLegacyOtherInstallId(currentInstall);
+                            bool fromOther = TryGetString(root, "direction", out var tDir)
+                                && string.Equals(tDir, "from-other", StringComparison.OrdinalIgnoreCase);
+                            transferSource = fromOther ? otherInstall : currentInstall;
+                            transferTarget = fromOther ? currentInstall : otherInstall;
+                        }
+                        HandleTransferModsBetweenInstalls(transferSource, transferTarget, transferScope, transferOverwrite);
                         break;
                     }
                     case "SAVE_PIPBOY_COLORS":
@@ -1257,7 +1275,8 @@ public partial class Form1
                             string bCompression = (root.TryGetProperty("compression", out var cProp) && cProp.ValueKind == JsonValueKind.String) ? (cProp.GetString() ?? "Default") : "Default";
                             string bFormat = (root.TryGetProperty("format", out var formatProp) && formatProp.ValueKind == JsonValueKind.String) ? (formatProp.GetString() ?? "Auto") : "Auto";
 
-                            _bundleManager.CreateBundle(bName, bMods, bFolders, bPartial, bFolderPartial, bCompression, bFormat, () => this.Invoke(() => {
+                            _bundleManager.CreateBundle(bName, bMods, bFolders, bPartial, bFolderPartial, bCompression, bFormat, generatedFiles => this.Invoke(() => {
+                                AddNewBundleToActiveProfileAndPreset(generatedFiles);
                                 RefreshConflictCount();
                                 SendDataToWeb();
                             }));
@@ -1270,12 +1289,33 @@ public partial class Form1
                         if (TryGetString(root, "archive", out var extractArchive, required: true))
                         {
                             var extractPaths = GetStringList(root, "paths");
-                            HandleBundleExtract(extractArchive, extractPaths);
+                            if (extractPaths.Count == 1)
+                                HandleBundleExtractSingle(extractArchive, extractPaths[0]);
+                            else
+                                HandleBundleExtract(extractArchive, extractPaths);
                         }
                         break;
                     case "BUNDLE_LIST_BA2":
                         if (TryGetString(root, "path", out var listBa2Path, required: true))
                             HandleBundleListBa2(listBa2Path);
+                        break;
+                    case "BUNDLE_ADD_DROPPED_FILES":
+                        HandleBundleDroppedFiles(e.AdditionalObjects);
+                        break;
+                    case "BUNDLE_PREVIEW_FILE":
+                        if (TryGetString(root, "source", out var previewSource, required: true) &&
+                            TryGetString(root, "path", out var previewEntryPath, required: true))
+                        {
+                            string previewMode = TryGetString(root, "mode", out var previewModeValue) ? previewModeValue : "ba2";
+                            int previewRequestId = 0;
+                            if (root.TryGetProperty("requestId", out var previewRequestProp) &&
+                                previewRequestProp.ValueKind == JsonValueKind.Number &&
+                                previewRequestProp.TryGetInt32(out var previewRequestValue))
+                            {
+                                previewRequestId = previewRequestValue;
+                            }
+                            HandleBundlePreviewFile(previewSource, previewMode, previewEntryPath, previewRequestId);
+                        }
                         break;
                     case "BUNDLE_LIST_GAME_BA2S":
                         HandleBundleListGameBa2s();
@@ -1317,7 +1357,8 @@ public partial class Form1
                             {
                                 applyToIni = applyToIniEl.GetBoolean();
                             }
-                            HandleWriteModFile(writeModName, writeRelativePath, writeContent, applyToIni);
+                            string writeEncoding = TryGetString(root, "encoding", out var writeEncodingText) ? writeEncodingText : "";
+                            HandleWriteModFile(writeModName, writeRelativePath, writeContent, applyToIni, writeEncoding);
                         }
                         break;
                     case "ADD_FILES_TO_MOD":
@@ -1365,6 +1406,14 @@ public partial class Form1
                              LogError($"Delete Bundle Error: {ex.Message}");
                              SendStatusMessage("error", "Failed to delete bundle file.", "delete_failed");
                         }
+                        break;
+                    case "OPEN_BUNDLE_FOLDER":
+                        if (TryGetString(root, "name", out var openBundleName, required: true))
+                            HandleOpenBundleFolder(openBundleName);
+                        break;
+                    case "SHARE_BUNDLE":
+                        if (TryGetString(root, "name", out var shareBundleName, required: true))
+                            HandleShareBundle(shareBundleName);
                         break;
                     case "PROMOTE_BUNDLE_TO_MOD":
                         if (TryGetString(root, "name", out var promoteBundleName, required: true))
@@ -1996,16 +2045,67 @@ public partial class Form1
                 SendStatusMessage("info", "Managed mode runtime state prepared. Cleanup will run after confirmed game exit.");
             }
 
+            if (!virtualModMode)
+            {
+                try
+                {
+                    var (inSync, _, detail) = _modManager.GetDeploySyncStatus();
+                    if (!inSync)
+                    {
+                        LogActivity($"[LAUNCH] Shared archive list out of sync for {_platformManager.GetGameLabel()}; redeploying. Detail: {detail}");
+                        _modManager.RedeployDirect();
+                    }
+                }
+                catch (Exception syncEx)
+                {
+                    LogActivity($"[LAUNCH] Pre-launch deploy sync skipped: {syncEx.Message}");
+                }
+            }
+
             try { _configManager.EnsureCustomFovStable(); }
             catch (Exception fovEx) { LogActivity($"[FOV] Launch Camera align skipped: {fovEx.Message}"); }
 
             string exeName = _platformManager.GetGameExeName();
             string fullPath = Path.Combine(gamePath, exeName);
-            if (File.Exists(fullPath)) {
-                string platformLabel = _platformManager.GetPlatformLabel();
+            bool launched = false;
+            bool launchPtsViaSteam = _platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts;
+            string platformLabel = _platformManager.GetGameLabel();
+
+            if (launchPtsViaSteam)
+            {
+                int? ptsState = _platformManager.GetPtsManifestState();
+                if (ptsState.HasValue && ptsState.Value != 4)
+                {
+                    SendStatusMessage("info",
+                        "Steam is updating the PTS first; it will start when the update finishes.",
+                        "pts_updating_first");
+                }
+
+                SendStatusMessage("info", $"Launching Fallout 76 through {platformLabel}...", "launching_game_via_platform", new object[] { platformLabel });
+                try
+                {
+                    Process.Start(new ProcessStartInfo($"steam://rungameid/{PlatformManager.SteamPtsAppId}") { UseShellExecute = true });
+                    launched = true;
+                    LogActivity($"[LAUNCH] PTS via steam://rungameid/{PlatformManager.SteamPtsAppId}");
+                }
+                catch (Exception steamEx)
+                {
+                    LogActivity($"[LAUNCH] steam URL launch failed, falling back to exe: {steamEx.Message}");
+                    if (File.Exists(fullPath))
+                    {
+                        Process.Start(new ProcessStartInfo(fullPath) { WorkingDirectory = gamePath });
+                        launched = true;
+                    }
+                }
+            }
+            else if (File.Exists(fullPath)) {
                 SendStatusMessage("info", $"Launching Fallout 76 through {platformLabel}...", "launching_game_via_platform", new object[] { platformLabel });
 
                 Process.Start(new ProcessStartInfo(fullPath) { WorkingDirectory = gamePath });
+                launched = true;
+            }
+
+            if (launched) {
                 lastGameLaunch = DateTime.Now.ToString("g");
                 SendDataToWeb();
 
@@ -2019,10 +2119,25 @@ public partial class Form1
                         if (gameDetected)
                         {
                             DateTime detectedAt = DateTime.UtcNow;
-                            LogActivity($"[LAUNCH] Game process detected at {detectedAt:O}");
+                            string detectedExe = TryGetRunningGameExePath();
+                            LogActivity($"[LAUNCH] Game process detected at {detectedAt:O}" +
+                                (string.IsNullOrWhiteSpace(detectedExe) ? "" : $" path={detectedExe}"));
+                            bool ptsWrongGame = _platformManager.IsPts
+                                && !string.IsNullOrWhiteSpace(detectedExe)
+                                && !string.IsNullOrWhiteSpace(ptsGamePath)
+                                && !IsPathUnderFolder(detectedExe, ptsGamePath);
                             this.Invoke(() =>
                             {
-                                SendStatusMessage("success", "Game launched successfully!", "game_launched");
+                                if (ptsWrongGame)
+                                {
+                                    SendStatusMessage("warning",
+                                        "Steam started the Live game instead of the PTS.",
+                                        "pts_launched_wrong_game");
+                                }
+                                else
+                                {
+                                    SendStatusMessage("success", "Game launched successfully!", "game_launched");
+                                }
                             });
                         }
                         else
@@ -2085,6 +2200,49 @@ public partial class Form1
             }
         }
         await Task.CompletedTask;
+    }
+
+    private static string TryGetRunningGameExePath()
+    {
+        try
+        {
+            foreach (var proc in Process.GetProcessesByName("Fallout76"))
+            {
+                try
+                {
+                    string path = proc.MainModule?.FileName ?? "";
+                    if (!string.IsNullOrWhiteSpace(path))
+                        return path;
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+        catch
+        {
+        }
+        return "";
+    }
+
+    private static bool IsPathUnderFolder(string filePath, string folder)
+    {
+        try
+        {
+            string fullFile = Path.GetFullPath(filePath);
+            string fullFolder = Path.GetFullPath(folder)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            return fullFile.StartsWith(fullFolder, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async Task<bool> WaitForGameProcessStart(TimeSpan timeout, TimeSpan pollInterval)
@@ -2335,9 +2493,11 @@ public partial class Form1
     private void RunWithPlatformIniContext(GamePlatform platform, string docs, Action action)
     {
         var prevPlatform = _platformManager.CurrentPlatform;
+        bool prevPts = _platformManager.IsPts;
         string prevDocs = documentsPath;
         string prevAppDocs = AppPaths.DocumentsPath;
         bool prevAppIsXbox = AppPaths.IsXbox;
+        bool prevAppIsPts = AppPaths.IsPts;
         try
         {
             _platformManager.SetPlatform(platform);
@@ -2349,10 +2509,37 @@ public partial class Form1
         finally
         {
             _platformManager.SetPlatform(prevPlatform);
+            _platformManager.SetPts(prevPts);
             documentsPath = prevDocs;
             AppPaths.DocumentsPath = prevAppDocs;
-            AppPaths.SetPlatform(prevAppIsXbox);
+            AppPaths.SetPlatform(prevAppIsXbox, prevAppIsPts);
         }
+    }
+
+    private static int NormalizeConfigEditorFontSize(JsonElement val, int fallback)
+    {
+        int size;
+        if (val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out var n)) size = n;
+        else if (val.ValueKind == JsonValueKind.Number && val.TryGetDouble(out var d)) size = (int)Math.Round(d);
+        else if (val.ValueKind == JsonValueKind.String && int.TryParse(val.GetString(), out var s)) size = s;
+        else return fallback;
+        return Math.Clamp(size, 9, 28);
+    }
+
+    private static string NormalizeConfigEditorFontFamily(JsonElement val, string fallback)
+    {
+        if (val.ValueKind != JsonValueKind.String) return fallback;
+        string id = (val.GetString() ?? "").Trim().ToLowerInvariant();
+        return Array.IndexOf(ConfigEditorFontFamilies, id) >= 0 ? id : "default";
+    }
+
+    private void HandleSaveConfigEditorFont(JsonElement root)
+    {
+        if (root.TryGetProperty("fontSize", out var fs))
+            configEditorFontSize = NormalizeConfigEditorFontSize(fs, configEditorFontSize);
+        if (root.TryGetProperty("fontFamily", out var ff))
+            configEditorFontFamily = NormalizeConfigEditorFontFamily(ff, configEditorFontFamily);
+        SaveSettings();
     }
 
     private async Task HandleUpdateSettingsBatch(JsonElement settings, string presetName)
@@ -2379,7 +2566,8 @@ public partial class Form1
 
             if (settings.TryGetProperty("gamePath", out var gp)) {
                 gamePath = gp.GetString() ?? gamePath;
-                if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamGamePath = gamePath;
+                if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts) ptsGamePath = gamePath;
+                else if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamGamePath = gamePath;
                 else xboxGamePath = gamePath;
             }
             if (settings.TryGetProperty("documentsPath", out var dp)) {
@@ -2394,7 +2582,8 @@ public partial class Form1
             }
             if (settings.TryGetProperty("stringsPath", out var sp)) {
                 stringsPath = sp.GetString() ?? stringsPath;
-                if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamStringsPath = stringsPath;
+                if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts) ptsStringsPath = stringsPath;
+                else if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamStringsPath = stringsPath;
                 else xboxStringsPath = stringsPath;
             }
 
@@ -2406,9 +2595,13 @@ public partial class Form1
             if (settings.TryGetProperty("platformBadgeGlow", out var pbg)) platformBadgeGlow = pbg.GetBoolean();
             if (settings.TryGetProperty("syncPlatforms", out var spr)) syncPlatforms = spr.GetBoolean();
             if (settings.TryGetProperty("autoForceDeploy", out var afd)) autoForceDeploy = afd.GetBoolean();
+            if (settings.TryGetProperty("ignoreArchiveIniFiles", out var iaif)) ignoreArchiveIniFiles = iaif.GetBoolean();
             if (settings.TryGetProperty("virtualModMode", out var vmm)) virtualModMode = vmm.GetBoolean();
             else if (settings.TryGetProperty("managedVanillaMode", out var mvm)) virtualModMode = mvm.GetBoolean();
             if (settings.TryGetProperty("configEditorSpellCheck", out var cesc)) configEditorSpellCheck = cesc.GetBoolean();
+            if (settings.TryGetProperty("configEditorKeepOpen", out var ceko)) configEditorKeepOpen = ceko.GetBoolean();
+            if (settings.TryGetProperty("configEditorFontSize", out var cefs)) configEditorFontSize = NormalizeConfigEditorFontSize(cefs, configEditorFontSize);
+            if (settings.TryGetProperty("configEditorFontFamily", out var ceff)) configEditorFontFamily = NormalizeConfigEditorFontFamily(ceff, configEditorFontFamily);
             if (settings.TryGetProperty("confirmBeforeDeleteMod", out var cbddm)) confirmBeforeDeleteMod = cbddm.GetBoolean();
             if (settings.TryGetProperty("confirmBeforeRemoveOldModOnUpdate", out var cbroou)) confirmBeforeRemoveOldModOnUpdate = cbroou.GetBoolean();
             if (settings.TryGetProperty("updateModsInAllPresets", out var umiap)) updateModsInAllPresets = umiap.GetBoolean();
@@ -2702,6 +2895,36 @@ public partial class Form1
             "strings" => stringsPath ?? "",
             _ => gamePath ?? ""
         };
+    }
+
+    private void AddNewBundleToActiveProfileAndPreset(List<string> generatedFiles)
+    {
+        if (generatedFiles == null || generatedFiles.Count == 0) return;
+        var keys = generatedFiles
+            .Select(f => (f ?? "").Replace("\\", "/"))
+            .Where(k => !string.IsNullOrWhiteSpace(k))
+            .ToList();
+
+        if (activeProfile != "Default Profile")
+        {
+            var p = profiles.FirstOrDefault(x => x.Name == activeProfile);
+            if (p != null)
+            {
+                p.ProfileMods ??= new List<string>();
+                bool changed = false;
+                foreach (var key in keys)
+                {
+                    if (!p.ProfileMods.Contains(key, StringComparer.OrdinalIgnoreCase))
+                    {
+                        p.ProfileMods.Add(key);
+                        changed = true;
+                    }
+                }
+                if (changed) SaveProfiles();
+            }
+        }
+
+        AddImportedKeysToActivePreset(keys, markEnabled: false);
     }
 
     private void HandleAddMod() { 
@@ -3613,6 +3836,102 @@ public partial class Form1
         return string.IsNullOrWhiteSpace(name) ? "preset" : name.Trim();
     }
 
+    private void HandleOpenBundleFolder(string bundleName)
+    {
+        try
+        {
+            SyncAppPaths();
+            var paths = _modManager.GetBundleFilePaths(bundleName);
+            if (paths.Count == 0)
+            {
+                SendStatusMessage("error", $"Bundle file not found: {bundleName}", "bundle_file_not_found", new object[] { bundleName });
+                return;
+            }
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{paths[0]}\"",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            LogError($"[BUNDLE] Could not open bundle folder: {ex.Message}");
+            SendStatusMessage("error", $"Could not open bundle folder: {ex.Message}", "bundle_open_folder_failed", new object[] { ex.Message });
+        }
+    }
+
+    private void HandleShareBundle(string bundleName)
+    {
+        this.Invoke(() =>
+        {
+            List<string> paths;
+            try
+            {
+                SyncAppPaths();
+                paths = _modManager.GetBundleFilePaths(bundleName);
+            }
+            catch (Exception ex)
+            {
+                LogError($"[BUNDLE] Share resolve failed: {ex.Message}");
+                SendStatusMessage("error", $"Could not share bundle: {ex.Message}", "bundle_share_failed", new object[] { ex.Message });
+                return;
+            }
+            if (paths.Count == 0)
+            {
+                SendStatusMessage("error", $"Bundle file not found: {bundleName}", "bundle_file_not_found", new object[] { bundleName });
+                return;
+            }
+
+            string baseName = Path.GetFileNameWithoutExtension(paths[0]);
+            using var sfd = new SaveFileDialog
+            {
+                Title = "Share Bundle",
+                Filter = "Zip archive (*.zip)|*.zip",
+                FileName = SanitizeFileName(baseName) + ".zip",
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                AddExtension = true,
+                DefaultExt = "zip"
+            };
+            if (sfd.ShowDialog(this) != DialogResult.OK) return;
+            string outPath = sfd.FileName;
+
+            SendStatusMessage("info", $"Packaging {baseName}...", "bundle_share_started", new object[] { baseName });
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (File.Exists(outPath)) File.Delete(outPath);
+                    using (var archive = ZipFile.Open(outPath, ZipArchiveMode.Create))
+                    {
+                        foreach (var path in paths)
+                            archive.CreateEntryFromFile(path, Path.GetFileName(path), CompressionLevel.Optimal);
+                    }
+                    LogActivity($"[BUNDLE] Shared '{bundleName}' ({paths.Count} file(s)) to {outPath}");
+                    this.Invoke(() =>
+                    {
+                        SendStatusMessage("success", $"Saved {Path.GetFileName(outPath)}.", "bundle_share_success", new object[] { Path.GetFileName(outPath) });
+                        try
+                        {
+                            Process.Start(new ProcessStartInfo
+                            {
+                                FileName = "explorer.exe",
+                                Arguments = $"/select,\"{outPath}\"",
+                                UseShellExecute = true
+                            });
+                        }
+                        catch (Exception ex) { LogError($"[BUNDLE] Could not reveal shared zip: {ex.Message}"); }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    LogError($"[BUNDLE] Share failed: {ex.Message}");
+                    this.Invoke(() => SendStatusMessage("error", $"Could not share bundle: {ex.Message}", "bundle_share_failed", new object[] { ex.Message }));
+                }
+            });
+        });
+    }
+
     private void HandlePromoteBundleToMod(string bundleName)
     {
         try
@@ -3793,9 +4112,11 @@ public partial class Form1
 
     private void HandleCheckModUpdates(JsonElement root)
     {
+        bool forced = root.TryGetProperty("force", out var forceProp) && forceProp.ValueKind == JsonValueKind.True;
+
         if (_nexusManager == null || !nexusLoggedIn)
         {
-            SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_UPDATES_RESULT", updates = Array.Empty<object>(), error = "nexus_not_connected" }));
+            SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_UPDATES_RESULT", updates = Array.Empty<object>(), error = "nexus_not_connected", forced }));
             return;
         }
 
@@ -3804,11 +4125,16 @@ public partial class Form1
 
         bool fullCheck = string.IsNullOrEmpty(singleName);
         if (fullCheck && Interlocked.CompareExchange(ref _fullModUpdateCheckRunning, 1, 0) != 0)
+        {
+            if (forced)
+                SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_UPDATES_RESULT", updates = Array.Empty<object>(), busy = true, forced }));
             return;
+        }
 
         Task.Run(async () =>
         {
             var updates = new List<object>();
+            int checkedCount = 0;
             var mods = SafeGetRealMods();
 
             foreach (dynamic mod in mods)
@@ -3832,9 +4158,11 @@ public partial class Form1
                         nexusModId.Value,
                         installedFileId,
                         installedVersion,
-                        installedUploaded);
+                        installedUploaded,
+                        bypassCache: forced);
 
                     if (!string.IsNullOrEmpty(check.Error)) continue;
+                    checkedCount++;
 
                     _modUpdateCache[originalName] = new CachedModUpdate
                     {
@@ -3866,7 +4194,7 @@ public partial class Form1
 
             this.Invoke(() =>
             {
-                SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_UPDATES_RESULT", updates }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+                SendMessageToWeb(JsonSerializer.Serialize(new { type = "MOD_UPDATES_RESULT", updates, forced, checkedCount }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
             });
         }).ContinueWith(_ =>
         {
@@ -3994,18 +4322,141 @@ public partial class Form1
             : Path.Combine(AppPaths.DataPath, ba2Path);
         if (File.Exists(resolved))
             return resolved;
-        throw new FileNotFoundException("BA2 file not found.", ba2Path);
+        throw new FileNotFoundException($"BA2 file not found: {ba2Path}", ba2Path);
+    }
+
+    private string? _lastBundleExtractDir;
+
+    private string GetBundleExtractStartDir()
+    {
+        if (!string.IsNullOrEmpty(_lastBundleExtractDir) && Directory.Exists(_lastBundleExtractDir))
+            return _lastBundleExtractDir;
+        return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+    }
+
+    private static void RevealInExplorer(string path, bool selectFile)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = selectFile ? $"/select,\"{path}\"" : $"\"{path}\"",
+                UseShellExecute = true
+            });
+        }
+        catch { }
+    }
+
+    private void HandleBundleExtractSingle(string archive, string entryPath)
+    {
+        this.Invoke(() =>
+        {
+            string fileName = Path.GetFileName(entryPath.Replace('/', '\\'));
+            if (string.IsNullOrWhiteSpace(fileName))
+                return;
+            string ext = Path.GetExtension(fileName);
+
+            using var sfd = new SaveFileDialog
+            {
+                Title = "Save extracted file",
+                FileName = fileName,
+                InitialDirectory = GetBundleExtractStartDir(),
+                Filter = string.IsNullOrEmpty(ext)
+                    ? "All files (*.*)|*.*"
+                    : $"{ext.TrimStart('.').ToUpperInvariant()} file (*{ext})|*{ext}|All files (*.*)|*.*",
+                OverwritePrompt = true,
+                AddExtension = true
+            };
+            if (sfd.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(sfd.FileName))
+                return;
+
+            string outFile = sfd.FileName;
+            _lastBundleExtractDir = Path.GetDirectoryName(outFile);
+
+            string archivePath;
+            try
+            {
+                SyncAppPaths();
+                archivePath = ResolveBundleBa2Path(archive);
+            }
+            catch (Exception ex)
+            {
+                LogError($"[BUNDLE] Extract resolve failed: {ex.Message}");
+                SendStatusMessage("error", $"Extract failed: {ex.Message}", "bundle_extract_failed", new object[] { ex.Message });
+                return;
+            }
+
+            LogActivity($"[BUNDLE] Extract entry '{entryPath}' from '{archivePath}' -> '{outFile}'");
+            Task.Run(() =>
+            {
+                try
+                {
+                    BA2Utility.ExtractEntry(archivePath, entryPath, outFile, LogActivity);
+                    this.Invoke(() =>
+                    {
+                        SendStatusMessage(
+                            "success",
+                            $"Saved {fileName} to {outFile}",
+                            "bundle_extract_saved_to",
+                            new object[] { fileName, outFile });
+                        RevealInExplorer(outFile, selectFile: true);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    LogError($"[BUNDLE] Extract failed: {ex.Message}");
+                    this.Invoke(() => SendStatusMessage(
+                        "error",
+                        $"Extract failed: {ex.Message}",
+                        "bundle_extract_failed",
+                        new object[] { ex.Message }));
+                }
+            });
+        });
+    }
+
+    /// <summary>Longest shared "dir/" prefix of the entry paths, or null when they share no folder.</summary>
+    private static string? GetCommonEntryFolder(IEnumerable<string> entryPaths)
+    {
+        string[]? common = null;
+        int commonLen = 0;
+        foreach (string entry in entryPaths)
+        {
+            string[] dirs = entry.Replace('\\', '/').TrimStart('/').Split('/');
+            int dirCount = dirs.Length - 1;
+            if (common == null)
+            {
+                common = dirs;
+                commonLen = dirCount;
+                continue;
+            }
+            int i = 0;
+            while (i < commonLen && i < dirCount && string.Equals(common[i], dirs[i], StringComparison.OrdinalIgnoreCase))
+                i++;
+            commonLen = i;
+            if (commonLen == 0) break;
+        }
+        return common == null || commonLen == 0
+            ? null
+            : string.Join("/", common, 0, commonLen) + "/";
     }
 
     private void HandleBundleExtract(string archive, List<string> paths)
     {
         this.Invoke(() =>
         {
-            using var fbd = new FolderBrowserDialog { Description = "Select destination folder for extracted files" };
+            using var fbd = new FolderBrowserDialog
+            {
+                Description = "Select destination folder for extracted files",
+                UseDescriptionForTitle = true,
+                InitialDirectory = GetBundleExtractStartDir()
+            };
             if (fbd.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(fbd.SelectedPath))
                 return;
 
             string destDir = fbd.SelectedPath;
+            _lastBundleExtractDir = destDir;
             string archivePath;
             try
             {
@@ -4047,14 +4498,23 @@ public partial class Form1
             {
                 try
                 {
-                    BA2Utility.Extract(archivePath, destDir, LogActivity, includePaths);
-                    this.Invoke(() => SendStatusMessage(
-                        "success",
-                        pathCount > 0
-                            ? $"Extracted {pathCount} file(s) from {archiveName}."
-                            : $"Extracted {archiveName} successfully.",
-                        "bundle_extract_success",
-                        pathCount > 0 ? new object[] { archiveName, pathCount } : new object[] { archiveName }));
+                    string? stripPrefix = includePaths != null ? GetCommonEntryFolder(includePaths) : null;
+                    BA2Utility.Extract(archivePath, destDir, LogActivity, includePaths, stripPrefix);
+                    string? singleOut = pathCount == 1
+                        ? Path.Combine(destDir, Path.GetFileName(includePaths!.First().Replace('/', '\\')))
+                        : null;
+                    this.Invoke(() =>
+                    {
+                        SendStatusMessage(
+                            "success",
+                            $"Extracted {archiveName} to {destDir}",
+                            "bundle_extract_success_to",
+                            new object[] { archiveName, destDir });
+                        if (singleOut != null && File.Exists(singleOut))
+                            RevealInExplorer(singleOut, selectFile: true);
+                        else
+                            RevealInExplorer(destDir, selectFile: false);
+                    });
                     LogActivity($"[BUNDLE] Extract complete: {archivePath} -> {destDir}");
                 }
                 catch (Exception ex)
@@ -4068,6 +4528,428 @@ public partial class Form1
                 }
             });
         });
+    }
+
+    private static readonly HashSet<string> PreviewTextExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".txt", ".xml", ".ini", ".json", ".lst", ".csv", ".cfg", ".psc",
+        ".html", ".htm", ".css", ".lua", ".yaml", ".yml"
+    };
+
+    private static readonly HashSet<string> PreviewBinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".ba2", ".wav", ".xwm", ".fuz", ".mp3", ".ogg", ".flac", ".swf", ".hkx", ".pex", ".dll", ".exe",
+        ".tri", ".lip", ".dds", ".png", ".jpg", ".jpeg"
+    };
+
+    private const int PreviewTextByteLimit = 256 * 1024;
+    private const int PreviewTextSniffBytes = 8 * 1024;
+    private const long PreviewTextSniffMaxBytes = 1024 * 1024;
+
+    private void HandleBundlePreviewFile(string source, string mode, string entryPath, int requestId)
+    {
+        Task.Run(() =>
+        {
+            try
+            {
+                bool folder = string.Equals(mode, "folder", StringComparison.OrdinalIgnoreCase);
+                string ext = Path.GetExtension(entryPath ?? "");
+                byte[] bytes = folder
+                    ? ReadPreviewFolderFile(source, entryPath)
+                    : ext.Equals(".dds", StringComparison.OrdinalIgnoreCase)
+                        ? BA2Utility.ReadTexturePreviewBytes(ResolveBundleBa2Path(source), entryPath, DdsPreview.MaxEdge, LogActivity)
+                        : BA2Utility.ReadEntryBytes(ResolveBundleBa2Path(source), entryPath, LogActivity);
+                SendBundleFilePreview(requestId, source, entryPath, bytes);
+            }
+            catch (BA2Utility.PreviewFileTooLargeException ex)
+            {
+                SendBundleFilePreviewNone(requestId, source, entryPath, ex.Size, null);
+            }
+            catch (Exception ex)
+            {
+                LogError($"[BUNDLE] Preview failed: {ex.Message}");
+                SendBundleFilePreviewNone(requestId, source, entryPath, 0, ex.Message);
+            }
+        });
+    }
+
+    private static byte[] ReadPreviewFolderFile(string folder, string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            throw new DirectoryNotFoundException($"Folder not found: {folder}");
+
+        string root = Path.GetFullPath(folder);
+        string relative = (relativePath ?? "").Replace('/', Path.DirectorySeparatorChar);
+        string full = Path.GetFullPath(Path.Combine(root, relative));
+        string rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Preview path is outside the selected folder.");
+        if (!File.Exists(full))
+            throw new FileNotFoundException("File not found.", relativePath);
+
+        long length = new FileInfo(full).Length;
+        if (length > BA2Utility.MaxPreviewBytes)
+            throw new BA2Utility.PreviewFileTooLargeException(length);
+        return File.ReadAllBytes(full);
+    }
+
+    private void SendBundleFilePreview(int requestId, string source, string entryPath, byte[] bytes)
+    {
+        string ext = Path.GetExtension(entryPath ?? "");
+        long size = bytes?.LongLength ?? 0;
+        bytes ??= Array.Empty<byte>();
+
+        if (ext.Equals(".dds", StringComparison.OrdinalIgnoreCase))
+        {
+            DdsPreview.Result preview = DdsPreview.ToPng(bytes);
+            if (preview.Ok && preview.Png != null)
+            {
+                SendBundleFilePreviewMessage(requestId, source, entryPath, "image", size, preview.Format, preview.Width, preview.Height, preview.Mips,
+                    dataUrl: "data:image/png;base64," + Convert.ToBase64String(preview.Png));
+                return;
+            }
+            SendBundleFilePreviewNone(requestId, source, entryPath, size, "unsupported", preview.Format, preview.Width, preview.Height, preview.Mips);
+            return;
+        }
+
+        if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+            ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+            ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
+        {
+            string mime = ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg";
+            SendBundleFilePreviewMessage(requestId, source, entryPath, "image", size, null, 0, 0, 0,
+                dataUrl: $"data:{mime};base64," + Convert.ToBase64String(bytes));
+            return;
+        }
+
+        if (AudioPreview.IsAudioExtension(ext))
+        {
+            AudioPreview.Result audio = AudioPreview.Build(ext, bytes);
+            if (audio.Ok && audio.Bytes != null)
+            {
+                string audioUrl = _audioPreviewCache.Store(audio.Bytes, audio.Mime);
+                SendBundleFilePreviewMessage(requestId, source, entryPath, "audio", size, null, 0, 0, 0,
+                    audioUrl: audioUrl, mime: audio.Mime, audio: new
+                    {
+                        codec = audio.Codec,
+                        sampleRate = audio.SampleRate,
+                        channels = audio.Channels,
+                        duration = audio.DurationSec,
+                        lipBytes = audio.LipBytes,
+                        silent = audio.Silent
+                    });
+                return;
+            }
+            string errorCode = audio.Error != null && audio.Error.StartsWith("audio_codec_unsupported", StringComparison.Ordinal)
+                ? "audio_codec_unsupported"
+                : "audio_decode_failed";
+            LogActivity($"[BUNDLE] Audio preview failed for {entryPath}: {audio.Error}");
+            SendHexPreview(requestId, source, entryPath, bytes, size, errorCode);
+            return;
+        }
+
+        if (ext.Equals(".bgsm", StringComparison.OrdinalIgnoreCase) || ext.Equals(".bgem", StringComparison.OrdinalIgnoreCase))
+        {
+            SendMaterialPreview(requestId, source, entryPath, bytes, size);
+            return;
+        }
+
+        if (ext.Equals(".nif", StringComparison.OrdinalIgnoreCase))
+        {
+            NifMeshReader.Result mesh = NifMeshReader.Read(bytes, source, LogActivity);
+            if (mesh.Ok)
+            {
+                SendMeshPreview(requestId, source, entryPath, size, mesh);
+                return;
+            }
+            SendHexPreview(requestId, source, entryPath, bytes, size, mesh.TooLarge ? "mesh_too_large" : null);
+            return;
+        }
+
+        bool namedText = PreviewTextExtensions.Contains(ext);
+        bool sniffedText = !namedText
+            && !PreviewBinaryExtensions.Contains(ext)
+            && size <= PreviewTextSniffMaxBytes
+            && LooksLikePreviewText(bytes);
+        if (namedText || sniffedText)
+        {
+            string text = DecodePreviewText(bytes, out bool truncated);
+            SendBundleFilePreviewMessage(requestId, source, entryPath, "text", size, null, 0, 0, 0, text: text, truncated: truncated);
+            return;
+        }
+
+        SendHexPreview(requestId, source, entryPath, bytes, size, null);
+    }
+
+    private void SendHexPreview(int requestId, string source, string entryPath, byte[] bytes, long size, string error)
+    {
+        int count = (int)Math.Min(bytes.LongLength, 4096);
+        string hex = count == 0 ? "" : Convert.ToBase64String(bytes, 0, count);
+        SendBundleFilePreviewMessage(requestId, source, entryPath, "hex", size, null, 0, 0, 0, hex: hex, error: error);
+    }
+
+    private void SendMaterialPreview(int requestId, string source, string entryPath, byte[] bytes, long size)
+    {
+        if (!MaterialPreview.TryParse(bytes, out MaterialPreview.Info info))
+        {
+            SendHexPreview(requestId, source, entryPath, bytes, size, null);
+            return;
+        }
+
+        var textures = new List<object>();
+        foreach (MaterialPreview.TextureSlot slot in info.Textures)
+        {
+            string dataUrl = null;
+            int width = 0, height = 0;
+            string format = null;
+            string archive = null;
+            bool found = GameTextureIndex.TryResolve(slot.Path, source, out GameTextureIndex.TextureSource resolved);
+            if (found)
+            {
+                archive = resolved.DisplayName;
+                try
+                {
+                    byte[] tex = GameTextureIndex.ReadBytes(resolved, 256, LogActivity);
+                    DdsPreview.Result preview = DdsPreview.ToPng(tex, 256);
+                    if (preview.Ok && preview.Png != null)
+                    {
+                        dataUrl = "data:image/png;base64," + Convert.ToBase64String(preview.Png);
+                        width = preview.Width;
+                        height = preview.Height;
+                        format = preview.Format;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogActivity($"[BUNDLE] Material texture preview failed for {slot.Path}: {ex.Message}");
+                }
+            }
+            textures.Add(new
+            {
+                role = slot.Role,
+                path = slot.Path,
+                found,
+                dataUrl,
+                width,
+                height,
+                format,
+                archive
+            });
+        }
+
+        SendBundleFilePreviewMessage(requestId, source, entryPath, "material", size, null, 0, 0, 0, material: new
+        {
+            version = info.Version,
+            signature = info.Signature,
+            template = info.Template,
+            textures
+        });
+    }
+
+    private void SendMeshPreview(int requestId, string source, string entryPath, long size, NifMeshReader.Result mesh)
+    {
+        var shapes = new List<object>();
+        foreach (NifMeshReader.Shape shape in mesh.Shapes)
+        {
+            shapes.Add(new
+            {
+                name = shape.Name,
+                material = shape.Material,
+                positions = ToBase64(shape.Positions),
+                normals = shape.Normals == null ? null : ToBase64(shape.Normals),
+                uvs = shape.Uvs == null ? null : ToBase64(shape.Uvs),
+                indices = ToBase64(shape.Indices),
+                texture = shape.Texture,
+                textureStatus = shape.TextureStatus,
+                texturePath = shape.TexturePath,
+                textureFormat = shape.TextureFormat
+            });
+        }
+
+        var textures = new List<string>();
+        foreach (byte[] png in mesh.TexturePngs)
+            textures.Add("data:image/png;base64," + Convert.ToBase64String(png));
+
+        var bonePositions = new float[mesh.Bones.Count * 3];
+        var boneParents = new int[mesh.Bones.Count];
+        var boneNames = new List<string>(mesh.Bones.Count);
+        for (int i = 0; i < mesh.Bones.Count; i++)
+        {
+            bonePositions[i * 3] = mesh.Bones[i].X;
+            bonePositions[i * 3 + 1] = mesh.Bones[i].Y;
+            bonePositions[i * 3 + 2] = mesh.Bones[i].Z;
+            boneParents[i] = mesh.Bones[i].Parent;
+            boneNames.Add(mesh.Bones[i].Name ?? "");
+        }
+
+        SendBundleFilePreviewMessage(requestId, source, entryPath, "mesh", size, null, 0, 0, 0, mesh: new
+        {
+            shapes,
+            textures,
+            bones = mesh.Bones.Count == 0 ? null : new
+            {
+                positions = ToBase64(bonePositions),
+                parents = ToBase64(boneParents),
+                names = boneNames
+            },
+            bounds = new
+            {
+                min = new[] { mesh.MinX, mesh.MinY, mesh.MinZ },
+                max = new[] { mesh.MaxX, mesh.MaxY, mesh.MaxZ }
+            },
+            vertexCount = mesh.VertexCount,
+            triangleCount = mesh.TriangleCount,
+            skipped = mesh.Skipped
+        });
+    }
+
+    private static string ToBase64(float[] values)
+    {
+        if (values == null || values.Length == 0) return "";
+        var bytes = new byte[values.Length * sizeof(float)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static string ToBase64(uint[] values)
+    {
+        if (values == null || values.Length == 0) return "";
+        var bytes = new byte[values.Length * sizeof(uint)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static string ToBase64(int[] values)
+    {
+        if (values == null || values.Length == 0) return "";
+        var bytes = new byte[values.Length * sizeof(int)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static bool LooksLikePreviewText(byte[] bytes)
+    {
+        int count = Math.Min(bytes.Length, PreviewTextSniffBytes);
+        for (int i = 0; i < count; i++)
+        {
+            if (bytes[i] == 0) return false;
+        }
+        return true;
+    }
+
+    private static string DecodePreviewText(byte[] data, out bool truncated)
+    {
+        truncated = data.Length > PreviewTextByteLimit;
+        int count = truncated ? PreviewTextByteLimit : data.Length;
+        int offset = 0;
+        Encoding encoding = Encoding.UTF8;
+
+        if (count >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF)
+            offset = 3;
+        else if (count >= 2 && data[0] == 0xFF && data[1] == 0xFE)
+        {
+            encoding = Encoding.Unicode;
+            offset = 2;
+        }
+        else if (count >= 2 && data[0] == 0xFE && data[1] == 0xFF)
+        {
+            encoding = Encoding.BigEndianUnicode;
+            offset = 2;
+        }
+
+        if (truncated && encoding.Equals(Encoding.UTF8))
+        {
+            while (count > offset && (data[count - 1] & 0xC0) == 0x80) count--;
+            if (count > offset && (data[count - 1] & 0x80) != 0) count--;
+        }
+
+        if (count < offset) count = offset;
+        return encoding.GetString(data, offset, count - offset);
+    }
+
+    private void SendBundleFilePreviewNone(int requestId, string source, string? entryPath, long size, string? error,
+        string? format = null, int width = 0, int height = 0, int mips = 0)
+    {
+        SendBundleFilePreviewMessage(requestId, source, entryPath, "none", size, format, width, height, mips, error: error);
+    }
+
+    private void SendBundleFilePreviewMessage(int requestId, string source, string? entryPath, string kind, long size,
+        string? format, int width, int height, int mips, string? dataUrl = null, string? text = null, bool truncated = false,
+        string? error = null, string? hex = null, object material = null, object mesh = null,
+        string? audioUrl = null, string? mime = null, object audio = null)
+    {
+        SendMessageToWeb(JsonSerializer.Serialize(new
+        {
+            type = "BUNDLE_FILE_PREVIEW",
+            requestId,
+            source,
+            path = entryPath,
+            kind,
+            dataUrl,
+            text,
+            truncated,
+            width,
+            height,
+            format,
+            mips,
+            size,
+            error,
+            hex,
+            material,
+            mesh,
+            audioUrl,
+            mime,
+            audio
+        }));
+    }
+
+    private void HandleBundleDroppedFiles(IReadOnlyList<object>? additionalObjects)
+    {
+        var files = new List<string>();
+        var folders = new List<string>();
+        var rejected = new List<string>();
+
+        if (additionalObjects != null)
+        {
+            foreach (var obj in additionalObjects)
+            {
+                if (obj is not CoreWebView2File droppedFile) continue;
+                string? path = droppedFile.Path;
+                if (string.IsNullOrWhiteSpace(path)) continue;
+
+                if (Directory.Exists(path))
+                {
+                    folders.Add(path);
+                    LogActivity($"[BUNDLE] Dropped folder staged: {path}");
+                }
+                else if (File.Exists(path) &&
+                         string.Equals(Path.GetExtension(path), ".ba2", StringComparison.OrdinalIgnoreCase))
+                {
+                    files.Add(path);
+                    LogActivity($"[BUNDLE] Dropped BA2 staged: {path}");
+                }
+                else
+                {
+                    rejected.Add(path);
+                    LogActivity($"[BUNDLE] Dropped item rejected (not a .ba2 file or folder): {path}");
+                }
+            }
+        }
+
+        if (files.Count == 0 && folders.Count == 0)
+        {
+            LogActivity("[BUNDLE] Drop contained no usable .ba2 files or folders.");
+            SendStatusMessage("error", "Only .ba2 files or folders can be added to a bundle.");
+            return;
+        }
+
+        SendMessageToWeb(JsonSerializer.Serialize(new
+        {
+            type = "BUNDLE_FILES_DROPPED",
+            files,
+            folders,
+            rejected
+        }));
     }
 
     private void HandleBundleListBa2(string ba2Path)
@@ -4204,7 +5086,8 @@ public partial class Form1
         if (fbd.ShowDialog() == DialogResult.OK) {
             if (target == "game") {
                 gamePath = fbd.SelectedPath;
-                if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamGamePath = gamePath;
+                if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts) ptsGamePath = gamePath;
+                else if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamGamePath = gamePath;
                 else xboxGamePath = gamePath;
             }
             else if (target == "docs") {
@@ -4219,7 +5102,8 @@ public partial class Form1
             }
             else if (target == "strings") {
                 stringsPath = fbd.SelectedPath;
-                if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamStringsPath = stringsPath;
+                if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts) ptsStringsPath = stringsPath;
+                else if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamStringsPath = stringsPath;
                 else xboxStringsPath = stringsPath;
             }
 
@@ -5175,7 +6059,114 @@ public partial class Form1
             || Process.GetProcessesByName("Project76_GamePass").Length > 0;
     }
 
-    private void HandleTransferModsAcrossPlatforms(string direction, bool overwrite)
+    private const string InstallLive = "live";
+    private const string InstallPts = "pts";
+    private const string InstallXbox = "xbox";
+
+    private string GetCurrentInstallId()
+    {
+        if (_platformManager.CurrentPlatform == GamePlatform.Xbox) return InstallXbox;
+        return _platformManager.IsPts ? InstallPts : InstallLive;
+    }
+
+    private string GetLegacyOtherInstallId(string current) => current switch
+    {
+        InstallLive => InstallXbox,
+        InstallPts => InstallLive,
+        _ => steamPtsActive ? InstallPts : InstallLive,
+    };
+
+    private static string NormalizeInstallId(string? id)
+    {
+        string v = (id ?? "").Trim().ToLowerInvariant();
+        return v switch
+        {
+            "live" or "steam" or "steam-live" => InstallLive,
+            "pts" or "steam-pts" => InstallPts,
+            "xbox" => InstallXbox,
+            _ => "",
+        };
+    }
+
+    private static string GetInstallLabel(string id) => id switch
+    {
+        InstallPts => "Steam PTS",
+        InstallXbox => "Xbox",
+        _ => "Steam Live",
+    };
+
+    private bool IsXboxPathAvailable()
+    {
+        if (_platformManager.CurrentPlatform == GamePlatform.Xbox) return true;
+        if (virtualModMode) return true;
+        return !string.IsNullOrWhiteSpace(xboxGamePath) && Directory.Exists(xboxGamePath);
+    }
+
+    private bool IsLivePathAvailable()
+    {
+        if (GetCurrentInstallId() == InstallLive) return true;
+        return !string.IsNullOrWhiteSpace(steamGamePath) && Directory.Exists(steamGamePath);
+    }
+
+    private (string data, string strings, string gameRoot, string docs, string prefix, string metaFile) ResolveInstallLocation(string id)
+    {
+        bool isXbox = id == InstallXbox;
+        bool isPts = id == InstallPts;
+        bool isCurrent = GetCurrentInstallId() == id;
+        string prefix = isXbox ? "Project76" : "Fallout76";
+        string metaFile = isPts ? AppPaths.PtsModsMetadataFile : AppPaths.LiveModsMetadataFile;
+
+        string docs;
+        if (isXbox)
+        {
+            docs = isCurrent ? documentsPath : (string.IsNullOrWhiteSpace(xboxDocsPath) ? documentsPath : xboxDocsPath);
+        }
+        else
+        {
+            string steamDocs = _platformManager.CurrentPlatform == GamePlatform.Steam
+                ? documentsPath
+                : (string.IsNullOrWhiteSpace(steamDocsPath) ? _platformManager.GetDefaultDocumentsPath() : steamDocsPath);
+            docs = isPts == steamPtsActive ? steamDocs : AppPaths.IniSnapshotFolder(isPts);
+        }
+
+        if (virtualModMode)
+        {
+            string folder = isXbox ? "Xbox" : (isPts ? "Steam PTS" : "Steam");
+            string baseStaging = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Managed Staging", folder);
+            string vData = Path.Combine(baseStaging, "Data");
+            return (vData, Path.Combine(vData, "Strings"), Path.Combine(baseStaging, "GameRoot"), docs, prefix, metaFile);
+        }
+
+        string gp;
+        string sp;
+        if (isCurrent)
+        {
+            gp = gamePath;
+            sp = stringsPath;
+        }
+        else if (isXbox)
+        {
+            gp = xboxGamePath;
+            sp = xboxStringsPath;
+        }
+        else if (isPts)
+        {
+            gp = string.IsNullOrWhiteSpace(ptsGamePath) ? _platformManager.GetDefaultPtsGamePath() : ptsGamePath;
+            sp = ptsStringsPath;
+        }
+        else
+        {
+            gp = steamGamePath;
+            sp = steamStringsPath;
+        }
+
+        string data = ResolveDataDirFromGamePath(gp);
+        string gameRoot = ResolveGameRootFromGamePath(gp);
+        if (string.IsNullOrWhiteSpace(sp) && !string.IsNullOrEmpty(data)) sp = Path.Combine(data, "Strings");
+        return (data, sp, gameRoot, docs, prefix, metaFile);
+    }
+
+    private void HandleTransferModsBetweenInstalls(string sourceId, string targetId, string scope, bool overwrite)
     {
         try
         {
@@ -5187,43 +6178,52 @@ public partial class Form1
                 return;
             }
 
-            var current = _platformManager.CurrentPlatform;
-            var other = current == GamePlatform.Steam ? GamePlatform.Xbox : GamePlatform.Steam;
+            if (string.IsNullOrEmpty(sourceId) || string.IsNullOrEmpty(targetId) || sourceId == targetId)
+            {
+                SendStatusMessage("warning", "Pick two different installs to copy between.", "transfer_same_install");
+                return;
+            }
 
-            bool toOther = !string.Equals(direction, "from-other", StringComparison.OrdinalIgnoreCase);
-            var srcPlatform = toOther ? current : other;
-            var dstPlatform = toOther ? other : current;
+            bool configsOnly = string.Equals(scope, "configs", StringComparison.OrdinalIgnoreCase);
+            string srcLabel = GetInstallLabel(sourceId);
+            string dstLabel = GetInstallLabel(targetId);
 
-            var src = ResolvePlatformModLocation(srcPlatform);
-            var dst = ResolvePlatformModLocation(dstPlatform);
+            if (targetId == InstallPts)
+                EnsurePtsSeededForTransfer();
+
+            var src = ResolveInstallLocation(sourceId);
+            var dst = ResolveInstallLocation(targetId);
 
             if (string.IsNullOrWhiteSpace(src.data) || !Directory.Exists(src.data))
             {
                 SendStatusMessage("error",
-                    $"No {srcPlatform} mod folder found to copy from. Set the {srcPlatform} game path in Settings (or import some mods there) first.",
-                    "transfer_mods_no_source", new object[] { srcPlatform.ToString() });
+                    $"No {srcLabel} mod folder found to copy from. Set the {srcLabel} game path in Settings (or import some mods there) first.",
+                    "transfer_mods_no_source", new object[] { srcLabel });
                 return;
             }
             if (string.IsNullOrWhiteSpace(dst.data))
             {
                 SendStatusMessage("error",
-                    $"The {dstPlatform} install path isn't set. Configure it in Settings, then try again.",
-                    "transfer_mods_no_path", new object[] { dstPlatform.ToString() });
+                    $"The {dstLabel} install path isn't set. Configure it in Settings, then try again.",
+                    "transfer_mods_no_path", new object[] { dstLabel });
                 return;
             }
 
             int copied;
+            List<string> copiedKeys;
             try
             {
                 copied = _modManager.TransferModsToPlatform(
                     src.data, src.strings, src.gameRoot,
-                    dst.data, dst.strings, dst.gameRoot, overwrite);
+                    dst.data, dst.strings, dst.gameRoot, overwrite, out copiedKeys,
+                    includeRelative: configsOnly ? ConfigFileMerger.IsRootLooseConfigPath : null,
+                    includeGameRoot: !configsOnly);
             }
             catch (UnauthorizedAccessException)
             {
                 SendStatusMessage("error",
-                    $"Couldn't write to the {dstPlatform} folder (access denied). Xbox/Game Pass installs are protected — run Fallout 76 Manager as administrator, or use Virtual Mod Mode.",
-                    "transfer_mods_denied", new object[] { dstPlatform.ToString() });
+                    $"Couldn't write to the {dstLabel} folder (access denied). Xbox/Game Pass installs are protected — run Fallout 76 Manager as administrator, or use Virtual Mod Mode.",
+                    "transfer_mods_denied", new object[] { dstLabel });
                 return;
             }
             catch (IOException ioEx)
@@ -5235,13 +6235,40 @@ public partial class Form1
                 return;
             }
 
-            int iniAdded = MergeArchiveIniEntries(src.docs, src.prefix, dst.docs, dst.prefix);
+            try
+            {
+                int merged = _modManager.MergeMetadataKeysFromFile(src.metaFile, copiedKeys, dst.metaFile);
+                if (merged > 0)
+                    LogActivity($"[TRANSFER] Merged {merged} metadata entr(y/ies) into {dstLabel} mods file.");
+                AddKeysToPresetSlot(targetId == InstallPts, copiedKeys);
+            }
+            catch (Exception metaEx)
+            {
+                LogError($"[TRANSFER] Metadata/preset update skipped: {metaEx.Message}");
+            }
 
-            LogActivity($"[TRANSFER] {srcPlatform} -> {dstPlatform}: copied {copied} file(s), {iniAdded} INI archive entr(y/ies) (mode={(virtualModMode ? "VMM" : "direct")}).");
-            SendStatusMessage("success",
-                $"Copied {copied} mod file(s) from {srcPlatform} to {dstPlatform}. Your Nexus links and load order are shared, so they carried over automatically.",
-                "transfer_mods_done", new object[] { copied, srcPlatform.ToString(), dstPlatform.ToString() });
+            int iniAdded = 0;
+            bool liveXboxPair = (sourceId == InstallLive && targetId == InstallXbox)
+                || (sourceId == InstallXbox && targetId == InstallLive);
+            if (!configsOnly && liveXboxPair)
+                iniAdded = MergeArchiveIniEntries(src.docs, src.prefix, dst.docs, dst.prefix);
 
+            string what = configsOnly ? "config" : "mod";
+            LogActivity($"[TRANSFER] {srcLabel} -> {dstLabel}: copied {copied} {what} file(s), {iniAdded} INI archive entr(y/ies) (mode={(virtualModMode ? "VMM" : "direct")}).");
+            if (configsOnly)
+            {
+                SendStatusMessage("success",
+                    $"Copied {copied} config file(s) from {srcLabel} to {dstLabel}.",
+                    "transfer_configs_done", new object[] { copied, srcLabel, dstLabel });
+            }
+            else
+            {
+                SendStatusMessage("success",
+                    $"Copied {copied} mod file(s) from {srcLabel} to {dstLabel}. Names and Nexus info were copied with them.",
+                    "transfer_mods_done", new object[] { copied, srcLabel, dstLabel });
+            }
+
+            _modManager.InvalidateModsListCache();
             RefreshConflictCount(false, sendDataUpdate: false);
             SendDataToWeb();
         }
@@ -5252,11 +6279,133 @@ public partial class Form1
         }
     }
 
+    private void HandleSwitchSteamBranch()
+    {
+        if (_platformManager.CurrentPlatform != GamePlatform.Steam)
+        {
+            SendStatusMessage("warning", "Live / PTS switching is only available on Steam.", "steam_branch_steam_only");
+            return;
+        }
+
+        if (IsGameRunning())
+        {
+            SendStatusMessage("warning",
+                "Close Fallout 76 before switching between Live and PTS.",
+                "steam_branch_game_running");
+            return;
+        }
+
+        bool fromPts = _platformManager.IsPts;
+        bool switchingToPts = !fromPts;
+        if (switchingToPts && !IsPtsPathAvailable() && string.IsNullOrWhiteSpace(ptsGamePath))
+        {
+            string detected = _platformManager.GetDefaultPtsGamePath();
+            if (string.IsNullOrWhiteSpace(detected) || !Directory.Exists(detected))
+            {
+                SendStatusMessage("error",
+                    "Fallout 76 Public Test Server was not found. Install it in Steam, or set the PTS game path in Settings.",
+                    "pts_not_found");
+                return;
+            }
+            ptsGamePath = detected;
+        }
+
+        DisposeTweakIniWatcher();
+
+        try
+        {
+            PersistCurrentSteamBranchPaths();
+            SaveIniSnapshot(fromPts);
+            StashActiveModPresetsForBranch(fromPts);
+
+            if (switchingToPts)
+                SeedPtsFromLiveIfNeeded();
+
+            ApplySteamBranchPaths(switchingToPts);
+
+            if (string.IsNullOrWhiteSpace(gamePath) || !Directory.Exists(gamePath))
+            {
+                ApplySteamBranchPaths(fromPts);
+                SyncAppPaths();
+                LoadModPresetsForBranch(fromPts);
+                RestoreIniSnapshot(fromPts);
+                EnsureTweakIniWatcher();
+                SendStatusMessage("error",
+                    switchingToPts
+                        ? "Fallout 76 Public Test Server was not found. Install it in Steam, or set the PTS game path in Settings."
+                        : "Steam Live Fallout 76 was not found. Set the game path in Settings.",
+                    switchingToPts ? "pts_not_found" : "steam_live_not_found");
+                SendDataToWeb();
+                return;
+            }
+
+            SyncAppPaths();
+            _modManager.InvalidateModsListCache();
+            RestoreIniSnapshot(switchingToPts);
+            LoadModPresetsForBranch(switchingToPts);
+            EnsureAllPrefsIniWritable();
+
+            if (virtualModMode)
+            {
+                int hydrated = _modManager.EnsureManagedStagingHydrated();
+                LogActivity($"[SETTINGS] Steam branch switched to {_platformManager.GetGameLabel()} with VirtualModMode enabled. Staging hydration copied {hydrated} files.");
+            }
+            else
+            {
+                try
+                {
+                    _modManager.RedeployDirect();
+                    LogActivity($"[SETTINGS] Steam branch switched to {_platformManager.GetGameLabel()}; rewritten archive list + plugins.txt for this branch.");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"[SETTINGS] Steam branch redeploy failed: {ex.Message}");
+                }
+            }
+
+            try { SyncTweakValuesFromIni(); }
+            catch (Exception syncEx) { LogActivity($"[BRANCH] SyncTweakValuesFromIni skipped: {syncEx.Message}"); }
+
+            SaveSettings();
+            EnsureTweakIniWatcher();
+
+            string branchLabel = _platformManager.IsPts ? "PTS" : "Live";
+            SendStatusMessage("success",
+                $"Switched to Steam {branchLabel}. Loaded that game's mods, configs, and INI settings.",
+                "steam_branch_switched", new object[] { branchLabel });
+            SendDataToWeb();
+        }
+        catch (Exception ex)
+        {
+            LogError($"[BRANCH] Switch failed; rolling back to {(fromPts ? "PTS" : "Live")}: {ex.Message}");
+            try
+            {
+                ApplySteamBranchPaths(fromPts);
+                SyncAppPaths();
+                _modManager.InvalidateModsListCache();
+                LoadModPresetsForBranch(fromPts);
+                RestoreIniSnapshot(fromPts);
+                EnsureAllPrefsIniWritable();
+            }
+            catch (Exception rollbackEx)
+            {
+                LogError($"[BRANCH] Rollback also failed: {rollbackEx.Message}");
+            }
+            EnsureTweakIniWatcher();
+            SendStatusMessage("error",
+                $"Failed to switch Steam branch: {ex.Message}",
+                "steam_branch_switch_failed");
+            SendDataToWeb();
+        }
+    }
+
     private void HandleSwitchPlatform()
     {
+        bool leavingPtsSlot = ActivePresetSlotIsPts;
         if (_platformManager.CurrentPlatform == GamePlatform.Steam) {
-            steamGamePath = gamePath; steamDocsPath = documentsPath; steamLocalPath = localAppDataPath;
-            steamStringsPath = stringsPath;
+            PersistCurrentSteamBranchPaths();
+            steamDocsPath = documentsPath;
+            steamLocalPath = localAppDataPath;
         } else {
             xboxGamePath = gamePath; xboxDocsPath = documentsPath; xboxLocalPath = localAppDataPath;
             xboxStringsPath = stringsPath;
@@ -5266,26 +6415,17 @@ public partial class Form1
         _platformManager.SetPlatform(newPlatform);
 
         if (newPlatform == GamePlatform.Steam) {
-            if (!string.IsNullOrEmpty(steamGamePath) &&
-                (steamGamePath.Contains("XboxGames", StringComparison.OrdinalIgnoreCase) ||
-                 steamGamePath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
-                 steamGamePath.Contains("ModifiableWindowsApps", StringComparison.OrdinalIgnoreCase)))
-            {
-                steamGamePath = "";
-            }
-
-            gamePath = !string.IsNullOrEmpty(steamGamePath) ? steamGamePath : _platformManager.GetDefaultGamePath();
-            documentsPath = !string.IsNullOrEmpty(steamDocsPath) ? steamDocsPath : _platformManager.GetDefaultDocumentsPath();
-            localAppDataPath = !string.IsNullOrEmpty(steamLocalPath) ? steamLocalPath : _platformManager.GetDefaultLocalAppDataPath();
-            stringsPath = !string.IsNullOrEmpty(steamStringsPath) ? steamStringsPath : GetDefaultStringsPathFromGamePath(gamePath);
+            ApplySteamBranchPaths(steamPtsActive);
         } else {
+            _platformManager.SetPts(false);
+
             if (!string.IsNullOrEmpty(xboxGamePath) && xboxGamePath.Contains("Steam", StringComparison.OrdinalIgnoreCase))
             {
-                xboxGamePath = ""; 
+                xboxGamePath = "";
             }
-            
+
             gamePath = !string.IsNullOrEmpty(xboxGamePath) ? xboxGamePath : _platformManager.GetDefaultGamePath();
-            
+
             if (gamePath.Contains("Steam", StringComparison.OrdinalIgnoreCase))
             {
                 gamePath = _platformManager.GetDefaultGamePath();
@@ -5295,7 +6435,14 @@ public partial class Form1
             localAppDataPath = !string.IsNullOrEmpty(xboxLocalPath) ? xboxLocalPath : _platformManager.GetDefaultLocalAppDataPath();
             stringsPath = !string.IsNullOrEmpty(xboxStringsPath) ? xboxStringsPath : GetDefaultStringsPathFromGamePath(gamePath);
         }
-        
+
+        bool enteringPtsSlot = ActivePresetSlotIsPts;
+        if (leavingPtsSlot != enteringPtsSlot)
+        {
+            StashActiveModPresetsForBranch(leavingPtsSlot);
+            LoadModPresetsForBranch(enteringPtsSlot);
+        }
+
         SyncAppPaths();
         EnsureAllPrefsIniWritable();
         if (virtualModMode)
@@ -5314,18 +6461,28 @@ public partial class Form1
 
         switch (key)
         {
-            case "gamePath": 
-                gamePath = val.GetString() ?? ""; 
+            case "gamePath":
+                gamePath = val.GetString() ?? "";
                 _platformManager.SetPlatform(
                     PlatformManager.DetectPlatformFromGamePath(gamePath, _platformManager.CurrentPlatform));
+                if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts)
+                    ptsGamePath = gamePath;
+                else if (_platformManager.CurrentPlatform == GamePlatform.Steam)
+                    steamGamePath = gamePath;
+                else
+                    xboxGamePath = gamePath;
                 SyncAppPaths();
                 break;
             case "documentsPath": documentsPath = val.GetString() ?? ""; SyncAppPaths(); break;
             case "localAppDataPath": localAppDataPath = val.GetString() ?? ""; SyncAppPaths(); break;
             case "stringsPath":
                 stringsPath = val.GetString() ?? "";
-                if (_platformManager.CurrentPlatform == GamePlatform.Steam) steamStringsPath = stringsPath;
-                else xboxStringsPath = stringsPath;
+                if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts)
+                    ptsStringsPath = stringsPath;
+                else if (_platformManager.CurrentPlatform == GamePlatform.Steam)
+                    steamStringsPath = stringsPath;
+                else
+                    xboxStringsPath = stringsPath;
                 SyncAppPaths();
                 break;
             case "minimizeToTray": minimizeToTray = val.GetBoolean(); break;
@@ -5338,9 +6495,16 @@ public partial class Form1
             case "logsPopoutKeepOpen": logsPopoutKeepOpen = val.GetBoolean(); break;
             case "platformBadgeGlow": platformBadgeGlow = val.GetBoolean(); break;
             case "configEditorSpellCheck": configEditorSpellCheck = val.GetBoolean(); break;
+            case "configEditorKeepOpen": configEditorKeepOpen = val.GetBoolean(); break;
+            case "configEditorFontSize": configEditorFontSize = NormalizeConfigEditorFontSize(val, configEditorFontSize); break;
+            case "configEditorFontFamily": configEditorFontFamily = NormalizeConfigEditorFontFamily(val, configEditorFontFamily); break;
             case "confirmBeforeDeleteMod": confirmBeforeDeleteMod = val.GetBoolean(); break;
             case "confirmBeforeRemoveOldModOnUpdate": confirmBeforeRemoveOldModOnUpdate = val.GetBoolean(); break;
             case "updateModsInAllPresets": updateModsInAllPresets = val.GetBoolean(); break;
+            case "ignoreArchiveIniFiles":
+                ignoreArchiveIniFiles = val.GetBoolean();
+                _modManager.IgnoreArchiveIniFiles = ignoreArchiveIniFiles;
+                break;
             case "virtualModMode":
             case "managedVanillaMode":
             {
@@ -5958,6 +7122,8 @@ public partial class Form1
             !string.IsNullOrWhiteSpace(_modManager.LastRenameTo))
         {
             ReplaceModKeyEverywhere(_modManager.LastRenameFrom, _modManager.LastRenameTo);
+            foreach (var (from, to) in _modManager.LastRenameCompanions)
+                ReplaceModKeyEverywhere(from, to);
         }
         SendDataToWeb();
     }
@@ -5979,7 +7145,7 @@ public partial class Form1
             if (ReplaceModKeyInList(profile.ProfileMods, oldKey, newKey)) profilesChanged = true;
             if (ReplaceModKeyInList(profile.EnabledMods, oldKey, newKey)) profilesChanged = true;
         }
-        if (changed || profilesChanged) SaveSettings();
+        if (profilesChanged) SaveProfiles();
     }
 
     private static bool ReplaceModKeyInList(List<string> list, string oldKey, string newKey)
@@ -6109,17 +7275,20 @@ public partial class Form1
                 return;
             }
 
+            string encoding = TextFileEncoding.Utf8;
             string content = File.Exists(fullPath)
-                ? File.ReadAllText(fullPath, System.Text.Encoding.UTF8)
+                ? TextFileEncoding.Read(fullPath, out encoding)
                 : "";
 
-            LogActivity($"[MOD_FILE] READ ok key='{modKey}' path='{fullPath}' bytes={content.Length}");
+            LogActivity($"[MOD_FILE] READ ok key='{modKey}' path='{fullPath}' bytes={content.Length} encoding={encoding}");
             SendMessageToWeb(JsonSerializer.Serialize(new
             {
                 type = "MOD_FILE_CONTENT",
                 name = modKey,
                 relativePath = relativePath,
-                content = content
+                content = content,
+                encoding = encoding,
+                encodingLabel = TextFileEncoding.Label(encoding)
             }));
         }
         catch (Exception ex)
@@ -6136,7 +7305,7 @@ public partial class Form1
         }
     }
 
-    private void HandleWriteModFile(string modKey, string relativePath, string content, bool applyToIni = false)
+    private void HandleWriteModFile(string modKey, string relativePath, string content, bool applyToIni = false, string encodingToken = "")
     {
         try
         {
@@ -6196,10 +7365,35 @@ public partial class Form1
                 return;
             }
 
-            if (string.Equals(ext, ".ini", StringComparison.OrdinalIgnoreCase))
-                GameConfigManager.WriteIniTextNoBom(fullPath, content ?? "");
+            bool isIni = string.Equals(ext, ".ini", StringComparison.OrdinalIgnoreCase);
+            string encodingName = TextFileEncoding.Normalize(encodingToken);
+            if (isIni && encodingName == TextFileEncoding.Utf8Bom)
+                encodingName = TextFileEncoding.Utf8;
+            Encoding fileEncoding = TextFileEncoding.GetEncoding(encodingName, strictEncode: true);
+            try
+            {
+                fileEncoding.GetByteCount(content ?? "");
+            }
+            catch (EncoderFallbackException)
+            {
+                string label = TextFileEncoding.Label(encodingName);
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "MOD_FILE_WRITE_RESULT",
+                    ok = false,
+                    name = modKey,
+                    relativePath = relativePath,
+                    error = $"Can't save: some characters aren't supported by {label}. Remove or replace them, then try again.",
+                    errorKey = "config_editor_encoding_unsupported",
+                    errorArgs = new[] { label }
+                }));
+                return;
+            }
+
+            if (isIni)
+                GameConfigManager.WriteIniText(fullPath, content ?? "", fileEncoding);
             else
-                File.WriteAllText(fullPath, content ?? "", new UTF8Encoding(false));
+                File.WriteAllText(fullPath, content ?? "", fileEncoding);
 
             int? applied = null;
             string? appliedTarget = null;
@@ -6439,6 +7633,8 @@ public partial class Form1
   "platform_badge_glow_desc": "Adds a glow effect to the Steam/Xbox platform badge in the sidebar.",
   "sync_platforms": "Sync Platforms (Steam/Xbox)",
   "auto_conflict_override": "Auto Conflict Override",
+  "ignore_archive_ini": "Ignore INI files in mod archives",
+  "ignore_archive_ini_desc": "When importing ZIP/7z/RAR mods, skip any .ini files inside so only the BA2/plugin files are installed. Your existing INIs are never changed.",
   "virtual_mod_mode": "Virtual Mod Mode",
   "advanced_maintenance": "Advanced Maintenance",
   "save_changes": "Save Changes",
@@ -6812,7 +8008,7 @@ public partial class Form1
   "add_to_list": "Add to Mod List",
   "finalize_bundle": "Finalize Bundle",
   "output_name": "Output Name",
-  "created_in_bundles_dir": "Created in Bundles/ directory.",
+  "created_in_bundles_dir": "Saved to the game's Data folder. Find it on the Mod Bundles page.",
   "compression_level": "Compression Level",
   "total_items": "Total Items",
   "bundle_format": "Format",
@@ -6857,7 +8053,35 @@ public partial class Form1
   "tweak_fov1st": "First-Person FOV",
   "tweak_fov1st_desc": "Fallout76Custom.ini [Display] fDefault1stPersonFOV — first-person view (default in-game often 70).",
   "tweak_fov_pipboy": "Pip-Boy FOV",
-  "tweak_fov_pipboy_desc": "Fallout76Custom.ini [Display] fPipboy1stFOV — Pip-Boy screen; Creation Engine setting (may be ignored in some builds)."
+  "tweak_fov_pipboy_desc": "Fallout76Custom.ini [Display] fPipboy1stFOV — Pip-Boy screen; Creation Engine setting (may be ignored in some builds).",
+  "preview_audio_codec": "Codec",
+  "preview_audio_sample_rate": "Sample rate",
+  "preview_audio_channels_label": "Channels",
+  "preview_audio_channels": "{0} channels",
+  "preview_audio_mono": "Mono",
+  "preview_audio_stereo": "Stereo",
+  "preview_audio_duration": "Duration",
+  "preview_audio_size": "Size",
+  "preview_audio_lip": "Contains lip-sync data ({0})",
+  "preview_audio_play": "Play",
+  "preview_audio_pause": "Pause",
+  "preview_audio_mute": "Mute",
+  "preview_audio_unmute": "Unmute",
+  "preview_audio_loop": "Loop",
+  "preview_audio_volume": "Volume",
+  "preview_audio_seek": "Seek",
+  "preview_audio_space_hint": "Press Space to play or pause",
+  "preview_audio_info": "File details",
+  "preview_audio_silent_label": "Silent",
+  "preview_extract_file": "Extract This File",
+  "inspector_expand_all": "Expand all",
+  "inspector_collapse_all": "Collapse all",
+  "preview_audio_prev": "Previous sound",
+  "preview_audio_next": "Next sound",
+  "bundle_extract_success_to": "Extracted {0} to {1}",
+  "bundle_extract_saved_to": "Saved {0} to {1}",
+  "preview_audio_decode_failed": "This audio file couldn't be decoded. Showing a hex dump instead.",
+  "preview_audio_codec_unsupported": "This audio codec can't be previewed yet. Showing a hex dump instead."
 }
 """;
 

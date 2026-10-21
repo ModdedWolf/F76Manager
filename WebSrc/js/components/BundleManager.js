@@ -1,4 +1,5 @@
 import { BundleRenderer } from './BundleRenderer.js';
+import { mountMeshViewer } from '../utils/meshViewer.js';
 let _bundleEventsAttached = false;
 let _bundleIpcHandlerAttached = false;
 
@@ -8,6 +9,15 @@ function getBundleFormatLabel(value) {
         : value === 'Auto'
             ? window._t('bundle_format_auto')
             : window._t('bundle_format_general');
+}
+
+const AUDIO_PREVIEW_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'flac', 'xwm', 'fuz']);
+
+function formatPlayerTime(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 function showBundleStatus(type, text) {
@@ -46,6 +56,23 @@ export class BundleManager {
         this.inspectorLoadTimeoutId = null;
         this.inspectorLoadRequestPath = '';
         this.inspectorLoadRequestMode = 'ba2';
+        this.previewPath = '';
+        this.previewRequestId = 0;
+        this.previewResult = null;
+        this.previewLoading = false;
+        this.previewCache = new Map();
+        this.previewMaterialZoom = null;
+        this._meshViewer = null;
+        this._meshWireframe = false;
+        this._audioBlobUrl = null;
+        this._audioVolume = 1;
+        this._audioToggle = null;
+        this._audioProgressRaf = null;
+        this._audioInfoOpen = false;
+        this._audioKeyAbort = null;
+        this._audioAutoplay = false;
+        this._filterTimer = null;
+        this._inspectorMetaMinWidth = 0;
         this.initGlobalHandlers();
         this.initIpcHandlers();
     }
@@ -162,10 +189,30 @@ export class BundleManager {
 
             const files = e.dataTransfer.files;
             if (files && files.length > 0) {
+                const webview = window.chrome?.webview;
+                if (webview && typeof webview.postMessageWithAdditionalObjects === 'function') {
+                    try {
+                        // WebView2 does not expose File.path; hand the File
+                        // objects to the host so it can read the real paths.
+                        webview.postMessageWithAdditionalObjects(
+                            { type: 'BUNDLE_ADD_DROPPED_FILES' },
+                            Array.from(files)
+                        );
+                        return;
+                    } catch (err) {
+                        webview.postMessage({ type: 'JS_LOG', message: `[BUNDLE] postMessageWithAdditionalObjects failed: ${err?.message || err}` });
+                    }
+                }
                 let lastAdded = '';
                 for (const file of files) {
                     if (file.name.toLowerCase().endsWith('.ba2')) {
-                        const path = file.path || file.name;
+                        const path = file.path;
+                        if (!path) {
+                            if (window.chrome?.webview) {
+                                window.chrome.webview.postMessage({ type: 'JS_LOG', message: `[BUNDLE] Rejected dropped file with no path: ${file.name}` });
+                            }
+                            continue;
+                        }
                         this.externalFiles.add(path);
                         lastAdded = path;
                         if (window.chrome?.webview) {
@@ -273,6 +320,7 @@ export class BundleManager {
         const { signal } = this._fileEntryContextAbort;
 
         root.addEventListener('contextmenu', (e) => {
+            if (e.target.closest('.ba2-preview-pane')) return;
             const archiveKey = this.getArchiveSelectionKey();
             const isInspecting = Boolean(this.inspectedBa2Path || this.inspectedFolderPath);
             if (!archiveKey || !isInspecting || this.inspectorLoading) return;
@@ -285,6 +333,12 @@ export class BundleManager {
             const { all, none } = this.getArchiveSelectionMenuState();
             const canExtract = this.canExtractSelection();
             const isBa2 = Boolean(this.inspectedBa2Path);
+            const expandPaths = BundleRenderer.collectFolderPaths(this, {
+                foldersWithSubfoldersOnly: this.getFilteredEntryCount() > 5000
+            });
+            const allExpanded = expandPaths.length === 0
+                || expandPaths.every(path => this.inspectorExpandedDirs.has(path));
+            const noneExpanded = this.inspectorExpandedDirs.size === 0;
             const menu = document.createElement('div');
             menu.className = 'bundle-menu-dropdown file-entry-context-menu';
             menu.innerHTML = `
@@ -295,6 +349,15 @@ export class BundleManager {
                 <div class="bundle-menu-item${none ? ' bundle-menu-item--muted' : ''}" data-action="deselect-all">
                     <i data-lucide="list-minus"></i>
                     <span>${window._t('inspector_deselect_all')}</span>
+                </div>
+                <div class="bundle-menu-divider" role="separator"></div>
+                <div class="bundle-menu-item${allExpanded ? ' bundle-menu-item--muted' : ''}" data-action="expand-all">
+                    <i data-lucide="chevrons-up-down"></i>
+                    <span>${window._t('inspector_expand_all')}</span>
+                </div>
+                <div class="bundle-menu-item${noneExpanded ? ' bundle-menu-item--muted' : ''}" data-action="collapse-all">
+                    <i data-lucide="chevrons-down-up"></i>
+                    <span>${window._t('inspector_collapse_all')}</span>
                 </div>
                 ${isBa2 ? `
                 <div class="bundle-menu-item${canExtract ? '' : ' bundle-menu-item--muted'}" data-action="extract">
@@ -316,6 +379,8 @@ export class BundleManager {
 
             const selectAllItem = menu.querySelector('[data-action="select-all"]');
             const deselectAllItem = menu.querySelector('[data-action="deselect-all"]');
+            const expandAllItem = menu.querySelector('[data-action="expand-all"]');
+            const collapseAllItem = menu.querySelector('[data-action="collapse-all"]');
             const extractItem = menu.querySelector('[data-action="extract"]');
             const clearWorkspaceItem = menu.querySelector('[data-action="clear-workspace"]');
 
@@ -333,6 +398,24 @@ export class BundleManager {
                     ev.stopPropagation();
                     this.deselectAllForArchive(archiveKey);
                     this.afterSelectionChange();
+                    this._closeFileEntryContextMenu();
+                };
+            }
+
+            if (expandAllItem) {
+                expandAllItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    if (allExpanded) return;
+                    this.expandAllInspectorFolders(expandPaths);
+                    this._closeFileEntryContextMenu();
+                };
+            }
+
+            if (collapseAllItem) {
+                collapseAllItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    if (noneExpanded) return;
+                    this.collapseAllInspectorFolders();
                     this._closeFileEntryContextMenu();
                 };
             }
@@ -768,6 +851,402 @@ export class BundleManager {
         this.inspectorLoading = false;
         this.inspectorExpandedDirs = new Set();
         this.inspectorFilter = '';
+        this.clearPreview();
+    }
+
+    clearPreview() {
+        this.disposeMeshViewer();
+        this.disposeAudioPlayer();
+        this.previewPath = '';
+        this.previewResult = null;
+        this.previewLoading = false;
+        this.previewMaterialZoom = null;
+        this._meshWireframe = false;
+        this.previewRequestId += 1;
+    }
+
+    disposeMeshViewer() {
+        if (this._meshViewer) {
+            this._meshViewer.dispose();
+            this._meshViewer = null;
+        }
+    }
+
+    disposeAudioPlayer() {
+        this._audioToggle = null;
+        if (this._audioProgressRaf != null) {
+            cancelAnimationFrame(this._audioProgressRaf);
+            this._audioProgressRaf = null;
+        }
+        const el = document.getElementById('ba2-preview-audio');
+        if (el) {
+            try { el.pause(); el.removeAttribute('src'); el.load(); } catch (_) { /* noop */ }
+        }
+        if (this._audioBlobUrl) {
+            URL.revokeObjectURL(this._audioBlobUrl);
+            this._audioBlobUrl = null;
+        }
+    }
+
+    bindAudioControls(audio) {
+        if (!audio || audio.dataset.controlsBound === '1') return;
+        const playBtn = document.getElementById('ba2-audio-play');
+        const timeLabel = document.getElementById('ba2-audio-time');
+        const seek = document.getElementById('ba2-audio-seek');
+        const muteBtn = document.getElementById('ba2-audio-mute');
+        const volume = document.getElementById('ba2-audio-volume');
+        const loopBtn = document.getElementById('ba2-audio-loop');
+        const player = document.getElementById('ba2-audio-player');
+        if (!playBtn || !timeLabel || !seek) return;
+        audio.dataset.controlsBound = '1';
+
+        const fallbackDuration = Number(this.previewResult?.audio?.duration) || 0;
+        let seeking = false;
+
+        const totalSeconds = () => {
+            const d = Number(audio.duration);
+            return Number.isFinite(d) && d > 0 ? d : fallbackDuration;
+        };
+        const renderPlayState = () => {
+            const playing = !audio.paused && !audio.ended;
+            const playIcon = document.getElementById('ba2-audio-icon-play');
+            const pauseIcon = document.getElementById('ba2-audio-icon-pause');
+            if (playIcon) playIcon.hidden = playing;
+            if (pauseIcon) pauseIcon.hidden = !playing;
+            const label = window._t(playing ? 'preview_audio_pause' : 'preview_audio_play');
+            playBtn.title = `${label} (Space)`;
+            playBtn.setAttribute('aria-label', label);
+        };
+        const renderMuteState = () => {
+            const muted = audio.muted || audio.volume === 0;
+            const volumeIcon = document.getElementById('ba2-audio-icon-volume');
+            const mutedIcon = document.getElementById('ba2-audio-icon-muted');
+            if (volumeIcon) volumeIcon.hidden = muted;
+            if (mutedIcon) mutedIcon.hidden = !muted;
+            if (muteBtn) {
+                const label = window._t(muted ? 'preview_audio_unmute' : 'preview_audio_mute');
+                muteBtn.title = label;
+                muteBtn.setAttribute('aria-label', label);
+            }
+        };
+        const renderProgress = () => {
+            const total = totalSeconds();
+            const current = Number(audio.currentTime) || 0;
+            timeLabel.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(total)}`;
+            if (!seeking && total > 0) {
+                seek.value = String(Math.round((current / total) * 10000));
+                seek.style.setProperty('--value', `${(current / total) * 100}%`);
+            }
+        };
+        const stopProgressLoop = () => {
+            if (this._audioProgressRaf != null) {
+                cancelAnimationFrame(this._audioProgressRaf);
+                this._audioProgressRaf = null;
+            }
+        };
+        const startProgressLoop = () => {
+            stopProgressLoop();
+            const tick = () => {
+                renderProgress();
+                if (!audio.paused && !audio.ended) {
+                    this._audioProgressRaf = requestAnimationFrame(tick);
+                } else {
+                    this._audioProgressRaf = null;
+                }
+            };
+            this._audioProgressRaf = requestAnimationFrame(tick);
+        };
+
+        audio.volume = this._audioVolume;
+        if (volume) {
+            volume.value = String(Math.round(this._audioVolume * 100));
+            volume.style.setProperty('--value', `${this._audioVolume * 100}%`);
+        }
+
+        const togglePlay = () => {
+            if (audio.paused || audio.ended) {
+                audio.play().catch(() => { /* source not ready yet */ });
+            } else {
+                audio.pause();
+            }
+        };
+
+        playBtn.addEventListener('click', togglePlay);
+        audio.addEventListener('play', () => { renderPlayState(); startProgressLoop(); });
+        audio.addEventListener('pause', () => { stopProgressLoop(); renderPlayState(); renderProgress(); });
+        audio.addEventListener('ended', () => { stopProgressLoop(); renderPlayState(); renderProgress(); });
+        audio.addEventListener('loadedmetadata', renderProgress);
+        audio.addEventListener('timeupdate', renderProgress);
+        audio.addEventListener('volumechange', renderMuteState);
+
+        seek.addEventListener('input', () => {
+            const total = totalSeconds();
+            if (total <= 0) return;
+            seeking = true;
+            const ratio = Number(seek.value) / 10000;
+            seek.style.setProperty('--value', `${ratio * 100}%`);
+            audio.currentTime = ratio * total;
+            timeLabel.textContent = `${formatPlayerTime(ratio * total)} / ${formatPlayerTime(total)}`;
+        });
+        seek.addEventListener('change', () => { seeking = false; renderProgress(); });
+
+        if (volume) {
+            volume.addEventListener('input', () => {
+                const value = Number(volume.value) / 100;
+                this._audioVolume = value;
+                audio.volume = value;
+                if (value > 0) audio.muted = false;
+                volume.style.setProperty('--value', `${value * 100}%`);
+                renderMuteState();
+            });
+        }
+        if (muteBtn) {
+            muteBtn.addEventListener('click', () => {
+                audio.muted = !audio.muted;
+                renderMuteState();
+            });
+        }
+        if (loopBtn) {
+            loopBtn.addEventListener('click', () => {
+                audio.loop = !audio.loop;
+                loopBtn.classList.toggle('ba2-audio-icon-btn--on', audio.loop);
+                loopBtn.setAttribute('aria-pressed', audio.loop ? 'true' : 'false');
+            });
+        }
+        this._audioToggle = togglePlay;
+        this.ensureAudioSpaceHandler();
+
+        renderPlayState();
+        renderMuteState();
+        renderProgress();
+    }
+
+    ensureAudioSpaceHandler() {
+        if (this._audioKeyAbort) return;
+        this._audioKeyAbort = new AbortController();
+        document.addEventListener('keydown', (event) => {
+            if (event.code !== 'Space') return;
+            if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+            if (window.app?.currentSection !== 'bundle') return;
+            if (!this._audioToggle) return;
+            if (!document.getElementById('ba2-preview-audio')) return;
+            const target = event.target;
+            if (target && typeof target.closest === 'function'
+                && target.closest('input, textarea, select, [contenteditable], button')) return;
+            event.preventDefault();
+            this._audioToggle();
+        }, { signal: this._audioKeyAbort.signal });
+    }
+
+    getAudioTreeRows() {
+        return [...document.querySelectorAll('.ba2-tree-file[data-preview-path]')]
+            .filter(row => AUDIO_PREVIEW_EXTENSIONS.has(String(row.dataset.previewPath).split('.').pop().toLowerCase()));
+    }
+
+    stepAudioPreview(direction) {
+        const rows = this.getAudioTreeRows();
+        const index = rows.findIndex(row => row.dataset.previewPath === this.previewPath);
+        const target = rows[index + direction];
+        if (!target) return;
+        this.previewFile(target.dataset.previewPath);
+        this._audioAutoplay = true;
+        target.scrollIntoView({ block: 'nearest' });
+    }
+
+    bindAudioDockNav() {
+        document.querySelectorAll('.ba2-audio-dock button').forEach(btn => {
+            btn.onmousedown = (e) => e.preventDefault();
+        });
+        const prevBtn = document.getElementById('ba2-audio-prev');
+        const nextBtn = document.getElementById('ba2-audio-next');
+        const extractBtn = document.getElementById('ba2-audio-extract');
+        if (extractBtn) extractBtn.onclick = () => this.extractPreviewFile();
+        const infoBtn = document.getElementById('ba2-audio-info');
+        if (infoBtn) {
+            infoBtn.onclick = () => {
+                this._audioInfoOpen = !this._audioInfoOpen;
+                document.querySelector('.ba2-preview-pane')
+                    ?.classList.toggle('ba2-preview-pane--hidden', !this._audioInfoOpen);
+                infoBtn.classList.toggle('ba2-audio-icon-btn--on', this._audioInfoOpen);
+                infoBtn.setAttribute('aria-pressed', this._audioInfoOpen ? 'true' : 'false');
+            };
+        }
+        if (!prevBtn && !nextBtn) return;
+        const rows = this.getAudioTreeRows();
+        const index = rows.findIndex(row => row.dataset.previewPath === this.previewPath);
+        if (prevBtn) {
+            prevBtn.disabled = index <= 0;
+            prevBtn.onclick = () => this.stepAudioPreview(-1);
+        }
+        if (nextBtn) {
+            nextBtn.disabled = index < 0 || index >= rows.length - 1;
+            nextBtn.onclick = () => this.stepAudioPreview(1);
+        }
+    }
+
+    playIfAutoplay(audio) {
+        if (!this._audioAutoplay) return;
+        this._audioAutoplay = false;
+        audio.play().catch(() => { /* autoplay blocked or not ready */ });
+    }
+
+    async mountAudioPlayer() {
+        this.bindAudioDockNav();
+        const el = document.getElementById('ba2-preview-audio');
+        if (!el || this.previewResult?.kind !== 'audio') return;
+        const url = el.dataset.audioUrl;
+        if (!url) return;
+        if (el.src) {
+            this.bindAudioControls(el);
+            return;
+        }
+        const requestId = this.previewRequestId;
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const blob = await response.blob();
+            if (requestId !== this.previewRequestId) return;
+            const current = document.getElementById('ba2-preview-audio');
+            if (!current) return;
+            this.bindAudioControls(current);
+            this._audioBlobUrl = URL.createObjectURL(blob);
+            current.src = this._audioBlobUrl;
+            this.playIfAutoplay(current);
+        } catch (_) {
+            // Blob fetch failed; let the player stream from the host URL.
+            if (requestId === this.previewRequestId && document.body.contains(el)) {
+                this.bindAudioControls(el);
+                el.src = url;
+                this.playIfAutoplay(el);
+            }
+        }
+    }
+
+    rememberPreview(cacheKey, result) {
+        if (!cacheKey) return;
+        if (this.previewCache.has(cacheKey)) this.previewCache.delete(cacheKey);
+        this.previewCache.set(cacheKey, result);
+        while (this.previewCache.size > 20) {
+            const oldest = this.previewCache.keys().next().value;
+            this.previewCache.delete(oldest);
+        }
+    }
+
+    previewFile(path) {
+        if (!path || !window.chrome?.webview) return;
+        const archiveKey = this.getArchiveSelectionKey();
+        if (!archiveKey) return;
+
+        const cacheKey = `${archiveKey}|${path}`;
+        this._audioAutoplay = false;
+        this.previewPath = path;
+        this.previewMaterialZoom = null;
+        this._meshWireframe = false;
+        const cached = this.previewCache.get(cacheKey);
+        if (cached) {
+            this.previewLoading = false;
+            this.previewResult = cached;
+            this.previewRequestId += 1;
+            this.updatePreviewPane();
+            return;
+        }
+
+        this.previewLoading = true;
+        this.previewResult = null;
+        this.previewRequestId += 1;
+        const requestId = this.previewRequestId;
+        this.updatePreviewPane();
+
+        const folder = Boolean(this.inspectedFolderPath);
+        window.chrome.webview.postMessage({
+            type: 'BUNDLE_PREVIEW_FILE',
+            source: folder ? this.inspectedFolderPath : this.resolveArchivePath(this.inspectedBa2Path),
+            mode: folder ? 'folder' : 'ba2',
+            path,
+            requestId
+        });
+    }
+
+    extractPreviewFile() {
+        if (!window.chrome?.webview || !this.inspectedBa2Path || !this.previewPath) return;
+        this._closeBundleActionsMenu();
+        this._closeFileEntryContextMenu();
+        window.chrome.webview.postMessage({
+            type: 'BUNDLE_EXTRACT',
+            archive: this.resolveArchivePath(this.inspectedBa2Path),
+            paths: [this.previewPath],
+            single: true
+        });
+    }
+
+    highlightPreviewRow() {
+        document.querySelectorAll('.ba2-tree-file').forEach(row => {
+            row.classList.toggle('ba2-tree-file--previewing', row.dataset.previewPath === this.previewPath);
+        });
+    }
+
+    bindPreviewEvents() {
+        const extractBtn = document.getElementById('btn-preview-extract');
+        if (extractBtn) extractBtn.onclick = () => this.extractPreviewFile();
+
+        document.querySelectorAll('[data-material-texture]').forEach(btn => {
+            btn.onclick = () => {
+                this.previewMaterialZoom = Number(btn.dataset.materialTexture);
+                this.updatePreviewPane();
+            };
+        });
+        const backBtn = document.getElementById('btn-preview-material-back');
+        if (backBtn) {
+            backBtn.onclick = () => {
+                this.previewMaterialZoom = null;
+                this.updatePreviewPane();
+            };
+        }
+
+        const wireBtn = document.getElementById('btn-mesh-wire');
+        if (wireBtn) {
+            wireBtn.classList.toggle('ba2-preview-mesh-tool--on', this._meshWireframe);
+            wireBtn.onclick = () => {
+                this._meshWireframe = !this._meshWireframe;
+                wireBtn.classList.toggle('ba2-preview-mesh-tool--on', this._meshWireframe);
+                if (this._meshViewer) this._meshViewer.setWireframe(this._meshWireframe);
+            };
+        }
+        const resetBtn = document.getElementById('btn-mesh-reset');
+        if (resetBtn) resetBtn.onclick = () => this._meshViewer?.reset();
+    }
+
+    mountMeshViewer() {
+        this.disposeMeshViewer();
+        const stage = document.getElementById('ba2-mesh-stage');
+        const mesh = this.previewResult?.kind === 'mesh' ? this.previewResult.mesh : null;
+        if (!stage || !mesh) return;
+        this._meshViewer = mountMeshViewer(stage, mesh);
+        if (this._meshWireframe) this._meshViewer.setWireframe(true);
+    }
+
+    updatePreviewPane() {
+        this.disposeMeshViewer();
+        this.disposeAudioPlayer();
+        const dockSlot = document.getElementById('ba2-audio-dock-slot');
+        if (dockSlot) {
+            dockSlot.innerHTML = BundleRenderer.renderAudioDockHtml(this);
+            if (window.lucide) {
+                try { window.lucide.createIcons({ nodes: [dockSlot] }); } catch (_) { }
+            }
+        }
+        const pane = document.querySelector('.ba2-preview-pane');
+        if (!pane) return;
+        const holder = document.createElement('div');
+        holder.innerHTML = BundleRenderer.renderPreviewPaneHtml(this);
+        const next = holder.firstElementChild;
+        if (!next) return;
+        pane.replaceWith(next);
+        this.bindPreviewEvents();
+        this.mountMeshViewer();
+        this.mountAudioPlayer();
+        this.highlightPreviewRow();
+        if (window.lucide) window.lucide.createIcons({ nodes: [next] });
     }
 
     clearInspectorLoadTimeout() {
@@ -811,6 +1290,7 @@ export class BundleManager {
         if (!path || !window.chrome?.webview) return;
         if (!this.isStagedBa2Path(path)) return;
         this.clearInspectorLoadTimeout();
+        this.clearPreview();
         this.inspectedBa2Path = path;
         this.inspectedFolderPath = '';
         this.inspectorLoading = true;
@@ -826,6 +1306,7 @@ export class BundleManager {
         if (!path || !window.chrome?.webview) return;
         if (!this.isStagedFolderPath(path)) return;
         this.clearInspectorLoadTimeout();
+        this.clearPreview();
         this.inspectedFolderPath = path;
         this.inspectedBa2Path = '';
         this.inspectorArchiveType = '';
@@ -894,6 +1375,17 @@ export class BundleManager {
             return;
         }
 
+        if (data.type === 'BUNDLE_FILE_PREVIEW') {
+            if (Number(data.requestId) !== this.previewRequestId) return;
+            this.previewLoading = false;
+            this.previewResult = data;
+            if (this.previewPath && data.kind !== 'audio' && (!data.error || data.error === 'unsupported')) {
+                this.rememberPreview(`${this.getArchiveSelectionKey()}|${this.previewPath}`, data);
+            }
+            this.updatePreviewPane();
+            return;
+        }
+
         if (data.type === 'GAME_BA2_LIST') {
             this.gameBa2List = Array.isArray(data.files) ? data.files : [];
             if (data.dataPath) this.gameDataPath = data.dataPath;
@@ -905,9 +1397,62 @@ export class BundleManager {
     updateFileEntryHeaderToolbar() {
         const headerToolbar = document.getElementById('file-entry-header-toolbar');
         if (!headerToolbar) return;
+        this._inspectorMetaMinWidth = 0;
         headerToolbar.innerHTML = (this.inspectedBa2Path || this.inspectedFolderPath)
             ? BundleRenderer.renderInspectorToolbar(this)
             : '';
+    }
+
+    rerenderInspectorTree({ resetScroll = false } = {}) {
+        const treeEl = document.querySelector('.file-entry-inspect .ba2-explorer-tree');
+        if (!treeEl) return;
+        const scrollTop = treeEl.scrollTop;
+        treeEl.innerHTML = BundleRenderer.renderExplorerTreeHtml(this);
+        this.bindInspectorTreeEvents(treeEl);
+        if (window.lucide) {
+            try { window.lucide.createIcons({ nodes: [treeEl] }); } catch (_) { }
+        }
+        treeEl.scrollTop = resetScroll ? 0 : scrollTop;
+    }
+
+    expandAllInspectorFolders(precomputedPaths) {
+        const paths = precomputedPaths ?? BundleRenderer.collectFolderPaths(this, {
+            foldersWithSubfoldersOnly: this.getFilteredEntryCount() > 5000
+        });
+        for (const path of paths) this.inspectorExpandedDirs.add(path);
+        this.rerenderInspectorTree();
+    }
+
+    collapseAllInspectorFolders() {
+        this.inspectorExpandedDirs.clear();
+        this.rerenderInspectorTree();
+    }
+
+    refreshInspectorFilter() {
+        this.rerenderInspectorTree({ resetScroll: true });
+
+        const countEl = document.getElementById('ba2-inspector-count');
+        if (countEl) {
+            countEl.textContent = BundleRenderer.getInspectorCountLabel(this);
+            const meta = countEl.closest('.bundle-inspector-pathbar-meta');
+            if (meta) {
+                meta.style.minWidth = '';
+                const width = meta.offsetWidth;
+                this._inspectorMetaMinWidth = Math.max(this._inspectorMetaMinWidth || 0, width);
+                if (this._inspectorMetaMinWidth) {
+                    meta.style.minWidth = `${this._inspectorMetaMinWidth}px`;
+                }
+            }
+        }
+
+        const extractBtn = document.getElementById('btn-inspector-extract');
+        if (extractBtn) {
+            const archiveKey = this.getArchiveSelectionKey();
+            extractBtn.disabled = !(archiveKey && this.getEffectiveSelectionPaths(archiveKey).length > 0);
+        }
+
+        this._updateSelectionMenuItemStates();
+        this.updateWizardState();
     }
 
     updateInspectorPanel({ preserveScroll = true } = {}) {
@@ -917,6 +1462,7 @@ export class BundleManager {
         this.updateFileEntryHeaderToolbar();
         const root = document.getElementById('ba2-inspector-root');
         if (!root) return;
+        this.disposeAudioPlayer();
         root.innerHTML = BundleRenderer.renderInspectorContent(this);
         this.setupInspectorEvents();
         this.bindStagedListEvents(root);
@@ -1093,6 +1639,20 @@ export class BundleManager {
                 this.toggleInspectorFolder(path);
             };
         });
+
+        queryAll('.ba2-tree-file').forEach(row => {
+            row.onclick = (e) => {
+                if (e.target.closest('.ba2-tree-check')) return;
+                const path = row.dataset.previewPath;
+                if (!path) return;
+                if (path === this.previewPath) {
+                    this.clearPreview();
+                    this.updatePreviewPane();
+                    return;
+                }
+                this.previewFile(path);
+            };
+        });
     }
 
     setupInspectorEvents() {
@@ -1107,15 +1667,37 @@ export class BundleManager {
         }
 
         if (filterInput) {
+            const filterClear = document.getElementById('ba2-inspector-filter-clear');
+            const syncFilterClear = () => {
+                if (filterClear) filterClear.hidden = !filterInput.value;
+            };
+            syncFilterClear();
+
             filterInput.oninput = (e) => {
                 this.inspectorFilter = e.target.value;
-                this.updateInspectorPanel();
-                const next = document.getElementById('ba2-inspector-filter');
-                if (next) {
-                    next.focus();
-                    next.setSelectionRange(next.value.length, next.value.length);
+                syncFilterClear();
+                if (this._filterTimer) clearTimeout(this._filterTimer);
+                this._filterTimer = setTimeout(() => {
+                    this._filterTimer = null;
+                    this.refreshInspectorFilter();
+                }, 150);
+            };
+
+            filterInput.onkeydown = (e) => {
+                if (e.key === 'Escape' && filterInput.value) {
+                    e.preventDefault();
+                    filterInput.value = '';
+                    filterInput.dispatchEvent(new Event('input', { bubbles: true }));
                 }
             };
+
+            if (filterClear) {
+                filterClear.onclick = () => {
+                    filterInput.value = '';
+                    filterInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    filterInput.focus();
+                };
+            }
         }
 
         const selectAllBtn = document.getElementById('btn-inspector-select-all');
@@ -1145,6 +1727,8 @@ export class BundleManager {
         }
 
         this.bindInspectorTreeEvents();
+        this.bindPreviewEvents();
+        this.mountAudioPlayer();
     }
 
     loadGameBa2List() {
@@ -1202,6 +1786,22 @@ export class BundleManager {
                     bundle.selectedFolders.add(data.path);
                     bundle.pendingAutoInspectFolderPath = data.path;
                     bundle.refresh();
+                    return;
+                }
+
+                if (data.type === 'BUNDLE_FILES_DROPPED') {
+                    const droppedFiles = Array.isArray(data.files) ? data.files.filter(Boolean) : [];
+                    const droppedFolders = Array.isArray(data.folders) ? data.folders.filter(Boolean) : [];
+                    droppedFiles.forEach(f => bundle.externalFiles.add(f));
+                    droppedFolders.forEach(f => bundle.selectedFolders.add(f));
+                    if (droppedFiles.length > 0) {
+                        bundle.pendingAutoInspectPath = droppedFiles[droppedFiles.length - 1];
+                    } else if (droppedFolders.length > 0) {
+                        bundle.pendingAutoInspectFolderPath = droppedFolders[droppedFolders.length - 1];
+                    }
+                    if (droppedFiles.length > 0 || droppedFolders.length > 0) {
+                        bundle.refresh();
+                    }
                 }
             } catch (_) { }
         });
@@ -1234,12 +1834,20 @@ export class BundleManager {
 
     initGlobalHandlers() {
         if (!window.handleRenameBundle) {
-            window.handleRenameBundle = (name) => {
+            window.handleRenameBundle = async (name) => {
                 document.querySelectorAll('.bundle-menu-dropdown').forEach(d => d.remove());
-                const newName = prompt(window._t('rename_bundle_prompt'), name.replace('.ba2', ''));
-                if (newName && newName !== name.replace('.ba2', '')) {
-                     let cleanName = newName; 
-                     if (cleanName.endsWith('.ba2')) cleanName = cleanName.substring(0, cleanName.length - 4);
+                const currentBase = name.replace('.ba2', '');
+                const newName = await window.appPrompt({
+                    compact: true,
+                    title: window._t('rename_bundle_title'),
+                    promptLabel: window._t('rename_bundle_label'),
+                    defaultValue: currentBase,
+                    okText: window._t('rename'),
+                    maxLength: 200
+                });
+                let cleanName = String(newName || '').trim();
+                if (cleanName.toLowerCase().endsWith('.ba2')) cleanName = cleanName.substring(0, cleanName.length - 4);
+                if (cleanName && cleanName !== currentBase) {
                     window.chrome.webview.postMessage({ type: 'RENAME_MOD', currentName: name, newName: cleanName });
                 }
             };
@@ -1262,6 +1870,20 @@ export class BundleManager {
                 document.querySelectorAll('.bundle-menu-dropdown').forEach(d => d.remove());
                 console.log("[BUNDLE] Requesting delete for file:", name);
                 window.chrome.webview.postMessage({ type: 'DELETE_BUNDLE_FILE', name: name });
+            };
+        }
+
+        if (!window.handleOpenBundleFolder) {
+            window.handleOpenBundleFolder = (name) => {
+                document.querySelectorAll('.bundle-menu-dropdown').forEach(d => d.remove());
+                window.chrome?.webview?.postMessage({ type: 'OPEN_BUNDLE_FOLDER', name });
+            };
+        }
+
+        if (!window.handleShareBundle) {
+            window.handleShareBundle = (name) => {
+                document.querySelectorAll('.bundle-menu-dropdown').forEach(d => d.remove());
+                window.chrome?.webview?.postMessage({ type: 'SHARE_BUNDLE', name });
             };
         }
 
@@ -1370,6 +1992,24 @@ export class BundleManager {
                 };
                 menu.appendChild(itemToggle);
 
+                const itemOpenFolder = document.createElement('div');
+                itemOpenFolder.className = 'bundle-menu-item';
+                itemOpenFolder.innerHTML = `<i data-lucide="folder-open" style="width: 14px;"></i> ${window._t('bundle_open_folder')}`;
+                itemOpenFolder.onclick = (e) => {
+                    e.stopPropagation();
+                    window.handleOpenBundleFolder(name);
+                };
+                menu.appendChild(itemOpenFolder);
+
+                const itemShare = document.createElement('div');
+                itemShare.className = 'bundle-menu-item';
+                itemShare.innerHTML = `<i data-lucide="share-2" style="width: 14px;"></i> ${window._t('bundle_share')}`;
+                itemShare.onclick = (e) => {
+                    e.stopPropagation();
+                    window.handleShareBundle(name);
+                };
+                menu.appendChild(itemShare);
+
                 const itemPromote = document.createElement('div');
                 itemPromote.className = 'bundle-menu-item';
                 itemPromote.innerHTML = `<i data-lucide="arrow-right-circle" style="width: 14px;"></i> ${window._t('move_bundle_to_mods')}`;
@@ -1420,9 +2060,22 @@ export class BundleManager {
         const menuExtractBtn = document.getElementById('btn-menu-extract');
 
         if (nameInput) {
+            const nameClear = document.getElementById('bundle-name-clear');
+            const syncNameClear = () => {
+                if (nameClear) nameClear.hidden = !nameInput.value;
+            };
             nameInput.addEventListener('input', (e) => {
                 this.bundleName = e.target.value.replace(/[^a-z0-9-_]/gi, '');
+                syncNameClear();
             });
+            syncNameClear();
+            if (nameClear) {
+                nameClear.addEventListener('click', () => {
+                    nameInput.value = '';
+                    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    nameInput.focus();
+                });
+            }
         }
 
         const updateBundleTypeSummary = () => {

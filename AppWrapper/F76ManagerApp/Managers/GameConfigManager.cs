@@ -74,14 +74,20 @@ namespace F76ManagerApp.Managers
             }
         }
 
-        public static void WriteIniTextNoBom(string path, string content)
+        public static void WriteIniTextNoBom(string path, string content) =>
+            WriteIniText(path, content, new UTF8Encoding(false));
+
+        public static void WriteIniText(string path, string content, Encoding encoding)
         {
             string text = (content ?? "").TrimStart('\uFEFF');
             text = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
             if (!text.EndsWith("\r\n", StringComparison.Ordinal))
                 text += "\r\n";
+            byte[] body = encoding.GetBytes(text);
             ClearReadOnlyAttribute(path);
-            File.WriteAllText(path, text, new UTF8Encoding(false));
+            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
+            fs.Write(encoding.GetPreamble());
+            fs.Write(body);
         }
 
         public void StripIniBomIfPresent(string overrideDocsPath = null, string overridePrefix = null)

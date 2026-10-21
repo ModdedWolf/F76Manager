@@ -45,7 +45,7 @@
     margin: 0;
     font-size: 1.4rem;
     font-weight: 800;
-    color: #fff;
+    color: var(--text-main);
     letter-spacing: -0.5px;
 }
 
@@ -154,7 +154,7 @@
 
 .btn-popup.secondary:hover {
     background: rgba(255, 255, 255, 0.1);
-    color: #fff;
+    color: var(--text-main);
     border-color: rgba(255, 255, 255, 0.2);
 }
 
@@ -276,7 +276,7 @@
 
 .checkbox-label strong {
     font-size: 0.9rem;
-    color: #fff;
+    color: var(--text-main);
 }
 
 .checkbox-label span {
@@ -342,7 +342,7 @@
     margin: 0;
     font-size: 1.4rem;
     font-weight: 800;
-    color: #fff;
+    color: var(--text-main);
     letter-spacing: -0.5px;
 }
 

@@ -24,15 +24,26 @@ function fileNameFromPath(filePath) {
     return parts.length ? parts[parts.length - 1] : p;
 }
 
-function renderConflictGroup(c) {
-    const providers = Array.isArray(c.providers) && c.providers.length
+function tOr(key, fallback, ...args) {
+    const v = window._t?.(key, ...args);
+    return v && v !== key ? v : fallback;
+}
+
+function providersOf(c) {
+    return Array.isArray(c.providers) && c.providers.length
         ? c.providers
         : (c.modNames || []).map(m => ({ modName: m }));
+}
+
+function renderConflictGroup(c, winner) {
+    const providers = providersOf(c);
     const status = c.status || 'differs';
     const fullPath = c.filePath || '';
     const shortName = fileNameFromPath(fullPath);
     const modCount = providers.length;
     const countLabel = window._t('conflict_mod_count', modCount) || `${modCount} mods`;
+    const winsLabel = tOr('conflict_winner', 'Wins');
+    const makeLabel = tOr('conflict_make_winner', 'Make winner');
 
     return `
         <div class="conflict-card" data-status="${escapeAttr(status)}">
@@ -43,13 +54,19 @@ function renderConflictGroup(c) {
             </div>
             <div class="conflict-card-path" title="${escapeAttr(fullPath)}">${escapeHtml(fullPath)}</div>
             <div class="conflict-card-providers">
-                ${providers.map(p => `
-                    <span class="conflict-chip">
-                        <i data-lucide="package"></i>
+                ${providers.map((p, i) => {
+                    const isWinner = !!winner && winner.index === i;
+                    const key = winner?.keys[i];
+                    const canPromote = !!winner && !winner.loose && !isWinner && !!key;
+                    return `
+                    <span class="conflict-chip${isWinner ? ' conflict-chip--winner' : ''}">
+                        <i data-lucide="${isWinner ? 'crown' : 'package'}"></i>
                         <span>${escapeHtml(p.modName || p)}</span>
                         ${p.size != null ? `<em>${escapeHtml(formatBytes(p.size))}</em>` : ''}
-                    </span>
-                `).join('')}
+                        ${isWinner ? `<b class="conflict-chip-tag" title="${escapeAttr(winner.loose ? tOr('conflict_loose_wins', 'Loose files always override archives.') : winsLabel)}">${escapeHtml(winsLabel)}</b>` : ''}
+                        ${canPromote ? `<button type="button" class="conflict-make-winner" data-mod-key="${escapeAttr(key)}" data-others="${escapeAttr(JSON.stringify(winner.keys.filter((k, j) => k && j !== i)))}">${escapeHtml(makeLabel)}</button>` : ''}
+                    </span>`;
+                }).join('')}
             </div>
         </div>
     `;
@@ -61,6 +78,72 @@ export class ConflictModal {
         this.isOpen = false;
         this.data = null;
         this._tab = 'differs';
+    }
+
+    _initOrder() {
+        const mods = (this.app?.realData?.mods || []).filter(m => m?.originalName && m.status === 'enabled');
+        const lo = (m) => (typeof m.loadOrder === 'number' ? m.loadOrder : 9999);
+        this._order = mods
+            .map((m, i) => ({ m, i }))
+            .sort((a, b) => lo(a.m) - lo(b.m) || a.i - b.i)
+            .map(({ m }) => m.originalName);
+        this._byFile = new Map();
+        for (const m of mods) {
+            for (const n of [m.originalName, ...(Array.isArray(m.files) ? m.files : [])]) {
+                const base = fileNameFromPath(n).toLowerCase();
+                if (base && !this._byFile.has(base)) this._byFile.set(base, m.originalName);
+            }
+        }
+    }
+
+    _winnerFor(c) {
+        const providers = providersOf(c);
+        const keys = providers.map(p => this._byFile?.get(String(p.modName || p).toLowerCase()) || null);
+        const looseIdx = providers.findIndex(p => p.kind === 'loose' || p.kind === 'folder');
+        if (looseIdx >= 0) return { index: looseIdx, loose: true, keys };
+        let index = -1;
+        let best = -1;
+        keys.forEach((k, i) => {
+            const pos = k ? this._order.indexOf(k) : -1;
+            if (pos > best) { best = pos; index = i; }
+        });
+        return index >= 0 ? { index, loose: false, keys } : null;
+    }
+
+    _renderDiffersPanel(real) {
+        if (!real.length) {
+            return `<p class="conflict-empty">${escapeHtml(window._t('conflict_no_real') || 'No differing file contents found.')}</p>`;
+        }
+        return `<p class="conflict-panel-hint">${escapeHtml(tOr('conflict_make_winner_hint', 'The mod that loads last wins. "Make winner" moves that mod below the others, which affects every file they share.'))}</p>`
+            + real.map(c => renderConflictGroup(c, this._winnerFor(c))).join('');
+    }
+
+    _makeWinner(modKey, otherKeys) {
+        const order = this._order.filter(k => k !== modKey);
+        const last = Math.max(-1, ...otherKeys.map(k => order.indexOf(k)));
+        order.splice(last + 1, 0, modKey);
+        this._order = order;
+
+        if (Array.isArray(this.data?.requestedMods)) {
+            const pos = (k) => {
+                const i = order.indexOf(k);
+                return i < 0 ? Number.MAX_SAFE_INTEGER : i;
+            };
+            this.data.requestedMods = this.data.requestedMods
+                .map((k, i) => ({ k, i }))
+                .sort((a, b) => pos(a.k) - pos(b.k) || a.i - b.i)
+                .map(({ k }) => k);
+        }
+
+        window.chrome.webview.postMessage({ type: 'UPDATE_MOD_ORDER', order });
+
+        const panel = document.querySelector('#conflict-popup-overlay .conflict-tab-panel[data-panel="differs"]');
+        if (panel) {
+            const scroll = panel.scrollTop;
+            panel.innerHTML = this._renderDiffersPanel(this._split().real);
+            panel.scrollTop = scroll;
+            if (window.lucide) window.lucide.createIcons({ nodes: [panel] });
+        }
     }
 
     _split() {
@@ -125,14 +208,12 @@ export class ConflictModal {
                         </div>
 
                         <div class="conflict-tab-panel scroll-styled" data-panel="differs" ${tab === 'differs' ? '' : 'hidden'}>
-                            ${real.length
-                                ? real.map(c => renderConflictGroup(c)).join('')
-                                : `<p class="conflict-empty">${escapeHtml(window._t('conflict_no_real') || 'No differing file contents found.')}</p>`}
+                            ${this._renderDiffersPanel(real)}
                         </div>
                         <div class="conflict-tab-panel scroll-styled" data-panel="identical" ${tab === 'identical' ? '' : 'hidden'}>
                             <p class="conflict-panel-hint">${escapeHtml(window._t('conflict_harmless_hint') || 'These files are byte-identical across mods, so load order does not matter.')}</p>
                             ${identical.length
-                                ? identical.map(c => renderConflictGroup(c)).join('')
+                                ? identical.map(c => renderConflictGroup(c, null)).join('')
                                 : `<p class="conflict-empty">${escapeHtml(window._t('conflict_no_harmless') || 'No identical duplicates.')}</p>`}
                         </div>
                     </div>
@@ -157,6 +238,7 @@ export class ConflictModal {
         console.log('[ConflictModal] show() called. requestedMods:', data.requestedMods, 'count:', data.requestedMods?.length);
         this.data = data;
         this.isOpen = true;
+        this._initOrder();
         const { real, identical } = this._split();
         this._tab = real.length || !identical.length ? 'differs' : 'identical';
         this.injectAndMount();
@@ -220,6 +302,13 @@ export class ConflictModal {
         }
         overlayElement.addEventListener('click', (e) => {
             if (infoPopover && !infoPopover.hidden && !e.target.closest('.conflict-info-wrap')) setInfoOpen(false);
+            const promote = e.target.closest('.conflict-make-winner');
+            if (promote) {
+                e.stopPropagation();
+                let others = [];
+                try { others = JSON.parse(promote.dataset.others || '[]'); } catch (_) { }
+                this._makeWinner(promote.dataset.modKey, others);
+            }
         });
         overlayElement.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && infoPopover && !infoPopover.hidden) {

@@ -10,6 +10,15 @@ import {
 import { escapeHtml, escapeAttr } from '../utils/htmlSafe.js';
 import { DEFAULT_UI_THEME } from '../themes/registry.js';
 import { applyUiTheme, getThemeOptionsForSettings, getRegisteredUserThemes, isUserThemeId } from '../utils/themeManager.js';
+import {
+    CONFIG_EDITOR_FONT_FAMILIES,
+    CONFIG_EDITOR_FONT_MIN,
+    CONFIG_EDITOR_FONT_MAX,
+    clampConfigEditorFontSize,
+    normalizeConfigEditorFontFamily,
+    configEditorFontFamilyLabel,
+    getConfigEditorFont
+} from '../utils/configEditorFont.js';
 
 export class Settings {
     constructor() {
@@ -39,8 +48,10 @@ export class Settings {
         { id: 'platform-glow-toggle', labelKey: 'platform_badge_glow', key: 'platformBadgeGlow' },
         { id: 'sync-platforms-toggle', labelKey: 'sync_platforms', key: 'syncPlatforms' },
         { id: 'auto-force-toggle', labelKey: 'auto_conflict_override', key: 'autoForceDeploy' },
+        { id: 'ignore-archive-ini-toggle', labelKey: 'ignore_archive_ini', key: 'ignoreArchiveIniFiles' },
         { id: 'virtual-mod-mode-toggle', labelKey: 'virtual_mod_mode', key: 'virtualModMode' },
         { id: 'config-spellcheck-toggle', labelKey: 'config_editor_spellcheck', key: 'configEditorSpellCheck' },
+        { id: 'config-keep-open-toggle', labelKey: 'config_editor_keep_open', key: 'configEditorKeepOpen' },
         { id: 'confirm-delete-mod-toggle', labelKey: 'confirm_before_delete_mod', key: 'confirmBeforeDeleteMod' },
         { id: 'confirm-remove-old-mod-toggle', labelKey: 'confirm_before_remove_old_mod_on_update', key: 'confirmBeforeRemoveOldModOnUpdate' },
         { id: 'update-all-presets-toggle', labelKey: 'update_mods_in_all_presets', key: 'updateModsInAllPresets' },
@@ -51,6 +62,7 @@ export class Settings {
     render(data) {
         const ms = data ? (data.managerSettings || {}) : {};
         const hasNexus = !!ms.nexusLoggedIn;
+        const editorFont = getConfigEditorFont(ms);
 
         const t = (k) => window._t(k);
 
@@ -73,8 +85,10 @@ export class Settings {
             platformBadgeGlow: true,
             syncPlatforms: true,
             autoForceDeploy: false,
+            ignoreArchiveIniFiles: false,
             virtualModMode: false,
             configEditorSpellCheck: false,
+            configEditorKeepOpen: true,
             confirmBeforeDeleteMod: false,
             confirmBeforeRemoveOldModOnUpdate: false,
             updateModsInAllPresets: false,
@@ -122,6 +136,24 @@ export class Settings {
                         <option value="auto" ${(ms.archiveKeyName || 'auto') === 'auto' ? 'selected' : ''}>${t('archive_key_auto')}</option>
                         <option value="sResourceArchive2List" ${ms.archiveKeyName === 'sResourceArchive2List' ? 'selected' : ''}>sResourceArchive2List</option>
                         <option value="sResourceIndexFileList" ${ms.archiveKeyName === 'sResourceIndexFileList' ? 'selected' : ''}>sResourceIndexFileList</option>
+                    </select>
+                </div>
+
+                <div class="tweak-item">
+                    <div class="tweak-info">
+                        <div class="tweak-label">${t('config_editor_font_size')}</div>
+                        <div class="tweak-desc">${t('config_editor_font_size_desc')}</div>
+                    </div>
+                    <input type="number" class="tweak-select" id="config-editor-font-size" min="${CONFIG_EDITOR_FONT_MIN}" max="${CONFIG_EDITOR_FONT_MAX}" step="1" value="${editorFont.size}" style="width: 90px;">
+                </div>
+
+                <div class="tweak-item">
+                    <div class="tweak-info">
+                        <div class="tweak-label">${t('config_editor_font_family')}</div>
+                        <div class="tweak-desc">${t('config_editor_font_family_desc')}</div>
+                    </div>
+                    <select class="tweak-select" id="config-editor-font-family">
+                        ${CONFIG_EDITOR_FONT_FAMILIES.map(f => `<option value="${escapeAttr(f.id)}" ${f.id === editorFont.family ? 'selected' : ''}>${escapeHtml(configEditorFontFamilyLabel(f))}</option>`).join('')}
                     </select>
                 </div>
             </div>`;
@@ -350,8 +382,10 @@ export class Settings {
             platformBadgeGlow: true,
             syncPlatforms: true,
             autoForceDeploy: false,
+            ignoreArchiveIniFiles: false,
             virtualModMode: false,
             configEditorSpellCheck: false,
+            configEditorKeepOpen: true,
             confirmBeforeDeleteMod: false,
             confirmBeforeRemoveOldModOnUpdate: false,
             updateModsInAllPresets: false,
@@ -408,6 +442,13 @@ export class Settings {
         const archiveEl = document.getElementById('archive-key-select');
         const nextArchive = hostVal('archiveKeyName', 'auto');
         if (shouldApply(archiveEl, last.archiveKeyName, nextArchive)) archiveEl.value = nextArchive;
+
+        const nextFont = getConfigEditorFont(ms);
+        const prevFont = getConfigEditorFont(last);
+        const fontSizeEl = document.getElementById('config-editor-font-size');
+        if (shouldApply(fontSizeEl, prevFont.size, nextFont.size)) fontSizeEl.value = String(nextFont.size);
+        const fontFamilyEl = document.getElementById('config-editor-font-family');
+        if (shouldApply(fontFamilyEl, prevFont.family, nextFont.family)) fontFamilyEl.value = nextFont.family;
 
         const nextNexus = !!ms.nexusLoggedIn;
         const prevNexus = !!last.nexusLoggedIn;
@@ -516,6 +557,13 @@ export class Settings {
             Settings.PATHS.forEach(p => { const el = document.getElementById(p.id); if (el) settings[p.key] = el.value; });
             Settings.TOGGLES.forEach(p => { const el = document.getElementById(p.id); if (el) settings[p.key] = el.checked; });
             settings.archiveKeyName = document.getElementById('archive-key-select')?.value ?? 'auto';
+            const fontSizeEl = document.getElementById('config-editor-font-size');
+            const fontFamilyEl = document.getElementById('config-editor-font-family');
+            if (fontSizeEl) {
+                settings.configEditorFontSize = clampConfigEditorFontSize(fontSizeEl.value);
+                fontSizeEl.value = String(settings.configEditorFontSize);
+            }
+            if (fontFamilyEl) settings.configEditorFontFamily = normalizeConfigEditorFontFamily(fontFamilyEl.value);
             settings.keybinds = this._keybindDraft || getKeybinds(window.app?.realData?.managerSettings);
             saveKeybindsLocal(settings.keybinds);
             window.chrome.webview.postMessage({ type: 'SAVE_MANAGER_SETTINGS', settings });

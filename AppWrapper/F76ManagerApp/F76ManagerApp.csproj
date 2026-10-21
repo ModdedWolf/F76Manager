@@ -20,10 +20,14 @@
     <Authors>F76 Manager</Authors>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="BCnEncoder.Net" Version="2.1.0" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
     <PackageReference Include="NvAPIWrapper.Net" Version="0.8.1.101" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WmaDecoder\WmaDecoder.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="Icon.ico">
@@ -38,7 +42,7 @@
       <Link>www\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </EmbeddedResource>
   </ItemGroup>
-  <Target Name="BundleWebJs" BeforeTargets="BeforeBuild">
+  <Target Name="BundleWebJs" BeforeTargets="BeforeBuild" Condition="'$(SkipWebBundle)' != 'true'">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\WebSrc\bundle.ps1&quot; -Configuration $(Configuration)" />
   </Target>
 </Project>

@@ -516,6 +516,22 @@ public partial class Form1
 
         StartupTrace.Mark("Essentials: SyncAppPaths(quick) done");
 
+        if (_platformManager.CurrentPlatform == GamePlatform.Steam && _platformManager.IsPts)
+        {
+            try
+            {
+                if (SeedPtsFromLiveIfNeeded())
+                {
+                    LoadModPresetsForBranch(true);
+                    StartupTrace.Mark("Essentials: PTS seeded from Live");
+                }
+            }
+            catch (Exception seedEx)
+            {
+                LogError($"[INIT] PTS seed on startup failed: {seedEx.Message}");
+            }
+        }
+
         await RunVirtualModModeStartupSelfHealAsync().ConfigureAwait(true);
 
         RestoreNexusSession();

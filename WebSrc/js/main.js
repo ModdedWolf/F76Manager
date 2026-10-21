@@ -31,6 +31,7 @@ import {
 } from './utils/previewPlaceholders.js';
 import { appConfirm, appPrompt, dismissAppConfirm, installAppConfirmGlobals } from './utils/appConfirm.js';
 import { installThemedSelectMenus } from './utils/themedSelectMenu.js';
+import { installPageFind } from './utils/pageFind.js';
 
 window._t = (key, ...args) => translator.t(key, ...args);
 window.translator = translator;
@@ -39,20 +40,101 @@ installThemedSelectMenus();
 
 export { appConfirm, appPrompt };
 
+const TRANSFER_INSTALL_LABEL_KEYS = {
+    live: 'transfer_install_live',
+    pts: 'transfer_install_pts',
+    xbox: 'transfer_install_xbox'
+};
+
+function getCurrentTransferInstall(data) {
+    if (data?.platform === 'Xbox') return 'xbox';
+    return data?.steamBranch === 'pts' ? 'pts' : 'live';
+}
+
+function getTransferInstalls(data, current) {
+    const flags = { live: data?.liveAvailable, pts: data?.ptsAvailable, xbox: data?.xboxAvailable };
+    return ['live', 'pts', 'xbox'].map((id) => ({
+        id,
+        available: id === current || flags[id] !== false
+    }));
+}
+
 window.transferModsAcrossPlatforms = async (direction, scope = 'mods') => {
     const isConfigs = scope === 'configs';
-    const current = window.app?.realData?.platform || 'current platform';
-    const other = current === 'Steam' ? 'Xbox' : (current === 'Xbox' ? 'Steam' : 'the other platform');
-    const from = direction === 'from-other' ? other : current;
-    const to = direction === 'from-other' ? current : other;
-    const ok = await appConfirm({
+    const data = window.app?.realData;
+    const current = getCurrentTransferInstall(data);
+    const installs = getTransferInstalls(data, current);
+    const others = installs.filter((i) => i.available && i.id !== current).map((i) => i.id);
+    if (others.length === 0) {
+        window.app?.showBanner?.({ type: 'warning', text: window._t('transfer_no_other_install') });
+        return;
+    }
+
+    const fromOther = direction === 'from-other';
+    let source = fromOther ? others[0] : current;
+    let target = fromOther ? current : others[0];
+
+    const pending = appConfirm({
         title: window._t(isConfigs ? 'transfer_configs_title' : 'transfer_mods_title'),
-        message: window._t(isConfigs ? 'transfer_configs_confirm' : 'transfer_mods_confirm', from, to),
+        message: window._t(isConfigs ? 'transfer_configs_picker_note' : 'transfer_mods_picker_note'),
         okText: window._t(isConfigs ? 'transfer_configs_ok' : 'transfer_mods_ok'),
         cancelText: window._t('cancel')
     });
-    if (ok && window.chrome?.webview?.postMessage) {
-        window.chrome.webview.postMessage({ type: 'TRANSFER_MODS_ACROSS_PLATFORMS', direction, overwrite: true });
+
+    const msgEl = document.getElementById('confirm-message');
+    const okBtn = document.getElementById('confirm-ok');
+    const optionsHtml = installs
+        .map(({ id, available }) => {
+            const name = window._t(TRANSFER_INSTALL_LABEL_KEYS[id]);
+            const label = available ? name : window._t('transfer_install_not_found', name);
+            return `<option value="${id}"${available ? '' : ' disabled'}>${escapeHtml(label)}</option>`;
+        })
+        .join('');
+    const missing = installs.filter((i) => !i.available)
+        .map((i) => window._t(TRANSFER_INSTALL_LABEL_KEYS[i.id]));
+    const picker = document.createElement('div');
+    picker.className = 'transfer-install-picker';
+    picker.innerHTML = `
+        <label for="transfer-install-source">${escapeHtml(window._t('transfer_from'))}</label>
+        <select id="transfer-install-source" class="tweak-select">${optionsHtml}</select>
+        <label for="transfer-install-target">${escapeHtml(window._t('transfer_to'))}</label>
+        <select id="transfer-install-target" class="tweak-select">${optionsHtml}</select>
+        <p class="transfer-install-picker-error" hidden>${escapeHtml(window._t('transfer_same_install'))}</p>
+        ${missing.length ? `<p class="transfer-install-picker-hint">${escapeHtml(window._t('transfer_install_missing_hint', missing.join(', ')))}</p>` : ''}`;
+    msgEl?.after(picker);
+
+    const sourceSelect = picker.querySelector('#transfer-install-source');
+    const targetSelect = picker.querySelector('#transfer-install-target');
+    const errorEl = picker.querySelector('.transfer-install-picker-error');
+    sourceSelect.value = source;
+    targetSelect.value = target;
+    const syncPicker = () => {
+        source = sourceSelect.value;
+        target = targetSelect.value;
+        const same = source === target;
+        errorEl.hidden = !same;
+        if (okBtn) okBtn.disabled = same;
+    };
+    sourceSelect.addEventListener('change', syncPicker);
+    targetSelect.addEventListener('change', syncPicker);
+    syncPicker();
+
+    let ok;
+    try {
+        ok = await pending;
+    } finally {
+        picker.remove();
+        if (okBtn) okBtn.disabled = false;
+    }
+
+    if (ok && source !== target && window.chrome?.webview?.postMessage) {
+        window.chrome.webview.postMessage({
+            type: 'TRANSFER_MODS_ACROSS_PLATFORMS',
+            source,
+            target,
+            scope: isConfigs ? 'configs' : 'mods',
+            overwrite: true
+        });
     }
 };
 
@@ -107,6 +189,7 @@ export class App {
         });
 
         this.setupKeyboardShortcuts();
+        this.setupFindShortcuts();
 
         window.addEventListener('beforeunload', () => {
             if (this._navigatePersistTimer) {
@@ -169,6 +252,11 @@ export class App {
 
                 if (data.type === 'LOGS_DATA') {
                     this._applyLogsData(data.logs);
+                    return;
+                }
+
+                if (data.type === 'FIND_SHORTCUT') {
+                    this.handleFindShortcut(data.action);
                     return;
                 }
 
@@ -247,6 +335,18 @@ export class App {
         if (platformToggle) {
             platformToggle.addEventListener('click', () => {
                 window.chrome.webview.postMessage({ type: 'SWITCH_PLATFORM' });
+            });
+        }
+
+        const steamBranchToggle = document.getElementById('steam-branch-toggle');
+        if (steamBranchToggle) {
+            steamBranchToggle.addEventListener('click', (e) => {
+                const btn = e.target?.closest?.('.steam-branch-btn');
+                if (!btn) return;
+                const branch = btn.getAttribute('data-branch');
+                const current = window.app?.realData?.steamBranch || 'live';
+                if (branch === current) return;
+                window.chrome.webview.postMessage({ type: 'SWITCH_STEAM_BRANCH' });
             });
         }
 
@@ -493,7 +593,7 @@ export class App {
             return;
         }
 
-        if (data.type === 'BA2_CONTENTS' || data.type === 'GAME_BA2_LIST' || data.type === 'FOLDER_CONTENTS') {
+        if (data.type === 'BA2_CONTENTS' || data.type === 'GAME_BA2_LIST' || data.type === 'FOLDER_CONTENTS' || data.type === 'BUNDLE_FILE_PREVIEW') {
             const bundle = this.sections?.bundle;
             if (this.currentSection === 'bundle' && bundle?.isCreating && typeof bundle.handleInspectorMessage === 'function') {
                 bundle.handleInspectorMessage(data);
@@ -607,7 +707,7 @@ export class App {
              return;
         }
 
-        if (data.type === 'FILE_SELECTED' || data.type === 'FOLDER_SELECTED') {
+        if (data.type === 'FILE_SELECTED' || data.type === 'FOLDER_SELECTED' || data.type === 'BUNDLE_FILES_DROPPED') {
             return;
         }
 
@@ -1039,9 +1139,16 @@ export class App {
 
     setupNavigation() {
         document.querySelectorAll('[data-section]').forEach(link => {
-            link.addEventListener('click', (e) => {
+            link.addEventListener('click', async (e) => {
                 e.preventDefault();
                 const sectionId = link.getAttribute('data-section');
+                const mods = this.sections.mods;
+                const leaving = sectionId !== this.currentSection;
+                if (mods?.isConfigEditorOpen?.() && !(leaving && this.configEditorKeepOpen())
+                    && !(await mods.requestCloseConfigEditor())) return;
+                if (mods?.isConfigEditorParked?.() && !this.configEditorKeepOpen()
+                    && mods.configEditorOriginSection() !== sectionId
+                    && !(await mods.requestCloseConfigEditor())) return;
                 this.navigateTo(sectionId);
             });
         });
@@ -1053,6 +1160,10 @@ export class App {
                 refreshSharpLogos();
             });
         }
+    }
+
+    configEditorKeepOpen() {
+        return this.realData?.managerSettings?.configEditorKeepOpen !== false;
     }
 
     formatSectionTitle(sectionId) {
@@ -1109,7 +1220,7 @@ export class App {
             link.classList.toggle('active', link.getAttribute('data-section') === sectionId);
         });
         const titleEl = document.getElementById('section-title');
-        if (titleEl) titleEl.textContent = this.formatSectionTitle(sectionId);
+        if (titleEl && !this.sections.mods?.isConfigEditorOpen?.()) titleEl.textContent = this.formatSectionTitle(sectionId);
         try {
             document.body.dataset.uiSection = sectionId;
             if (this.contentArea) {
@@ -1138,6 +1249,11 @@ export class App {
         if (!force && this.currentSection === sectionId && this.contentArea.innerHTML !== '') {
             if (sectionId === 'update') this.sections.update?.updateValues?.(this.realData);
             return;
+        }
+
+        if (sectionId !== this.currentSection && this.sections.mods?.isConfigEditorOpen?.()) {
+            if (this.configEditorKeepOpen()) this.sections.mods.parkConfigEditor();
+            else this.sections.mods.hideRenameModal();
         }
 
         if (!this._translationsReady && !window.__THEME_STUDIO_PREVIEW) {
@@ -1209,6 +1325,10 @@ export class App {
                         </div>
                     </div>`;
                 lucide.createIcons();
+            }
+            const mods = this.sections.mods;
+            if (mods?.isConfigEditorParked?.() && mods.configEditorOriginSection() === sectionId) {
+                mods.unparkConfigEditor();
             }
             requestAnimationFrame(() => {
                 requestAnimationFrame(() => this.contentArea.classList.remove('content-refreshing'));
@@ -1345,6 +1465,8 @@ export class App {
         if (!toggle || !this.realData || !this.realData.platform) return;
 
         const platform = this.realData.platform;
+        const steamBranch = this.realData.steamBranch === 'pts' ? 'pts' : 'live';
+        const onSteam = platform === 'Steam';
         const span = toggle.querySelector('span');
         const icon = toggle.querySelector('i');
 
@@ -1359,6 +1481,29 @@ export class App {
                 if (window.lucide) lucide.createIcons();
             }
         }
+
+        const branchToggle = document.getElementById('steam-branch-toggle');
+        if (branchToggle) {
+            if (onSteam) {
+                branchToggle.hidden = false;
+                const liveBtn = branchToggle.querySelector('[data-branch="live"]');
+                const ptsBtn = branchToggle.querySelector('[data-branch="pts"]');
+                if (liveBtn) {
+                    liveBtn.classList.toggle('active', steamBranch === 'live');
+                    liveBtn.textContent = window._t?.('steam_branch_live') ?? 'Live';
+                }
+                if (ptsBtn) {
+                    ptsBtn.classList.toggle('active', steamBranch === 'pts');
+                    ptsBtn.textContent = window._t?.('steam_branch_pts') ?? 'PTS';
+                    ptsBtn.disabled = this.realData.ptsAvailable === false && steamBranch !== 'pts';
+                    ptsBtn.title = ptsBtn.disabled
+                        ? (window._t?.('pts_not_found') ?? 'Fallout 76 Public Test Server was not found.')
+                        : '';
+                }
+            } else {
+                branchToggle.hidden = true;
+            }
+        }
     }
 
     registerSection(id, component) {
@@ -1370,7 +1515,7 @@ export class App {
         const tag = (e.target?.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
         if (e.target?.isContentEditable) return true;
-        if (document.querySelector('#confirm-modal.active, #conflict-popup-overlay, #rename-mod-overlay, .modal-overlay.active')) return true;
+        if (document.querySelector('#confirm-modal.active, #conflict-popup-overlay, #rename-mod-overlay:not(.config-editor-parked), .modal-overlay.active')) return true;
         return false;
     }
 
@@ -1389,6 +1534,127 @@ export class App {
             }
         };
         document.addEventListener('keydown', this._keybindHandler);
+    }
+
+    _findViewTabs(sectionId, section) {
+        switch (sectionId) {
+            case 'settings':
+                return {
+                    prop: 'activeTab',
+                    tabs: [
+                        { value: 'preferences', labelKey: 'manager_preferences' },
+                        { value: 'paths', labelKey: 'install_paths' },
+                        { value: 'keybinds', labelKey: 'shortcuts_hint_title' },
+                        { value: 'advanced', labelKey: 'advanced_maintenance' }
+                    ]
+                };
+            case 'tweaks':
+                return { prop: 'activeCategoryId', tabs: (section.categories || []).map((c) => ({ value: c.id, labelKey: c.labelKey })) };
+            case 'pipboy':
+                return { prop: 'activeTab', tabs: Object.entries(section.tabConfig || {}).map(([value, cfg]) => ({ value, labelKey: cfg.labelKey })) };
+            default:
+                return null;
+        }
+    }
+
+    _findViewLabel(view) {
+        const page = document.querySelector(`.sidebar-nav [data-section="${view.section}"] .nav-label`)?.textContent?.trim() || view.section;
+        return view.labelKey ? `${page} › ${window._t(view.labelKey)}` : page;
+    }
+
+    _findViewList() {
+        if (window.__THEME_STUDIO_PREVIEW) return [];
+        const views = [];
+        document.querySelectorAll('.sidebar-nav [data-section]').forEach((link) => {
+            const sectionId = link.getAttribute('data-section');
+            const section = this.sections[sectionId];
+            if (!section?.render) return;
+            const isCurrent = this.currentSection === sectionId;
+            const tabs = this._findViewTabs(sectionId, section);
+            if (!tabs) {
+                views.push({ key: sectionId, section: sectionId, current: isCurrent });
+                return;
+            }
+            for (const { value, labelKey } of tabs.tabs) {
+                views.push({
+                    key: `${sectionId}:${value}`,
+                    section: sectionId,
+                    prop: tabs.prop,
+                    value,
+                    labelKey,
+                    current: isCurrent && section[tabs.prop] === value
+                });
+            }
+        });
+        return views;
+    }
+
+    _renderFindView(view) {
+        if (view.section === 'logs' || !this.realData) return null;
+        const section = this.sections[view.section];
+        const prev = view.prop ? section[view.prop] : undefined;
+        try {
+            if (view.prop) section[view.prop] = view.value;
+            return section.render(this.realData);
+        } catch (err) {
+            console.warn(`[Find] Could not render "${view.key}":`, err);
+            return null;
+        } finally {
+            if (view.prop) section[view.prop] = prev;
+        }
+    }
+
+    _activateFindView(view) {
+        const section = this.sections[view.section];
+        if (!section) return;
+        if (view.prop) {
+            if (view.section === 'settings' && view.value !== 'advanced') section.closeBackupPreviewModal?.(true);
+            section[view.prop] = view.value;
+        }
+        if (this.currentSection === view.section) {
+            if (!this.replaceCurrentSectionContent()) this.navigateTo(view.section, true);
+        } else {
+            this.navigateTo(view.section);
+        }
+    }
+
+    setupFindShortcuts() {
+        this.pageFind = installPageFind({
+            views: {
+                list: () => this._findViewList(),
+                html: (view) => this._renderFindView(view),
+                activate: (view) => this._activateFindView(view),
+                label: (view) => this._findViewLabel(view),
+                stamp: () => this.realData
+            }
+        });
+        document.addEventListener('keydown', (e) => {
+            if (window.__keybindCapturing) return;
+            const key = String(e.key || '').toLowerCase();
+            const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
+            let action = null;
+            if (ctrl && !e.shiftKey && key === 'f') action = 'open';
+            else if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'F3') action = e.shiftKey ? 'prev' : 'next';
+            else if (ctrl && key === 'g') action = e.shiftKey ? 'prev' : 'next';
+            if (!action) return;
+            e.preventDefault();
+            e.stopPropagation();
+            this.handleFindShortcut(action);
+        }, true);
+    }
+
+    handleFindShortcut(action) {
+        const mods = this.sections?.mods;
+        if (mods?.hasConfigFind?.()) {
+            this.pageFind?.close();
+            if (action === 'prev') mods.stepConfigFind(-1);
+            else if (action === 'next') mods.stepConfigFind(1);
+            else mods.openConfigFind();
+            return;
+        }
+        if (action === 'prev') this.pageFind?.step(-1);
+        else if (action === 'next') this.pageFind?.step(1);
+        else this.pageFind?.open();
     }
 
     cycleProfile() {

@@ -17,9 +17,21 @@ namespace F76ManagerApp.Managers
         public static string LogFolder => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
         public static string ProfilesFolder => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Profiles");
         public static string ProfilesFile => Path.Combine(ProfilesFolder, "profiles.json");
-        public static string ModsMetadataFile => Path.Combine(SettingsFolder, "mods.json");
+        public static string LiveModsMetadataFile => Path.Combine(SettingsFolder, "mods.json");
+        public static string PtsModsMetadataFile => Path.Combine(SettingsFolder, "mods-pts.json");
+        public static string ModsMetadataFile => IsPts ? PtsModsMetadataFile : LiveModsMetadataFile;
         public static string ManagedArtifactsFile => Path.Combine(SettingsFolder, "managed-artifacts.json");
-        public static string IniOverlaysFolder => Path.Combine(SettingsFolder, "IniOverlays");
+        public static string LiveIniOverlaysFolder => Path.Combine(SettingsFolder, "IniOverlays");
+        public static string PtsIniOverlaysFolder => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "PTS", "IniOverlays");
+        public static string IniOverlaysFolder => IsPts ? PtsIniOverlaysFolder : LiveIniOverlaysFolder;
+        public static string IniSnapshotsRoot => Path.Combine(SettingsFolder, "IniSnapshots");
+        public static string PtsRootFolder => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "PTS");
+
+        public static string IniSnapshotFolder(bool pts) =>
+            Path.Combine(IniSnapshotsRoot, pts ? "Steam PTS" : "Steam");
+
+        public static string GetModsMetadataFile(bool pts) =>
+            pts ? PtsModsMetadataFile : LiveModsMetadataFile;
 
         public const string F76AddToCustomFileName = "F76-Manager-AddToCustom.ini";
         public const string F76AddToPrefsFileName = "F76-Manager-AddToPrefs.ini";
@@ -40,11 +52,14 @@ namespace F76ManagerApp.Managers
         };
 
         public static bool IsXbox { get; private set; } = false;
-        public static string PlatformFolderName => IsXbox ? "Xbox" : "Steam";
+        public static bool IsPts { get; private set; } = false;
+        public static string PlatformFolderName =>
+            IsXbox ? "Xbox" : (IsPts ? "Steam PTS" : "Steam");
 
-        public static void SetPlatform(bool isXbox)
+        public static void SetPlatform(bool isXbox, bool isPts = false)
         {
             IsXbox = isXbox;
+            IsPts = !isXbox && isPts;
             if (string.IsNullOrEmpty(StringsPath)) StringsPath = Path.Combine(DataPath, "Strings");
         }
 
@@ -151,8 +166,12 @@ namespace F76ManagerApp.Managers
         }
             
         public static string StringsPath { get; set; } = "";
-        public static string BundlesPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Bundles");
-        public static string DisabledModsPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Disabled Mods");
+        public static string LiveBundlesPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Bundles");
+        public static string PtsBundlesPath => Path.Combine(PtsRootFolder, "Bundles");
+        public static string BundlesPath => IsPts ? PtsBundlesPath : LiveBundlesPath;
+        public static string LiveDisabledModsPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Disabled Mods");
+        public static string PtsDisabledModsPath => Path.Combine(PtsRootFolder, "Disabled Mods");
+        public static string DisabledModsPath => IsPts ? PtsDisabledModsPath : LiveDisabledModsPath;
         public static string ManagedStagingPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Managed Staging", PlatformFolderName);
         public static string ManagedStagingDataPath => Path.Combine(ManagedStagingPath, "Data");
         public static string ManagedStagingStringsPath => Path.Combine(ManagedStagingDataPath, "Strings");

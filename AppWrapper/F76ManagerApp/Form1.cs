@@ -164,6 +164,8 @@ public partial class Form1 : Form, IMessageFilter
     private string stringsPath = "";
 
     private string steamGamePath = "", steamDocsPath = "", steamLocalPath = "", steamStringsPath = "";
+    private string ptsGamePath = "", ptsStringsPath = "";
+    private bool steamPtsActive = false;
     private string xboxGamePath = "", xboxDocsPath = "", xboxLocalPath = "", xboxStringsPath = "";
     
     private int steamPipboyRed = 26, steamPipboyGreen = 255, steamPipboyBlue = 128;
@@ -236,13 +238,25 @@ public partial class Form1 : Form, IMessageFilter
     private bool logsPopoutMaximized = false;
     private bool logsPopoutBoundsValid = false;
     private bool syncPlatforms = false, autoForceDeploy = false, virtualModMode = false;
+    private bool ignoreArchiveIniFiles = false;
     private bool configEditorSpellCheck = false;
+    private bool configEditorKeepOpen = true;
+    private int configEditorFontSize = 12;
+    private string configEditorFontFamily = "default";
+    private static readonly string[] ConfigEditorFontFamilies =
+    {
+        "default", "consolas", "cascadia-mono", "cascadia-code", "courier-new", "lucida-console", "inter", "roboto-condensed"
+    };
     private bool confirmBeforeDeleteMod = false;
     private bool confirmBeforeRemoveOldModOnUpdate = false;
     private bool updateModsInAllPresets = false;
     private string modGroups = "{}";
     private string modPresetsJson = "";
     private string activeModPreset = "Default";
+    private string liveModPresetsJson = "";
+    private string liveActiveModPreset = "Default";
+    private string ptsModPresetsJson = "";
+    private string ptsActiveModPreset = "Default";
     private string applicationLanguage = "en-US";
     private string uiTheme = "fallout";
     private string archiveKeyName = "auto";
@@ -273,14 +287,76 @@ public partial class Form1 : Form, IMessageFilter
         AppPaths.DocumentsPath = documentsPath;
         AppPaths.LocalAppDataPath = localAppDataPath;
         AppPaths.StringsPath = stringsPath;
-        AppPaths.SetPlatform(_platformManager.IsXbox());
+        AppPaths.SetPlatform(_platformManager.IsXbox(), _platformManager.IsPts);
         _modManager.ArchiveKeyPreference = archiveKeyName;
         _modManager.VirtualModMode = virtualModMode;
+        _modManager.IgnoreArchiveIniFiles = ignoreArchiveIniFiles;
         _modManager.SevenZipPath = sevenZipPath;
         _modManager.RarExtractorPath = rarExtractorPath;
         if (!quick)
             _modManager.EnsureManagedStagingHydrated();
         EnsureTweakIniWatcher();
+    }
+
+    private bool IsPtsPathAvailable()
+    {
+        if (!string.IsNullOrWhiteSpace(ptsGamePath) && Directory.Exists(ptsGamePath))
+            return true;
+        string detected = _platformManager.GetDefaultPtsGamePath();
+        return !string.IsNullOrWhiteSpace(detected) && Directory.Exists(detected);
+    }
+
+    private void PersistCurrentSteamBranchPaths()
+    {
+        if (_platformManager.CurrentPlatform != GamePlatform.Steam) return;
+        if (_platformManager.IsPts)
+        {
+            ptsGamePath = gamePath;
+            ptsStringsPath = stringsPath;
+        }
+        else
+        {
+            steamGamePath = gamePath;
+            steamDocsPath = documentsPath;
+            steamLocalPath = localAppDataPath;
+            steamStringsPath = stringsPath;
+        }
+    }
+
+    private void ApplySteamBranchPaths(bool pts)
+    {
+        _platformManager.SetPlatform(GamePlatform.Steam);
+        _platformManager.SetPts(pts);
+        steamPtsActive = pts;
+
+        documentsPath = !string.IsNullOrEmpty(steamDocsPath) ? steamDocsPath : _platformManager.GetDefaultDocumentsPath();
+        localAppDataPath = !string.IsNullOrEmpty(steamLocalPath) ? steamLocalPath : _platformManager.GetDefaultLocalAppDataPath();
+
+        if (pts)
+        {
+            if (string.IsNullOrEmpty(ptsGamePath) || !Directory.Exists(ptsGamePath))
+                ptsGamePath = _platformManager.GetDefaultPtsGamePath();
+            gamePath = ptsGamePath;
+            stringsPath = !string.IsNullOrEmpty(ptsStringsPath)
+                ? ptsStringsPath
+                : GetDefaultStringsPathFromGamePath(gamePath);
+        }
+        else
+        {
+            if (!string.IsNullOrEmpty(steamGamePath) &&
+                (steamGamePath.Contains("XboxGames", StringComparison.OrdinalIgnoreCase) ||
+                 steamGamePath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                 steamGamePath.Contains("ModifiableWindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                 PlatformManager.LooksLikePtsGamePath(steamGamePath)))
+            {
+                steamGamePath = "";
+            }
+
+            gamePath = !string.IsNullOrEmpty(steamGamePath) ? steamGamePath : _platformManager.GetDefaultGamePath();
+            stringsPath = !string.IsNullOrEmpty(steamStringsPath)
+                ? steamStringsPath
+                : GetDefaultStringsPathFromGamePath(gamePath);
+        }
     }
 
     private void ApplyDefaultPathsIfEmpty()

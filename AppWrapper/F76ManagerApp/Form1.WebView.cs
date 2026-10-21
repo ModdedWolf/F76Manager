@@ -7,6 +7,55 @@ namespace F76ManagerApp;
 
 public partial class Form1
 {
+    // Playable audio built for the bundle preview pane (decoded WAVs and
+    // pass-through files), served at preview-audio/<token> instead of being
+    // pushed through the message bridge as base64. Keeps the newest few so
+    // switching back and forth between files still works.
+    private sealed class AudioPreviewCache
+    {
+        private sealed class Entry
+        {
+            public required byte[] Bytes;
+            public required string Mime;
+        }
+
+        private const int MaxEntries = 4;
+        private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+        private readonly Queue<string> _order = new();
+        private readonly object _gate = new();
+
+        public string Store(byte[] bytes, string mime)
+        {
+            string token = Guid.NewGuid().ToString("N");
+            lock (_gate)
+            {
+                _entries[token] = new Entry { Bytes = bytes, Mime = mime };
+                _order.Enqueue(token);
+                while (_entries.Count > MaxEntries && _order.Count > 0)
+                    _entries.Remove(_order.Dequeue());
+            }
+            return "preview-audio/" + token;
+        }
+
+        public bool TryGet(string token, out byte[] bytes, out string mime)
+        {
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(token, out var entry) && entry != null)
+                {
+                    bytes = entry.Bytes;
+                    mime = entry.Mime;
+                    return true;
+                }
+            }
+            bytes = Array.Empty<byte>();
+            mime = "application/octet-stream";
+            return false;
+        }
+    }
+
+    private readonly AudioPreviewCache _audioPreviewCache = new();
+
     private sealed class WebViewAttempt
     {
         public string Name { get; }
@@ -82,12 +131,84 @@ public partial class Form1
         }
     }
 
+    private bool _findAcceleratorHooked;
+
+    internal void SetConfigEditorFindActive(bool active)
+    {
+        if (_findAcceleratorHooked || webView?.CoreWebView2 == null) return;
+        webView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = !active;
+    }
+
+    private void TryHookFindKeys()
+    {
+        if (webView == null || _findAcceleratorHooked) return;
+        try
+        {
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            object? controllerObj = null;
+            foreach (var prop in webView.GetType().GetProperties(flags))
+            {
+                if (prop.PropertyType.Name != "CoreWebView2Controller") continue;
+                controllerObj = prop.GetValue(webView);
+                break;
+            }
+            if (controllerObj == null)
+            {
+                foreach (var field in webView.GetType().GetFields(flags))
+                {
+                    if (field.FieldType.Name != "CoreWebView2Controller") continue;
+                    controllerObj = field.GetValue(webView);
+                    break;
+                }
+            }
+            if (controllerObj is not CoreWebView2Controller controller) return;
+            controller.AcceleratorKeyPressed += OnFindAccelerator;
+            _findAcceleratorHooked = true;
+        }
+        catch (Exception ex)
+        {
+            try { LogActivity($"[WEBVIEW] Find key hook failed: {ex.Message}"); } catch { }
+        }
+    }
+
+    private void OnFindAccelerator(object? sender, CoreWebView2AcceleratorKeyPressedEventArgs e)
+    {
+        if (e.KeyEventKind != CoreWebView2KeyEventKind.KeyDown &&
+            e.KeyEventKind != CoreWebView2KeyEventKind.SystemKeyDown) return;
+
+        bool ctrl = (ModifierKeys & Keys.Control) == Keys.Control;
+        bool alt = (ModifierKeys & Keys.Alt) == Keys.Alt;
+        bool shift = (ModifierKeys & Keys.Shift) == Keys.Shift;
+        string? action = null;
+        if (!alt && ctrl && !shift && e.VirtualKey == 0x46) action = "open";
+        else if (!alt && !ctrl && e.VirtualKey == 0x72) action = shift ? "prev" : "next";
+        else if (!alt && ctrl && e.VirtualKey == 0x47) action = shift ? "prev" : "next";
+        if (action == null) return;
+
+        e.Handled = true;
+        if (action == "open" && e.PhysicalKeyStatus.WasKeyDown != 0) return;
+        string payload = action;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    webView?.CoreWebView2?.PostWebMessageAsJson($"{{\"type\":\"FIND_SHORTCUT\",\"action\":\"{payload}\"}}");
+                }
+                catch { }
+            }));
+        }
+        catch { }
+    }
+
     private void AttachWebViewCoreHandlersAndNavigate()
     {
         if (webView?.CoreWebView2 == null) return;
 
         webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+        TryHookFindKeys();
 
         webView.CoreWebView2.SourceChanged += (s, e) =>
         {
@@ -422,6 +543,21 @@ public partial class Form1
             return;
         }
 
+        if (path.StartsWith("preview-audio/", StringComparison.OrdinalIgnoreCase))
+        {
+            string token = path.Substring("preview-audio/".Length);
+            if (_audioPreviewCache.TryGet(token, out byte[] audioBytes, out string audioMime))
+            {
+                var audioMs = new MemoryStream(audioBytes);
+                e.Response = core.Environment.CreateWebResourceResponse(
+                    audioMs, 200, "OK",
+                    $"Content-Type: {audioMime}\r\nCache-Control: no-store\r\nAccept-Ranges: bytes");
+                return;
+            }
+            e.Response = core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
+            return;
+        }
+
         if (path.StartsWith("user-theme-logo/", StringComparison.OrdinalIgnoreCase))
         {
             var logoPath = _themePackageLoader.ResolveLogoPhysicalPath(path);
@@ -541,6 +677,10 @@ public partial class Form1
             ".gif" => "image/gif",
             ".svg" => "image/svg+xml",
             ".woff2" => "font/woff2",
+            ".mp3" => "audio/mpeg",
+            ".wav" => "audio/wav",
+            ".ogg" => "audio/ogg",
+            ".flac" => "audio/flac",
             _ => "application/octet-stream"
         };
     }

@@ -166,6 +166,10 @@ export const ModsRenderer = {
                                     <i data-lucide="download-cloud"></i>
                                     <span id="mods-action-bulk-update-label">${window._t('bulk_update_mods')}</span>
                                 </button>
+                                <button type="button" class="mods-actions-item" id="mods-action-check-updates">
+                                    <i data-lucide="refresh-cw"></i>
+                                    <span>${window._t('mods_check_updates')}</span>
+                                </button>
                                 <button type="button" class="mods-actions-item" id="mods-action-backup-mods">
                                     <i data-lucide="archive"></i>
                                     <span>${window._t('backup_mods')}</span>

@@ -159,6 +159,10 @@
                     <button type="button" id="kofi-link" class="kofi-link" title="Ko-fi" aria-label="Ko-fi">
                         <img src="assets/kofi.png" alt="">
                     </button>
+                    <div id="steam-branch-toggle" class="steam-branch-toggle" hidden aria-label="Steam branch">
+                        <button type="button" class="steam-branch-btn active" data-branch="live" id="steam-branch-live">Live</button>
+                        <button type="button" class="steam-branch-btn" data-branch="pts" id="steam-branch-pts">PTS</button>
+                    </div>
                     <div id="platform-toggle" class="platform-badge steam" style="cursor: pointer;">
                         <i data-lucide="gamepad-2"></i>
                         <span>Steam</span>
@@ -191,11 +195,17 @@
                 <p class="endorsement-modal-desc" id="confirm-message">Are you sure?</p>
                 <div id="confirm-prompt-wrap" class="confirm-prompt-wrap" hidden>
                     <label id="confirm-prompt-label" class="confirm-prompt-label" for="confirm-prompt-input"></label>
-                    <input type="text" id="confirm-prompt-input" class="confirm-prompt-input" autocomplete="off" spellcheck="false">
+                    <div class="confirm-prompt-field">
+                        <input type="text" id="confirm-prompt-input" class="confirm-prompt-input" autocomplete="off" spellcheck="false">
+                        <button type="button" class="confirm-prompt-clear" id="confirm-prompt-clear" hidden aria-label="Clear">
+                            <i data-lucide="x"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
             <div class="endorsement-modal-footer">
                 <button type="button" class="btn-popup secondary" id="confirm-cancel">Cancel</button>
+                <button type="button" class="btn-popup secondary" id="confirm-alt" hidden></button>
                 <button type="button" class="btn-popup primary" id="confirm-ok">OK</button>
             </div>
         </div>

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>WmaDecoder</RootNamespace>
+    <AssemblyName>WmaDecoder</AssemblyName>
+    <Description>Pure managed WMA v1/v2 decoder ported from FFmpeg (LGPL-2.1-or-later). Decodes xWMA/FUZ audio to PCM for preview; no native dependencies.</Description>
+  </PropertyGroup>
+</Project>

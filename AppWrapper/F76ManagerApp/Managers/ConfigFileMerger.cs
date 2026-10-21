@@ -119,8 +119,8 @@ public static class ConfigFileMerger
                 !string.Equals(ext, Path.GetExtension(incomingPath), StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            string existing = File.ReadAllText(existingPath, Encoding.UTF8);
-            string incoming = File.ReadAllText(incomingPath, Encoding.UTF8);
+            string existing = TextFileEncoding.Read(existingPath, out _);
+            string incoming = TextFileEncoding.Read(incomingPath, out _);
 
             return ext.ToLowerInvariant() switch
             {
@@ -153,6 +153,151 @@ public static class ConfigFileMerger
         File.WriteAllText(destPath, mergedContent, Utf8NoBom);
     }
 
+    public static bool MergeIntoFile(
+        string destPath,
+        string incomingPath,
+        string backupRoot,
+        out string summary,
+        out bool changed) =>
+        MergeIntoFile(destPath, incomingPath, backupRoot, out summary, out changed, out _);
+
+    public static bool MergeIntoFile(
+        string destPath,
+        string incomingPath,
+        string backupRoot,
+        out string summary,
+        out bool changed,
+        out string? backupPath)
+    {
+        summary = "";
+        changed = false;
+        backupPath = null;
+
+        try
+        {
+            if (!File.Exists(destPath) || !File.Exists(incomingPath))
+                return false;
+
+            string ext = Path.GetExtension(destPath);
+            if (!IsLooseConfigExtension(ext) ||
+                !string.Equals(ext, Path.GetExtension(incomingPath), StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string existing = TextFileEncoding.Read(destPath, out string token);
+            string incoming = TextFileEncoding.Read(incomingPath, out _);
+
+            return MergeIntoFileCore(destPath, existing, incoming, ext, token, backupRoot, out summary, out changed, out backupPath);
+        }
+        catch (Exception ex)
+        {
+            summary = ex.Message;
+            changed = false;
+            backupPath = null;
+            return false;
+        }
+    }
+
+    private static bool MergeIntoFileCore(
+        string destPath,
+        string existing,
+        string incoming,
+        string ext,
+        string token,
+        string backupRoot,
+        out string summary,
+        out bool changed,
+        out string? backupPath)
+    {
+        summary = "";
+        changed = false;
+        backupPath = null;
+
+        string merged = existing;
+        bool ok;
+        switch (ext.ToLowerInvariant())
+        {
+            case ".ini": ok = TryMergeIni(existing, incoming, out merged, out summary); break;
+            case ".txt": ok = TryMergeTxt(existing, incoming, out merged, out summary); break;
+            case ".json": ok = TryMergeJson(existing, incoming, out merged, out summary); break;
+            case ".toml": ok = KeepExisting(existing, out merged, out summary); break;
+            default: return false;
+        }
+        if (!ok) return false;
+
+        if (string.Equals(merged, existing, StringComparison.Ordinal))
+        {
+            changed = false;
+            return true;
+        }
+
+        // Back up the original before overwriting it.
+        if (!string.IsNullOrWhiteSpace(backupRoot))
+        {
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string backupDir = Path.Combine(backupRoot, stamp);
+            Directory.CreateDirectory(backupDir);
+            string fileName = Path.GetFileName(destPath);
+            backupPath = Path.Combine(backupDir, fileName);
+            if (File.Exists(backupPath))
+            {
+                string nameNoExt = Path.GetFileNameWithoutExtension(fileName);
+                string fileExt = Path.GetExtension(fileName);
+                int suffix = 1;
+                do
+                {
+                    backupPath = Path.Combine(backupDir, $"{nameNoExt}_{suffix}{fileExt}");
+                    suffix++;
+                } while (File.Exists(backupPath));
+            }
+            File.Copy(destPath, backupPath);
+        }
+
+        string writeToken = TextFileEncoding.Normalize(token);
+        // Match the config editor: INI files are always written UTF-8 without BOM.
+        if (string.Equals(ext, ".ini", StringComparison.OrdinalIgnoreCase) &&
+            writeToken == TextFileEncoding.Utf8Bom)
+        {
+            writeToken = TextFileEncoding.Utf8;
+        }
+        Encoding writeEncoding = TextFileEncoding.GetEncoding(writeToken, strictEncode: false);
+        File.WriteAllText(destPath, merged, writeEncoding);
+        changed = true;
+        return true;
+    }
+
+    private static string DetectNewline(string text)
+    {
+        if (!string.IsNullOrEmpty(text))
+        {
+            if (text.Contains("\r\n")) return "\r\n";
+            if (text.Contains('\n')) return "\n";
+            if (text.Contains('\r')) return "\r";
+        }
+        return Environment.NewLine;
+    }
+
+    /// <summary>
+    /// Splits into lines without newline characters. A trailing newline is a
+    /// terminator, not an extra empty line, so it does not produce a final "".
+    /// Interior blank lines are preserved exactly.
+    /// </summary>
+    private static List<string> SplitLines(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return new List<string>();
+        string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        var parts = normalized.Split('\n').ToList();
+        if (normalized.EndsWith('\n') && parts.Count > 0 && parts[^1].Length == 0)
+            parts.RemoveAt(parts.Count - 1);
+        return parts;
+    }
+
+    private static string JoinLines(List<string> lines, string newline, bool trailingNewline)
+    {
+        if (lines.Count == 0) return "";
+        string joined = string.Join(newline, lines);
+        return trailingNewline ? joined + newline : joined;
+    }
+
     private static bool TryMergeIni(string existing, string incoming, out string mergedContent, out string summary)
     {
         if (!IniHasSections(existing) && !IniHasSections(incoming))
@@ -161,9 +306,8 @@ public static class ConfigFileMerger
         mergedContent = "";
         summary = "";
 
-        var lines = string.IsNullOrEmpty(existing)
-            ? new List<string>()
-            : existing.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n').ToList();
+        string newline = DetectNewline(existing);
+        var lines = SplitLines(existing);
 
         var existingKeys = BuildIniKeySet(lines);
         int added = 0;
@@ -197,9 +341,9 @@ public static class ConfigFileMerger
             added++;
         }
 
-        mergedContent = lines.Count == 0 ? "" : string.Join(Environment.NewLine, lines);
-        if (mergedContent.Length > 0 && !mergedContent.EndsWith(Environment.NewLine, StringComparison.Ordinal))
-            mergedContent += Environment.NewLine;
+        // Nothing new: hand the original text back untouched so callers can
+        // tell the file does not need to be rewritten at all.
+        mergedContent = added == 0 ? existing : JoinLines(lines, newline, trailingNewline: true);
 
         summary = added == 0 ? "No new INI keys" : $"Added {added} INI key{(added == 1 ? "" : "s")}";
         return true;
@@ -222,33 +366,40 @@ public static class ConfigFileMerger
         mergedContent = "";
         summary = "";
 
-        var lines = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string newline = DetectNewline(existing);
+        // The user's existing lines are kept exactly as they are: no trimming,
+        // no deduplication, no removal of blank lines or comments.
+        var lines = SplitLines(existing);
 
-        void Consider(string? raw, bool countAdds, ref int added)
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in lines)
         {
-            if (raw == null) return;
-            string trimmed = raw.Trim();
-            if (trimmed.Length == 0) return;
-            if (trimmed.StartsWith(';') || trimmed.StartsWith('#'))
-            {
-                if (!countAdds)
-                    lines.Add(raw.TrimEnd());
-                return;
-            }
-            if (seen.Contains(trimmed)) return;
-            seen.Add(trimmed);
-            lines.Add(trimmed);
-            if (countAdds) added++;
+            string trimmed = line.Trim();
+            if (trimmed.Length > 0) seen.Add(trimmed);
         }
 
-        int added = 0;
-        foreach (var rawLine in (existing ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-            Consider(rawLine, countAdds: false, ref added);
-        foreach (var rawLine in (incoming ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-            Consider(rawLine, countAdds: true, ref added);
+        var toAppend = new List<string>();
+        foreach (var rawLine in SplitLines(incoming))
+        {
+            string trimmed = rawLine.Trim();
+            if (trimmed.Length == 0) continue;
+            if (trimmed.StartsWith(';') || trimmed.StartsWith('#')) continue;
+            if (!seen.Add(trimmed)) continue;
+            toAppend.Add(rawLine);
+        }
 
-        mergedContent = lines.Count == 0 ? "" : string.Join(Environment.NewLine, lines) + Environment.NewLine;
+        int added = toAppend.Count;
+        if (added == 0)
+        {
+            mergedContent = existing;
+        }
+        else
+        {
+            var result = new List<string>(lines);
+            result.AddRange(toAppend);
+            mergedContent = JoinLines(result, newline, trailingNewline: true);
+        }
+
         summary = added == 0 ? "No new INI list entries" : $"Added {added} INI list entr{(added == 1 ? "y" : "ies")}";
         return true;
     }
@@ -296,6 +447,7 @@ public static class ConfigFileMerger
 
         if (sectionStartIndex != -1)
         {
+            sectionEndIndex = lines.Count;
             for (int i = sectionStartIndex + 1; i < lines.Count; i++)
             {
                 string trimmed = lines[i].Trim();
@@ -306,10 +458,14 @@ public static class ConfigFileMerger
                 }
             }
 
-            if (sectionEndIndex != -1)
-                lines.Insert(sectionEndIndex, assignment);
-            else
-                lines.Add(assignment);
+            // Insert after the section's last non-blank line so blank separator
+            // lines before the next [section] header stay where they were.
+            int insertAt = sectionStartIndex + 1;
+            for (int i = sectionStartIndex + 1; i < sectionEndIndex; i++)
+            {
+                if (lines[i].Trim().Length > 0) insertAt = i + 1;
+            }
+            lines.Insert(insertAt, assignment);
         }
         else
         {
@@ -358,17 +514,19 @@ public static class ConfigFileMerger
             added++;
         }
 
-        var result = new List<string>(existingLines);
-        if (toAppend.Count > 0)
+        if (added == 0)
         {
+            mergedContent = existing;
+        }
+        else
+        {
+            string newline = DetectNewline(existing);
+            var result = new List<string>(existingLines);
             if (result.Count > 0 && !string.IsNullOrWhiteSpace(result[^1]))
                 result.Add("");
             result.AddRange(toAppend);
+            mergedContent = JoinLines(result, newline, trailingNewline: true);
         }
-
-        mergedContent = result.Count == 0 ? "" : string.Join(Environment.NewLine, result);
-        if (mergedContent.Length > 0 && !mergedContent.EndsWith(Environment.NewLine, StringComparison.Ordinal))
-            mergedContent += Environment.NewLine;
 
         summary = added == 0 ? "No new TXT lines" : $"Added {added} TXT line{(added == 1 ? "" : "s")}";
         return true;
@@ -376,8 +534,7 @@ public static class ConfigFileMerger
 
     private static List<string> SplitTxtLines(string text)
     {
-        if (string.IsNullOrEmpty(text)) return new List<string>();
-        return text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n').ToList();
+        return SplitLines(text);
     }
 
     private static string NormalizeTxtLine(string line) => line.TrimEnd();

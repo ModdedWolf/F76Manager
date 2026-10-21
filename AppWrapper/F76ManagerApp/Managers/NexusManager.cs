@@ -164,9 +164,9 @@ public class NexusManager : IDisposable
     private static readonly TimeSpan ModFilesCacheTtl = TimeSpan.FromMinutes(5);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, (DateTime FetchedUtc, string Json)> _modFilesCache = new();
 
-    private async Task<string> GetModFilesCached(long modId)
+    private async Task<string> GetModFilesCached(long modId, bool bypassCache = false)
     {
-        if (_modFilesCache.TryGetValue(modId, out var cached) && DateTime.UtcNow - cached.FetchedUtc < ModFilesCacheTtl)
+        if (!bypassCache && _modFilesCache.TryGetValue(modId, out var cached) && DateTime.UtcNow - cached.FetchedUtc < ModFilesCacheTtl)
             return cached.Json;
 
         string json = await GetModFiles(modId);
@@ -1270,7 +1270,8 @@ public class NexusManager : IDisposable
         long nexusModId,
         long? installedFileId,
         string? installedVersion,
-        long? installedUploaded)
+        long? installedUploaded,
+        bool bypassCache = false)
     {
         var result = new ModUpdateCheckResult
         {
@@ -1282,7 +1283,7 @@ public class NexusManager : IDisposable
 
         try
         {
-            string filesJson = await GetModFilesCached(nexusModId);
+            string filesJson = await GetModFilesCached(nexusModId, bypassCache);
             using var doc = JsonDocument.Parse(filesJson);
             var root = doc.RootElement;
 

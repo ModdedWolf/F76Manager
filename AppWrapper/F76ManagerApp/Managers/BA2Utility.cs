@@ -70,6 +70,17 @@ namespace F76ManagerApp.Managers
             public bool Ok { get; set; }
         }
 
+        public sealed class PreviewFileTooLargeException : Exception
+        {
+            public long Size { get; }
+
+            public PreviewFileTooLargeException(long size)
+                : base("File is too large to preview.")
+            {
+                Size = size;
+            }
+        }
+
         public static BA2Fingerprint TryGetEntryFingerprint(string ba2Path, string entryRelativePath, Action<string> logger = null)
         {
             var result = new BA2Fingerprint();
@@ -99,11 +110,9 @@ namespace F76ManagerApp.Managers
                     else
                     {
                         byte[] data = br.ReadBytes((int)rec.PackedSize);
-                        if (rec.PackedSize < rec.UnpackedSize)
-                        {
-                            data = DecompressZlibData(data, rec.UnpackedSize, logger, rec.Name);
-                            if (data == null) return result;
-                        }
+                        data = DecompressZlibData(data, rec.UnpackedSize, logger, rec.Name);
+                        if (data == null)
+                            throw new InvalidDataException($"Could not decompress BA2 entry: {rec.Name}");
                         payload = data;
                     }
                 }
@@ -115,10 +124,11 @@ namespace F76ManagerApp.Managers
                         fs.Seek((long)chunk.Offset, SeekOrigin.Begin);
                         uint readSize = chunk.PackSize == 0 ? chunk.FullSize : chunk.PackSize;
                         byte[] chunkData = br.ReadBytes((int)readSize);
-                        if (chunk.PackSize != 0 && chunk.PackSize < chunk.FullSize)
+                        if (chunk.PackSize != 0)
                         {
                             chunkData = DecompressZlibData(chunkData, chunk.FullSize, logger, rec.Name);
-                            if (chunkData == null) return result;
+                            if (chunkData == null)
+                                throw new InvalidDataException($"Could not decompress BA2 entry: {rec.Name}");
                         }
                         ms.Write(chunkData, 0, chunkData.Length);
                         result.UnpackedSize += chunk.FullSize;
@@ -241,7 +251,76 @@ namespace F76ManagerApp.Managers
             Extract(ba2Path, targetDir, logger, null);
         }
 
-        public static void Extract(string ba2Path, string targetDir, Action<string> logger, IReadOnlySet<string>? includePaths)
+        public const long MaxPreviewBytes = 64L * 1024 * 1024;
+
+        public static byte[] ReadEntryBytes(string ba2Path, string entryPath, Action<string> logger = null)
+        {
+            string want = (entryPath ?? "").Replace("\\", "/").TrimStart('/').ToLowerInvariant();
+            if (want.Length == 0)
+                throw new FileNotFoundException("BA2 entry path is empty.");
+
+            try
+            {
+                using var fs = new FileStream(ba2Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var br = new BinaryReader(fs);
+                var (type, records) = ReadArchiveIndex(fs, br);
+                var rec = records.FirstOrDefault(r =>
+                    (r.Name ?? "").Replace("\\", "/").TrimStart('/').Equals(want, StringComparison.OrdinalIgnoreCase));
+                if (rec == null)
+                    throw new FileNotFoundException($"BA2 entry not found: {entryPath}");
+
+                long size = EstimateRecordSize(type, rec);
+                if (size > MaxPreviewBytes)
+                    throw new PreviewFileTooLargeException(size);
+
+                byte[] payload = ReadRecordPayload(fs, br, type, rec, logger);
+                if (payload == null)
+                    throw new InvalidDataException($"Could not read BA2 entry: {entryPath}");
+                return payload;
+            }
+            catch (Exception ex) when (ex is not FileNotFoundException
+                and not PreviewFileTooLargeException
+                and not InvalidDataException)
+            {
+                logger?.Invoke($"[BA2] Read entry error: {ex.Message}");
+                throw;
+            }
+        }
+
+        public static void ExtractEntry(string ba2Path, string entryPath, string outFile, Action<string> logger = null)
+        {
+            string want = (entryPath ?? "").Replace("\\", "/").TrimStart('/');
+            if (want.Length == 0)
+                throw new FileNotFoundException("BA2 entry path is empty.");
+
+            try
+            {
+                using var fs = new FileStream(ba2Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var br = new BinaryReader(fs);
+                var (type, records) = ReadArchiveIndex(fs, br);
+                var rec = records.FirstOrDefault(r =>
+                    (r.Name ?? "").Replace("\\", "/").TrimStart('/').Equals(want, StringComparison.OrdinalIgnoreCase));
+                if (rec == null)
+                    throw new FileNotFoundException($"BA2 entry not found: {entryPath}");
+
+                byte[] payload = ReadRecordPayload(fs, br, type, rec, logger);
+                if (payload == null)
+                    throw new InvalidDataException($"Could not read BA2 entry: {entryPath}");
+
+                string? dir = Path.GetDirectoryName(outFile);
+                if (!string.IsNullOrEmpty(dir))
+                    Directory.CreateDirectory(dir);
+                File.WriteAllBytes(outFile, payload);
+            }
+            catch (Exception ex)
+            {
+                logger?.Invoke($"[BA2] Extract entry error: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <param name="stripPrefix">Lowercase "dir/" prefix removed from entry paths so selections land near the top of targetDir.</param>
+        public static void Extract(string ba2Path, string targetDir, Action<string> logger, IReadOnlySet<string>? includePaths, string? stripPrefix = null)
         {
             try
             {
@@ -258,60 +337,17 @@ namespace F76ManagerApp.Managers
                             if (!includePaths.Contains(normalized)) continue;
                         }
 
-                        string outPath = Path.Combine(targetDir, rec.Name.Replace("/", "\\"));
-                        Directory.CreateDirectory(Path.GetDirectoryName(outPath));
+                        string relPath = rec.Name.Replace("\\", "/").TrimStart('/');
+                        if (!string.IsNullOrEmpty(stripPrefix)
+                            && relPath.StartsWith(stripPrefix, StringComparison.OrdinalIgnoreCase)
+                            && relPath.Length > stripPrefix.Length)
+                            relPath = relPath.Substring(stripPrefix.Length);
+                        string outPath = Path.Combine(targetDir, relPath.Replace("/", "\\"));
+                        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
 
-                        if (type == "GNRL")
-                        {
-                            fs.Seek((long)rec.Offset, SeekOrigin.Begin);
-
-                            if (rec.PackedSize == 0)
-                            {
-                                byte[] data = rec.UnpackedSize == 0
-                                    ? Array.Empty<byte>()
-                                    : br.ReadBytes((int)rec.UnpackedSize);
-                                File.WriteAllBytes(outPath, data);
-                            }
-                            else
-                            {
-                                byte[] data = br.ReadBytes((int)rec.PackedSize);
-
-                                if (rec.PackedSize < rec.UnpackedSize)
-                                {
-                                    data = DecompressZlibData(data, rec.UnpackedSize, logger, rec.Name);
-                                    if (data == null)
-                                    {
-                                        continue;
-                                    }
-                                }
-                                File.WriteAllBytes(outPath, data);
-                            }
-                        }
-                        else
-                        {
-                            byte[] pixelData = new byte[0];
-                            foreach (var chunk in rec.Chunks)
-                            {
-                                fs.Seek((long)chunk.Offset, SeekOrigin.Begin);
-                                uint readSize = chunk.PackSize == 0 ? chunk.FullSize : chunk.PackSize;
-                                byte[] chunkData = br.ReadBytes((int)readSize);
-                                if (chunk.PackSize != 0 && chunk.PackSize < chunk.FullSize)
-                                {
-                                    chunkData = DecompressZlibData(chunkData, chunk.FullSize, logger, rec.Name);
-                                    if (chunkData == null)
-                                    {
-                                        logger?.Invoke($"Skipping {rec.Name} due to decompression failure.");
-                                        break;
-                                    }
-                                }
-                                pixelData = pixelData.Concat(chunkData).ToArray();
-                            }
-                            if (pixelData.Length == 0) continue;
-
-                            byte[] header = BuildDDSHeader(rec);
-                            byte[] fullFile = header.Concat(pixelData).ToArray();
-                            File.WriteAllBytes(outPath, fullFile);
-                        }
+                        byte[] payload = ReadRecordPayload(fs, br, type, rec, logger);
+                        if (payload == null) continue;
+                        File.WriteAllBytes(outPath, payload);
                     }
                 }
             }
@@ -322,7 +358,133 @@ namespace F76ManagerApp.Managers
             }
         }
 
+        private static long EstimateRecordSize(string type, BA2FileRecord rec)
+        {
+            if (type == "GNRL")
+                return rec.UnpackedSize;
+            long size = 0;
+            foreach (var chunk in rec.Chunks)
+                size += chunk.FullSize;
+            return size;
+        }
+
+        private static byte[] ReadRecordPayload(FileStream fs, BinaryReader br, string type, BA2FileRecord rec, Action<string> logger)
+        {
+            if (type == "GNRL")
+            {
+                fs.Seek((long)rec.Offset, SeekOrigin.Begin);
+
+                if (rec.PackedSize == 0)
+                {
+                    return rec.UnpackedSize == 0
+                        ? Array.Empty<byte>()
+                        : br.ReadBytes((int)rec.UnpackedSize);
+                }
+
+                byte[] data = br.ReadBytes((int)rec.PackedSize);
+                data = DecompressZlibData(data, rec.UnpackedSize, logger, rec.Name);
+                if (data == null)
+                    throw new InvalidDataException($"Could not decompress BA2 entry: {rec.Name}");
+                return data;
+            }
+
+            using var pixels = new MemoryStream();
+            foreach (var chunk in rec.Chunks)
+            {
+                fs.Seek((long)chunk.Offset, SeekOrigin.Begin);
+                uint readSize = chunk.PackSize == 0 ? chunk.FullSize : chunk.PackSize;
+                byte[] chunkData = br.ReadBytes((int)readSize);
+                if (chunk.PackSize != 0)
+                {
+                    chunkData = DecompressZlibData(chunkData, chunk.FullSize, logger, rec.Name);
+                    if (chunkData == null)
+                        throw new InvalidDataException($"Could not decompress BA2 entry: {rec.Name}");
+                }
+                pixels.Write(chunkData, 0, chunkData.Length);
+            }
+            if (pixels.Length == 0) return null;
+
+            byte[] header = BuildDDSHeader(rec);
+            byte[] pixelData = pixels.ToArray();
+            byte[] fullFile = new byte[header.Length + pixelData.Length];
+            Buffer.BlockCopy(header, 0, fullFile, 0, header.Length);
+            Buffer.BlockCopy(pixelData, 0, fullFile, header.Length, pixelData.Length);
+            return fullFile;
+        }
+
+        public static byte[] ReadTexturePreviewBytes(string ba2Path, string entryPath, int maxEdge, Action<string> logger = null)
+        {
+            if (maxEdge < 1) maxEdge = 1024;
+            string want = (entryPath ?? "").Replace("\\", "/").TrimStart('/').ToLowerInvariant();
+            if (want.Length == 0)
+                throw new FileNotFoundException("BA2 entry path is empty.");
+
+            using var fs = new FileStream(ba2Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var br = new BinaryReader(fs);
+            var (type, records) = ReadArchiveIndex(fs, br);
+            var rec = records.FirstOrDefault(r =>
+                (r.Name ?? "").Replace("\\", "/").TrimStart('/').Equals(want, StringComparison.OrdinalIgnoreCase));
+            if (rec == null)
+                throw new FileNotFoundException($"BA2 entry not found: {entryPath}");
+
+            if (type == "GNRL" || rec.IsCubemap != 0 || rec.Chunks.Count == 0 || !TryGetDxgiLayout(rec.Format, out _, out _))
+                return ReadEntryBytes(ba2Path, entryPath, logger);
+
+            int chosen = 0;
+            int chosenW = Math.Max(1, (int)rec.Width);
+            int chosenH = Math.Max(1, (int)rec.Height);
+            int mipCount = Math.Max(1, (int)rec.NumMips);
+            for (int mip = 0; mip < mipCount; mip++)
+            {
+                int mw = Math.Max(1, rec.Width >> mip);
+                int mh = Math.Max(1, rec.Height >> mip);
+                chosen = mip;
+                chosenW = mw;
+                chosenH = mh;
+                if (Math.Max(mw, mh) <= maxEdge) break;
+            }
+
+            BA2TextureChunk chunk = null;
+            foreach (var candidate in rec.Chunks)
+            {
+                if (chosen >= candidate.StartMip && chosen <= candidate.EndMip)
+                {
+                    chunk = candidate;
+                    break;
+                }
+            }
+            chunk ??= rec.Chunks[0];
+
+            fs.Seek((long)chunk.Offset, SeekOrigin.Begin);
+            uint readSize = chunk.PackSize == 0 ? chunk.FullSize : chunk.PackSize;
+            byte[] chunkData = br.ReadBytes((int)readSize);
+            if (chunk.PackSize != 0)
+            {
+                chunkData = DecompressZlibData(chunkData, chunk.FullSize, logger, rec.Name);
+                if (chunkData == null)
+                    throw new InvalidDataException($"Could not decompress BA2 entry: {rec.Name}");
+            }
+
+            int skip = 0;
+            for (int mip = chunk.StartMip; mip < chosen; mip++)
+                skip += GetMipByteSize(Math.Max(1, rec.Width >> mip), Math.Max(1, rec.Height >> mip), rec.Format);
+            int take = GetMipByteSize(chosenW, chosenH, rec.Format);
+            if (skip < 0 || take <= 0 || skip + take > chunkData.Length)
+                throw new InvalidDataException($"Could not read BA2 entry: {entryPath}");
+
+            byte[] header = BuildDDSHeader(rec, chosenW, chosenH, 1);
+            var payload = new byte[header.Length + take];
+            Buffer.BlockCopy(header, 0, payload, 0, header.Length);
+            Buffer.BlockCopy(chunkData, skip, payload, header.Length, take);
+            return payload;
+        }
+
         private static byte[] BuildDDSHeader(BA2FileRecord rec)
+        {
+            return BuildDDSHeader(rec, rec.Width, rec.Height, rec.NumMips);
+        }
+
+        private static byte[] BuildDDSHeader(BA2FileRecord rec, int width, int height, int mips)
         {
             using (var ms = new MemoryStream())
             using (var bw = new BinaryWriter(ms))
@@ -330,26 +492,26 @@ namespace F76ManagerApp.Managers
                 bw.Write(Encoding.ASCII.GetBytes("DDS "));
                 bw.Write(124u);
                 uint flags = 0x1u | 0x2u | 0x4u | 0x1000u | 0x80000u;
-                if (rec.NumMips > 1) flags |= 0x20000u;
+                if (mips > 1) flags |= 0x20000u;
                 bw.Write(flags);
-                bw.Write((uint)rec.Height);
-                bw.Write((uint)rec.Width);
+                bw.Write((uint)height);
+                bw.Write((uint)width);
                 if (!TryGetDxgiLayout(rec.Format, out int bytesPerBlock, out bool blockCompressed))
                     throw new Exception($"Unsupported DX10 texture format (DXGI {rec.Format}).");
                 uint linearSize;
                 if (!blockCompressed)
                 {
-                    linearSize = (uint)rec.Width * (uint)rec.Height * (uint)bytesPerBlock;
+                    linearSize = (uint)width * (uint)height * (uint)bytesPerBlock;
                 }
                 else
                 {
-                    uint blocksWide = Math.Max(1u, ((uint)rec.Width + 3u) / 4u);
-                    uint blocksHigh = Math.Max(1u, ((uint)rec.Height + 3u) / 4u);
+                    uint blocksWide = Math.Max(1u, ((uint)width + 3u) / 4u);
+                    uint blocksHigh = Math.Max(1u, ((uint)height + 3u) / 4u);
                     linearSize = blocksWide * blocksHigh * (uint)bytesPerBlock;
                 }
                 bw.Write(linearSize);
                 bw.Write(0u);
-                bw.Write((uint)rec.NumMips);
+                bw.Write((uint)mips);
                 for (int i = 0; i < 11; i++) bw.Write(0u);
 
                 bw.Write(32u);
@@ -380,7 +542,7 @@ namespace F76ManagerApp.Managers
                 bw.Write(0u);
 
                 uint caps1 = 0x1000u;
-                if (rec.NumMips > 1) caps1 |= 0x8u | 0x400000u;
+                if (mips > 1) caps1 |= 0x8u | 0x400000u;
                 bw.Write(caps1);
                 bw.Write(0u);
                 bw.Write(0u);

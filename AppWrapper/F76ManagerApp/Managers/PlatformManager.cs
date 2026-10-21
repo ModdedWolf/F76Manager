@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
@@ -13,7 +14,12 @@ namespace F76ManagerApp.Managers
 
     public class PlatformManager
     {
+        public const int SteamLiveAppId = 1151340;
+        public const int SteamPtsAppId = 1836200;
+        public const string DefaultPtsInstallDir = "Fallout 76 Playtest";
+
         public GamePlatform CurrentPlatform { get; private set; } = GamePlatform.Steam;
+        public bool IsPts { get; private set; } = false;
         private Action<string> _logger;
 
         public PlatformManager(Action<string> logger = null)
@@ -24,6 +30,18 @@ namespace F76ManagerApp.Managers
         public void SetPlatform(GamePlatform platform)
         {
             CurrentPlatform = platform;
+            if (platform != GamePlatform.Steam)
+                IsPts = false;
+        }
+
+        public void SetPts(bool isPts)
+        {
+            if (CurrentPlatform != GamePlatform.Steam)
+            {
+                IsPts = false;
+                return;
+            }
+            IsPts = isPts;
         }
 
         public static GamePlatform DetectPlatformFromGamePath(string path, GamePlatform fallback)
@@ -62,6 +80,14 @@ namespace F76ManagerApp.Managers
             return fallback;
         }
 
+        public static bool LooksLikePtsGamePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            return path.Contains("Playtest", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("Public Test", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("PTS", StringComparison.OrdinalIgnoreCase);
+        }
+
         public bool IsXbox() => CurrentPlatform == GamePlatform.Xbox;
         public string GetPlatformName() => GetPlatformLabel();
         public string GetGameExeName() => GetExecutableName();
@@ -88,6 +114,12 @@ namespace F76ManagerApp.Managers
             return CurrentPlatform == GamePlatform.Steam ? "Steam" : "Xbox";
         }
 
+        public string GetGameLabel()
+        {
+            if (CurrentPlatform == GamePlatform.Xbox) return "Xbox";
+            return IsPts ? "Steam PTS" : "Steam";
+        }
+
         public string GetExecutableName()
         {
             return CurrentPlatform == GamePlatform.Xbox ? "Project76_GamePass.exe" : "Fallout76.exe";
@@ -97,19 +129,13 @@ namespace F76ManagerApp.Managers
         {
             if (CurrentPlatform == GamePlatform.Steam)
             {
+                if (IsPts)
+                    return GetDefaultPtsGamePath();
+
                 try
                 {
-                    string steamPath = (string)Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Valve\Steam", "InstallPath", null);
-                    if (steamPath == null) return FallbackPathSearch("Steam");
-
-                    string vdfPath = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
-                    if (!File.Exists(vdfPath)) return FallbackPathSearch("Steam");
-
-                    string vdfContent = File.ReadAllText(vdfPath);
-                    var matches = Regex.Matches(vdfContent, @"\""path\""\s+\""(.+?)\""", RegexOptions.IgnoreCase);
-                    foreach (Match match in matches)
+                    foreach (string libraryPath in EnumerateSteamLibraryPaths())
                     {
-                        string libraryPath = match.Groups[1].Value.Replace(@"\\", @"\");
                         string gamePath = Path.Combine(libraryPath, "steamapps", "common", "Fallout76");
                         if (Directory.Exists(gamePath)) return gamePath;
                     }
@@ -156,11 +182,126 @@ namespace F76ManagerApp.Managers
             }
         }
 
+        public string GetDefaultPtsGamePath()
+        {
+            try
+            {
+                foreach (string libraryPath in EnumerateSteamLibraryPaths())
+                {
+                    string installDir = ReadSteamAppInstallDir(libraryPath, SteamPtsAppId) ?? DefaultPtsInstallDir;
+                    string gamePath = Path.Combine(libraryPath, "steamapps", "common", installDir);
+                    if (Directory.Exists(gamePath) && File.Exists(Path.Combine(gamePath, "Fallout76.exe")))
+                        return gamePath;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.Invoke($"PTS path detection failed: {ex.Message}");
+            }
+
+            return FallbackPathSearch("PTS");
+        }
+
+        public bool IsPtsInstalled()
+        {
+            string path = GetDefaultPtsGamePath();
+            return !string.IsNullOrEmpty(path) && Directory.Exists(path);
+        }
+
+        public int? GetPtsManifestState()
+        {
+            try
+            {
+                foreach (string libraryPath in EnumerateSteamLibraryPaths())
+                {
+                    string acfPath = Path.Combine(libraryPath, "steamapps", $"appmanifest_{SteamPtsAppId}.acf");
+                    if (!File.Exists(acfPath)) continue;
+                    string content = File.ReadAllText(acfPath);
+                    var match = Regex.Match(content, @"\""StateFlags\""\s+\""(\d+)\""", RegexOptions.IgnoreCase);
+                    if (match.Success && int.TryParse(match.Groups[1].Value, out int flags))
+                        return flags;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.Invoke($"PTS manifest state read failed: {ex.Message}");
+            }
+            return null;
+        }
+
+        public static string? TryGetSteamInstallPath()
+        {
+            try
+            {
+                string? steamPath = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath", null) as string;
+                if (!string.IsNullOrEmpty(steamPath) && Directory.Exists(steamPath))
+                    return steamPath;
+
+                steamPath = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Valve\Steam", "InstallPath", null) as string;
+                if (!string.IsNullOrEmpty(steamPath) && Directory.Exists(steamPath))
+                    return steamPath;
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private IEnumerable<string> EnumerateSteamLibraryPaths()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string? steamRoot = TryGetSteamInstallPath();
+            if (string.IsNullOrEmpty(steamRoot))
+                yield break;
+
+            if (seen.Add(steamRoot))
+                yield return steamRoot;
+
+            string vdfPath = Path.Combine(steamRoot, "steamapps", "libraryfolders.vdf");
+            if (!File.Exists(vdfPath))
+                yield break;
+
+            string vdfContent = File.ReadAllText(vdfPath);
+            var matches = Regex.Matches(vdfContent, @"\""path\""\s+\""(.+?)\""", RegexOptions.IgnoreCase);
+            foreach (Match match in matches)
+            {
+                string libraryPath = match.Groups[1].Value.Replace(@"\\", @"\");
+                if (string.IsNullOrWhiteSpace(libraryPath)) continue;
+                if (!Directory.Exists(libraryPath)) continue;
+                if (seen.Add(libraryPath))
+                    yield return libraryPath;
+            }
+        }
+
+        private static string? ReadSteamAppInstallDir(string libraryPath, int appId)
+        {
+            try
+            {
+                string acfPath = Path.Combine(libraryPath, "steamapps", $"appmanifest_{appId}.acf");
+                if (!File.Exists(acfPath)) return null;
+                string content = File.ReadAllText(acfPath);
+                var match = Regex.Match(content, @"\""installdir\""\s+\""(.+?)\""", RegexOptions.IgnoreCase);
+                if (match.Success)
+                    return match.Groups[1].Value;
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
         private string FallbackPathSearch(string platform)
         {
-            string[] paths = platform == "Steam" 
-                ? new[] { @"D:\Steam\steamapps\common\Fallout76", }
-                : new[] { @"C:\XboxGames\Fallout 76\Content", };
+            string[] paths = platform switch
+            {
+                "PTS" => new[]
+                {
+                    @"D:\Steam\steamapps\common\Fallout 76 Playtest",
+                    @"C:\Program Files (x86)\Steam\steamapps\common\Fallout 76 Playtest",
+                },
+                "Steam" => new[] { @"D:\Steam\steamapps\common\Fallout76", },
+                _ => new[] { @"C:\XboxGames\Fallout 76\Content", },
+            };
 
             foreach (var path in paths)
             {

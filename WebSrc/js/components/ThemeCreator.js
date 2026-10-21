@@ -222,6 +222,8 @@ function generateRandomPalette(mode) {
     const statusL = dark ? rand(52, 62) : rand(38, 46);
     const status = (h) => hslWithContrast(h, statusSat, statusL, bgDark, 3, dark);
 
+    const textHue = pick([hue, primaryHue, accentHue]);
+
     const onPrimary = contrastRatio(primary, '#121212') >= contrastRatio(primary, '#ffffff')
         ? '#121212'
         : '#ffffff';
@@ -232,8 +234,8 @@ function generateRandomPalette(mode) {
         'bg-surface-light': hslToHex(hue, bgSat, bgL[2]),
         'primary-green': primary,
         'accent-amber': accent,
-        'text-main': hslWithContrast(hue, rand(4, 12), dark ? rand(88, 94) : rand(8, 14), bgDark, 7, dark),
-        'text-muted': hslWithContrast(hue, rand(5, 14), dark ? rand(62, 70) : rand(38, 46), bgDark, 4.5, dark),
+        'text-main': hslWithContrast(textHue, vibrant ? rand(30, 45) : rand(18, 30), dark ? rand(86, 92) : rand(10, 18), bgDark, 7, dark),
+        'text-muted': hslWithContrast(textHue, vibrant ? rand(32, 50) : rand(20, 34), dark ? rand(64, 72) : rand(36, 44), bgDark, 4.5, dark),
         'border-color': hslToHex(hue, bgSat, dark ? bgL[2] + 6 : bgL[2] - 6),
         'danger-red': status(rand(-5, 10)),
         'success-green': status(rand(115, 145)),

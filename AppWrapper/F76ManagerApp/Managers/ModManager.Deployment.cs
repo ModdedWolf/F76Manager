@@ -345,7 +345,11 @@ public partial class ModManager
                     EnsureModDirectories(AppPaths.DataPath, metadata[key].Directories);
                 }
 
-                if (filesResult.Count == 0)
+                if (IsGameRootInjectorListPath(modName.Replace("\\", "/")))
+                {
+                    filesResult.Add($"GameRoot/{Path.GetFileName(modName.Replace("\\", "/"))}");
+                }
+                else if (filesResult.Count == 0)
                 {
                     string potentialPath = Path.Combine(AppPaths.ManagedStagingDataPath, modName);
                     if (File.Exists(potentialPath)) filesResult.Add(modName);
@@ -360,6 +364,9 @@ public partial class ModManager
                 foreach (string relativePath in filesResult)
                 {
                     string normalizedPath = relativePath.Replace("\\", "/");
+                    string injectorName = Path.GetFileName(normalizedPath);
+                    if (IsGameRootInjectorName(injectorName))
+                        normalizedPath = $"GameRoot/{injectorName}";
                     if (processedFiles.Contains(normalizedPath)) continue;
 
                     string sourcePath = GetManagedRuntimeSourcePath(normalizedPath);

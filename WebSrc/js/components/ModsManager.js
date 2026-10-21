@@ -1,10 +1,20 @@
 import { ModsRenderer, buildModUpdateButtonHtml, buildModUnverifiedButtonHtml } from './ModsRenderer.js';
 import { ModsDndHandler } from './ModsDndHandler.js';
-import { escapeAttr } from '../utils/htmlSafe.js';
+import { escapeAttr, escapeHtml as escapeHtmlSafe } from '../utils/htmlSafe.js';
 import { applyStylesheet as applyModTypeBadgeStylesheet } from '../utils/modTypeBadgeTheme.js';
 import { openTabBadgeColorModal } from '../utils/badgeColorModal.js';
 import { JsonTreeEditor } from '../utils/jsonTreeEditor.js';
 import * as jsonc from '../utils/jsonc.js';
+import {
+    CONFIG_EDITOR_FONT_FAMILIES,
+    CONFIG_EDITOR_FONT_DEFAULT_SIZE,
+    CONFIG_EDITOR_FONT_DEFAULT_FAMILY,
+    clampConfigEditorFontSize,
+    configEditorFontFamilyLabel,
+    getConfigEditorFont,
+    applyConfigEditorFont,
+    saveConfigEditorFont
+} from '../utils/configEditorFont.js';
 
 let _modsGlobalEventsAttached = false;
 let _deleteModInFlight = false;
@@ -181,8 +191,32 @@ export class ModsManager {
         return out;
     }
 
+    _setConfigEditorFont(overlay, prefs) {
+        const next = {
+            size: clampConfigEditorFontSize(prefs.size),
+            family: prefs.family || CONFIG_EDITOR_FONT_DEFAULT_FAMILY
+        };
+        const prev = this._configEditorFont;
+        this._configEditorFont = next;
+        applyConfigEditorFont(overlay, next);
+        if (!prev || prev.size !== next.size || prev.family !== next.family) saveConfigEditorFont(next);
+        const sizeLabel = overlay.querySelector('#mod-config-font-size-value');
+        if (sizeLabel) sizeLabel.textContent = `${next.size}px`;
+        const familySelect = overlay.querySelector('#mod-config-font-family');
+        if (familySelect && familySelect.value !== next.family) familySelect.value = next.family;
+        requestAnimationFrame(() => this._syncConfigEditorBackdropPad(overlay));
+    }
+
+    _stepConfigEditorFont(overlay, delta) {
+        const cur = this._configEditorFont || getConfigEditorFont();
+        const size = delta === 0 ? CONFIG_EDITOR_FONT_DEFAULT_SIZE : cur.size + delta;
+        this._setConfigEditorFont(overlay, { ...cur, size });
+    }
+
     _setupConfigEditorLayout(overlay) {
         this._teardownConfigEditorLayout?.();
+        this._configEditorFont = getConfigEditorFont();
+        applyConfigEditorFont(overlay, this._configEditorFont);
         const ta = overlay.querySelector('#mod-config-editor');
         const bd = overlay.querySelector('#mod-config-highlight-backdrop');
         if (!ta || !bd) return;
@@ -192,12 +226,434 @@ export class ModsManager {
         ro.observe(ta);
         const wrap = ta.closest('.mod-config-editor-wrap');
         if (wrap) ro.observe(wrap);
+        const onWheel = (e) => {
+            if (!e.ctrlKey) return;
+            e.preventDefault();
+            if (!e.deltaY) return;
+            this._stepConfigEditorFont(overlay, e.deltaY < 0 ? 1 : -1);
+        };
+        const onZoomKey = (e) => {
+            if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+            if (overlay.classList.contains('config-editor-parked')) return;
+            if (!wrap || !wrap.contains(document.activeElement)) return;
+            const k = e.key;
+            let delta = null;
+            if (k === '=' || k === '+') delta = 1;
+            else if (k === '-' || k === '_') delta = -1;
+            else if (k === '0') delta = 0;
+            if (delta === null) return;
+            e.preventDefault();
+            e.stopPropagation();
+            this._stepConfigEditorFont(overlay, delta);
+        };
+        wrap?.addEventListener('wheel', onWheel, { passive: false });
+        document.addEventListener('keydown', onZoomKey, true);
+        const teardownFind = this._mountConfigFind(overlay);
+        this._setConfigFindHostActive(true);
         this._teardownConfigEditorLayout = () => {
+            teardownFind();
+            this._setConfigFindHostActive(false);
             ta.removeEventListener('scroll', sync);
+            wrap?.removeEventListener('wheel', onWheel);
+            document.removeEventListener('keydown', onZoomKey, true);
             ro.disconnect();
             this._teardownConfigEditorLayout = null;
         };
         requestAnimationFrame(sync);
+    }
+
+    _setConfigFindHostActive(active) {
+        window.chrome?.webview?.postMessage({ type: 'CONFIG_EDITOR_FIND_ACTIVE', active: !!active });
+    }
+
+    hasConfigFind() {
+        return !!this._openConfigFind && !this.isConfigEditorParked();
+    }
+
+    openConfigFind() {
+        if (this.isConfigEditorParked()) return;
+        this._openConfigFind?.();
+    }
+
+    stepConfigFind(direction) {
+        if (this.isConfigEditorParked()) return;
+        this._stepConfigFind?.(direction);
+    }
+
+    _mountConfigFind(overlay) {
+        const t = (key, fallback) => {
+            const v = window._t(key);
+            return v && v !== key ? v : fallback;
+        };
+        const bar = document.createElement('div');
+        bar.className = 'config-find-bar';
+        bar.hidden = true;
+        bar.setAttribute('role', 'search');
+        bar.innerHTML = `
+            <div class="config-find-field">
+                <input id="mod-config-find-input" class="config-find-input" type="text" spellcheck="false" autocomplete="off" placeholder="${escapeAttr(t('config_editor_find', 'Find'))}" aria-label="${escapeAttr(t('config_editor_find', 'Find'))}">
+                <button type="button" class="config-find-clear" id="mod-config-find-clear" hidden aria-label="${escapeAttr(t('config_editor_find_clear', 'Clear'))}"><i data-lucide="x"></i></button>
+            </div>
+            <span id="mod-config-find-count" class="config-find-count" aria-live="polite"></span>
+            <button type="button" class="config-find-btn" data-find="prev" title="${escapeAttr(t('config_editor_find_prev', 'Previous match'))}" aria-label="${escapeAttr(t('config_editor_find_prev', 'Previous match'))}"><i data-lucide="arrow-up"></i></button>
+            <button type="button" class="config-find-btn" data-find="next" title="${escapeAttr(t('config_editor_find_next', 'Next match'))}" aria-label="${escapeAttr(t('config_editor_find_next', 'Next match'))}"><i data-lucide="arrow-down"></i></button>
+            <button type="button" class="config-find-btn" data-find="case" aria-pressed="false" title="${escapeAttr(t('config_editor_find_case', 'Match case'))}" aria-label="${escapeAttr(t('config_editor_find_case', 'Match case'))}">Aa</button>
+            <button type="button" class="config-find-btn" data-find="close" title="${escapeAttr(t('config_editor_find_close', 'Close'))}" aria-label="${escapeAttr(t('config_editor_find_close', 'Close'))}"><i data-lucide="x"></i></button>`;
+        const host = overlay.querySelector('.config-editor-main') || overlay;
+        host.appendChild(bar);
+        try { window.lucide?.createIcons({ nodes: [bar] }); } catch (_) { }
+
+        const input = bar.querySelector('#mod-config-find-input');
+        const clearBtn = bar.querySelector('#mod-config-find-clear');
+        const countEl = bar.querySelector('#mod-config-find-count');
+        const caseBtn = bar.querySelector('[data-find="case"]');
+        const state = { query: '', caseSensitive: false, active: 0 };
+        this._configFindState = state;
+
+        const editorText = () => overlay.querySelector('#mod-config-editor')?.value || '';
+
+        const matchStarts = () => {
+            const query = state.query;
+            if (!query) return [];
+            const text = editorText();
+            const hay = state.caseSensitive ? text : text.toLowerCase();
+            const needle = state.caseSensitive ? query : query.toLowerCase();
+            const starts = [];
+            let from = 0;
+            while (from <= hay.length - needle.length) {
+                const at = hay.indexOf(needle, from);
+                if (at < 0) break;
+                starts.push(at);
+                from = at + Math.max(1, needle.length);
+            }
+            return starts;
+        };
+
+        const syncClear = () => {
+            if (clearBtn) clearBtn.hidden = !input?.value;
+        };
+
+        const updateCount = (total) => {
+            if (!countEl) return;
+            if (!state.query) countEl.textContent = '';
+            else countEl.textContent = total ? `${state.active + 1}/${total}` : '0/0';
+            countEl.classList.toggle('config-find-count--empty', !!state.query && !total);
+            syncClear();
+        };
+
+        const visibleTotal = () => {
+            if (overlay.dataset.configView !== 'tree') return matchStarts().length;
+            const tree = overlay.querySelector('#mod-config-json-tree');
+            if (!tree || !state.query) return 0;
+            const needle = state.caseSensitive ? state.query : state.query.toLowerCase();
+            return [...tree.querySelectorAll('.jt-row, .jt-comment')].filter((row) => {
+                const text = row.textContent || '';
+                return (state.caseSensitive ? text : text.toLowerCase()).includes(needle);
+            }).length;
+        };
+
+        const refresh = () => {
+            const total = visibleTotal();
+            if (total) state.active = ((state.active % total) + total) % total;
+            else state.active = 0;
+            updateCount(total);
+            if (overlay.dataset.configView === 'tree') this._applyConfigFindMarks(overlay);
+            else this._refreshConfigHighlight?.();
+        };
+
+        const open = () => {
+            bar.hidden = false;
+            input?.focus();
+            input?.select();
+        };
+
+        const close = () => {
+            if (bar.hidden) return false;
+            bar.hidden = true;
+            state.query = '';
+            state.active = 0;
+            if (input) input.value = '';
+            updateCount(0);
+            if (overlay.dataset.configView === 'tree') this._applyConfigFindMarks(overlay);
+            else this._refreshConfigHighlight?.();
+            return true;
+        };
+
+        const step = (direction) => {
+            if (bar.hidden) {
+                open();
+                return;
+            }
+            const total = visibleTotal();
+            if (!total) return;
+            state.active = (state.active + direction + total) % total;
+            refresh();
+        };
+
+        input?.addEventListener('input', () => {
+            state.query = input.value || '';
+            state.active = 0;
+            refresh();
+        });
+        clearBtn?.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (!input) return;
+            input.value = '';
+            state.query = '';
+            state.active = 0;
+            refresh();
+            input.focus();
+        });
+        input?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                step(e.shiftKey ? -1 : 1);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                close();
+                overlay.querySelector('#mod-config-editor')?.focus();
+            }
+        });
+        bar.querySelector('[data-find="prev"]')?.addEventListener('click', () => step(-1));
+        bar.querySelector('[data-find="next"]')?.addEventListener('click', () => step(1));
+        caseBtn?.addEventListener('click', () => {
+            state.caseSensitive = !state.caseSensitive;
+            caseBtn.classList.toggle('active', state.caseSensitive);
+            caseBtn.setAttribute('aria-pressed', String(state.caseSensitive));
+            state.active = 0;
+            refresh();
+        });
+        bar.querySelector('[data-find="close"]')?.addEventListener('click', () => {
+            close();
+            overlay.querySelector('#mod-config-editor')?.focus();
+        });
+
+        this._openConfigFind = open;
+        this._stepConfigFind = step;
+        this._closeConfigFind = close;
+        this._refreshConfigFind = refresh;
+
+        return () => {
+            bar.remove();
+            state.query = '';
+            this._configFindState = null;
+            this._openConfigFind = null;
+            this._stepConfigFind = null;
+            this._closeConfigFind = null;
+            this._refreshConfigFind = null;
+            this._refreshConfigHighlight = null;
+        };
+    }
+
+    _applyConfigFindMarks(overlay) {
+        const root = overlay || document.getElementById('rename-mod-overlay');
+        if (!root) return;
+        const state = this._configFindState;
+        const query = state?.query || '';
+        const tree = root.querySelector('#mod-config-json-tree');
+        tree?.querySelectorAll('.config-find-hit').forEach((el) => {
+            el.classList.remove('config-find-hit', 'config-find-hit--active');
+        });
+        if (!query || !state) return;
+
+        if (root.dataset.configView === 'tree' && tree) {
+            const needle = state.caseSensitive ? query : query.toLowerCase();
+            const rows = [...tree.querySelectorAll('.jt-row, .jt-comment')].filter((row) => {
+                const text = row.textContent || '';
+                return (state.caseSensitive ? text : text.toLowerCase()).includes(needle);
+            });
+            if (!rows.length) return;
+            const active = ((state.active % rows.length) + rows.length) % rows.length;
+            rows.forEach((row, i) => {
+                row.classList.add('config-find-hit');
+                if (i === active) row.classList.add('config-find-hit--active');
+            });
+            rows[active].scrollIntoView({ block: 'nearest' });
+            return;
+        }
+
+        const bd = root.querySelector('#mod-config-highlight-backdrop');
+        const ta = root.querySelector('#mod-config-editor');
+        if (!bd) return;
+        const text = ta?.value || '';
+        const hay = state.caseSensitive ? text : text.toLowerCase();
+        const needle = state.caseSensitive ? query : query.toLowerCase();
+        const ranges = [];
+        let from = 0;
+        while (needle && from <= hay.length - needle.length) {
+            const at = hay.indexOf(needle, from);
+            if (at < 0) break;
+            ranges.push({ start: at, end: at + needle.length });
+            from = at + Math.max(1, needle.length);
+        }
+        if (!ranges.length) return;
+        const active = ((state.active % ranges.length) + ranges.length) % ranges.length;
+        ranges[active].active = true;
+        this._markFindRanges(bd, ranges);
+        const mark = bd.querySelector('.cfg-find-hit--active');
+        if (mark && ta) {
+            const top = mark.offsetTop - ta.clientHeight * 0.35;
+            ta.scrollTop = Math.max(0, top);
+            const left = mark.offsetLeft - 32;
+            if (left < ta.scrollLeft || left > ta.scrollLeft + ta.clientWidth - 48) {
+                ta.scrollLeft = Math.max(0, left);
+            }
+            bd.scrollTop = ta.scrollTop;
+        }
+    }
+
+    _markFindRanges(root, ranges) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        let pos = 0;
+        for (const node of nodes) {
+            const len = node.nodeValue?.length || 0;
+            const nodeStart = pos;
+            const nodeEnd = pos + len;
+            const hits = ranges.filter((r) => r.end > nodeStart && r.start < nodeEnd);
+            pos = nodeEnd;
+            if (!hits.length || !node.parentNode) continue;
+            const text = node.nodeValue || '';
+            const frag = document.createDocumentFragment();
+            let cursor = 0;
+            hits.forEach((r) => {
+                const a = Math.max(0, r.start - nodeStart);
+                const b = Math.min(len, r.end - nodeStart);
+                if (a > cursor) frag.appendChild(document.createTextNode(text.slice(cursor, a)));
+                const mark = document.createElement('mark');
+                mark.className = r.active ? 'cfg-find-hit cfg-find-hit--active' : 'cfg-find-hit';
+                mark.textContent = text.slice(a, b);
+                frag.appendChild(mark);
+                cursor = b;
+            });
+            if (cursor < len) frag.appendChild(document.createTextNode(text.slice(cursor)));
+            node.parentNode.replaceChild(frag, node);
+        }
+    }
+
+    _mountConfigFontPopover(overlay) {
+        const btn = overlay.querySelector('#mod-config-font-btn');
+        if (!btn) return;
+        const t = (key, fallback) => {
+            const v = window._t(key);
+            return v && v !== key ? v : fallback;
+        };
+        let pop = null;
+        const close = () => {
+            if (!pop) return;
+            pop.remove();
+            pop = null;
+            btn.setAttribute('aria-expanded', 'false');
+            document.removeEventListener('mousedown', onOutside, true);
+            document.removeEventListener('keydown', onKey, true);
+        };
+        const onOutside = (e) => {
+            if (!pop) return;
+            if (pop.contains(e.target) || btn.contains(e.target)) return;
+            if (e.target?.closest?.('.themed-select-menu')) return;
+            close();
+        };
+        const onKey = (e) => {
+            if (e.key !== 'Escape' || !pop) return;
+            if (overlay.classList.contains('config-editor-parked')) return;
+            if (document.querySelector('.themed-select-menu')) return;
+            const hint = pop.querySelector('#mod-config-font-hint');
+            if (hint && !hint.hidden) {
+                e.preventDefault();
+                e.stopPropagation();
+                hint.hidden = true;
+                const infoBtn = pop.querySelector('#mod-config-font-info');
+                infoBtn?.setAttribute('aria-expanded', 'false');
+                infoBtn?.classList.remove('active');
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            close();
+            btn.focus();
+        };
+        const open = () => {
+            const cur = this._configEditorFont || getConfigEditorFont();
+            pop = document.createElement('div');
+            pop.className = 'config-font-popover';
+            pop.setAttribute('role', 'dialog');
+            pop.setAttribute('aria-label', t('config_editor_font', 'Editor font'));
+            const hintText = t('config_editor_font_hint', 'Tip: Ctrl + Mouse Wheel in the editor changes the size. Ctrl + 0 resets it.');
+            pop.innerHTML = `
+                <div class="config-font-head">
+                    <h3>${escapeHtmlSafe(t('config_editor_font', 'Editor font'))}</h3>
+                    <div class="config-font-info-wrap">
+                        <button type="button" class="config-font-info" id="mod-config-font-info" aria-expanded="false" aria-controls="mod-config-font-hint" aria-label="${escapeAttr(hintText)}">
+                            <i data-lucide="info"></i>
+                        </button>
+                        <div class="config-font-hint" id="mod-config-font-hint" role="tooltip" hidden>${escapeHtmlSafe(hintText)}</div>
+                    </div>
+                </div>
+                <span class="config-font-label">${escapeHtmlSafe(t('config_editor_font_size_label', 'Font size'))}</span>
+                <div class="config-font-stepper">
+                    <button type="button" data-font-step="-1" aria-label="-"><i data-lucide="minus"></i></button>
+                    <span id="mod-config-font-size-value" class="config-font-value">${cur.size}px</span>
+                    <button type="button" data-font-step="1" aria-label="+"><i data-lucide="plus"></i></button>
+                </div>
+                <label class="config-font-label" for="mod-config-font-family">${escapeHtmlSafe(t('config_editor_font_family_label', 'Font'))}</label>
+                <select id="mod-config-font-family" class="tweak-select">
+                    ${CONFIG_EDITOR_FONT_FAMILIES.map(f => `<option value="${escapeAttr(f.id)}" ${f.id === cur.family ? 'selected' : ''}>${escapeHtmlSafe(configEditorFontFamilyLabel(f))}</option>`).join('')}
+                </select>
+                <div class="config-font-actions">
+                    <button type="button" class="btn-popup secondary" id="mod-config-font-reset">${escapeHtmlSafe(t('config_editor_font_reset', 'Reset'))}</button>
+                </div>`;
+            btn.parentElement.appendChild(pop);
+            const br = btn.getBoundingClientRect();
+            const pr = btn.parentElement.getBoundingClientRect();
+            pop.style.top = `${br.bottom - pr.top + 6}px`;
+            pop.style.right = `${Math.max(0, pr.right - br.right)}px`;
+            try { window.lucide?.createIcons({ nodes: [pop] }); } catch (_) { }
+            const infoBtn = pop.querySelector('#mod-config-font-info');
+            const hint = pop.querySelector('#mod-config-font-hint');
+            const setHintOpen = (openHint) => {
+                if (!hint || !infoBtn) return;
+                hint.hidden = !openHint;
+                infoBtn.setAttribute('aria-expanded', String(openHint));
+                infoBtn.classList.toggle('active', openHint);
+            };
+            infoBtn?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setHintOpen(!!hint?.hidden);
+            });
+            pop.addEventListener('click', (e) => {
+                if (!hint || hint.hidden) return;
+                if (e.target.closest('#mod-config-font-info, #mod-config-font-hint')) return;
+                setHintOpen(false);
+            });
+            pop.querySelectorAll('[data-font-step]').forEach(b => {
+                b.addEventListener('click', () => this._stepConfigEditorFont(overlay, Number(b.dataset.fontStep)));
+            });
+            pop.querySelector('#mod-config-font-family')?.addEventListener('change', (e) => {
+                const curNow = this._configEditorFont || getConfigEditorFont();
+                this._setConfigEditorFont(overlay, { ...curNow, family: e.target.value });
+            });
+            pop.querySelector('#mod-config-font-reset')?.addEventListener('click', () => {
+                this._setConfigEditorFont(overlay, { size: CONFIG_EDITOR_FONT_DEFAULT_SIZE, family: CONFIG_EDITOR_FONT_DEFAULT_FAMILY });
+            });
+            btn.setAttribute('aria-expanded', 'true');
+            document.addEventListener('mousedown', onOutside, true);
+            document.addEventListener('keydown', onKey, true);
+        };
+        btn.addEventListener('click', () => {
+            if (pop) close();
+            else open();
+        });
+        this._closeConfigFontPopover = close;
+        const prevTeardown = this._teardownConfigEditorLayout;
+        this._teardownConfigEditorLayout = () => {
+            close();
+            this._closeConfigFontPopover = null;
+            prevTeardown?.();
+            this._teardownConfigEditorLayout = null;
+        };
     }
 
     _parseJsonRelaxed(text) {
@@ -358,6 +814,23 @@ export class ModsManager {
         window.chrome.webview.postMessage({ type: 'CHECK_MOD_UPDATES' });
     }
 
+    forceModUpdateCheck() {
+        const loggedIn = window.app?.realData?.managerSettings?.nexusLoggedIn;
+        if (!loggedIn) {
+            window.app?.showBanner?.({ type: 'warning', text: window._t('update_login_required') });
+            return;
+        }
+        if (this._modUpdateCheckTimer) {
+            clearTimeout(this._modUpdateCheckTimer);
+            this._modUpdateCheckTimer = null;
+        }
+        this._modUpdateCheckPending = false;
+        this._modUpdateCheckInFlight = true;
+        this._lastModUpdateCheckAt = Date.now();
+        window.app?.showBanner?.({ type: 'info', text: window._t('mods_check_updates_running') });
+        window.chrome.webview.postMessage({ type: 'CHECK_MOD_UPDATES', force: true });
+    }
+
     scheduleModUpdateCheck(delayMs = 700) {
         if (this._modUpdateCheckTimer) clearTimeout(this._modUpdateCheckTimer);
         this._modUpdateCheckTimer = setTimeout(() => {
@@ -395,6 +868,18 @@ export class ModsManager {
         if (window.app?.realData?.mods) this._mergeModUpdateFlags(window.app.realData.mods);
         this._applyUpdateFlagsToVisibleRows();
         this._updateBulkUpdateButtonLabel();
+        if (payload?.forced) {
+            if (payload.error === 'nexus_not_connected') {
+                window.app?.showBanner?.({ type: 'warning', text: window._t('update_login_required') });
+            } else if (payload.busy) {
+                window.app?.showBanner?.({ type: 'info', text: window._t('mods_check_updates_busy') });
+            } else {
+                const found = updates.filter(u => u.hasUpdate).length;
+                window.app?.showBanner?.(found > 0
+                    ? { type: 'success', text: window._t('mods_check_updates_found', found) }
+                    : { type: 'success', text: window._t('mods_check_updates_none') });
+            }
+        }
         if (this._modUpdateCheckPending) {
             this._modUpdateCheckPending = false;
             this.scheduleModUpdateCheck(300);
@@ -537,6 +1022,12 @@ export class ModsManager {
             this._closeModsActionsMenu();
             const mods = this.data?.mods || window.app?.realData?.mods || [];
             void openTabBadgeColorModal({ mods, scope: 'mods' });
+        }, { signal });
+
+        document.getElementById('mods-action-check-updates')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeModsActionsMenu();
+            this.forceModUpdateCheck();
         }, { signal });
 
         document.getElementById('mods-action-backup-mods')?.addEventListener('click', (e) => {
@@ -784,7 +1275,7 @@ export class ModsManager {
                 if (!name) return;
                 const openTab = btn.getAttribute?.('data-open-tab') || 'general';
                 console.log("[NUCLEAR] Edit requested for:", name, "tab:", openTab);
-                this.showRenameModal(name, openTab);
+                void this._openRenameModalAfterParkedEditor(name, openTab);
             };
         }
 
@@ -904,6 +1395,7 @@ export class ModsManager {
 
             if (err) {
                 editor.value = '';
+                this._configBaseline = null;
                 editor.disabled = true;
                 if (saveBtn) saveBtn.disabled = true;
                 if (validateBtn) validateBtn.disabled = true;
@@ -913,8 +1405,18 @@ export class ModsManager {
             }
 
             editor.value = String(data.content ?? '');
+            this._configBaseline = editor.value;
             editor.disabled = false;
             setStatus('', 'neutral');
+
+            overlay.dataset.configEncoding = String(data.encoding || 'utf-8');
+            const encodingEl = overlay.querySelector('#mod-config-encoding');
+            if (encodingEl) {
+                const label = String(data.encodingLabel || 'UTF-8');
+                encodingEl.textContent = label;
+                encodingEl.title = window._t('config_editor_encoding', label);
+                encodingEl.hidden = false;
+            }
 
             const isJson = String(data.relativePath || '').toLowerCase().endsWith('.json');
             if (backdrop) {
@@ -933,29 +1435,131 @@ export class ModsManager {
     }
 
     handleModFileWriteResult(data) {
+        const waiter = this._configSaveWaiter;
+        this._configSaveWaiter = null;
         try {
             const overlay = document.getElementById('rename-mod-overlay');
             if (!overlay) return;
+            if (data.ok && this._configPendingSave != null) this._configBaseline = this._configPendingSave;
+            this._configPendingSave = null;
             const status = overlay.querySelector('#mod-config-file-status');
             if (!status) return;
             if (data.ok) {
                 if (data.applied != null) {
                     const count = Number(data.applied) || 0;
                     const target = String(data.appliedTarget || 'INI');
-                    const keyLabel = count === 1 ? 'key' : 'keys';
-                    status.textContent = `Saved and applied ${count} ${keyLabel} to ${target}.`;
+                    status.textContent = count === 1
+                        ? window._t('config_editor_saved_applied_one', target)
+                        : window._t('config_editor_saved_applied', count, target);
                 } else {
-                    status.textContent = 'Saved.';
+                    status.textContent = window._t('config_editor_saved');
                 }
                 status.className = 'mod-config-status mod-config-status--success';
             } else {
-                const msg = String(data.error || 'Save failed.');
+                const msg = data.errorKey
+                    ? window._t(data.errorKey, ...(Array.isArray(data.errorArgs) ? data.errorArgs : []))
+                    : String(data.error || window._t('config_editor_save_failed'));
                 status.textContent = msg;
                 status.className = 'mod-config-status mod-config-status--error';
             }
         } catch (e) {
             console.warn('[MODS] handleModFileWriteResult failed', e);
+        } finally {
+            if (waiter) waiter(!!data?.ok);
         }
+    }
+
+    isConfigEditorOpen() {
+        return !!document.querySelector('#rename-mod-overlay.config-editor-page:not(.config-editor-parked)');
+    }
+
+    isConfigEditorParked() {
+        return !!document.querySelector('#rename-mod-overlay.config-editor-page.config-editor-parked');
+    }
+
+    configEditorOriginSection() {
+        return document.querySelector('#rename-mod-overlay.config-editor-page')?.dataset.originSection || '';
+    }
+
+    parkConfigEditor() {
+        const overlay = document.querySelector('#rename-mod-overlay.config-editor-page');
+        if (!overlay || overlay.classList.contains('config-editor-parked')) return;
+        this._closeConfigFontPopover?.();
+        this._closeConfigFind?.();
+        if (overlay.contains(document.activeElement)) document.activeElement.blur();
+        overlay.classList.add('config-editor-parked');
+        document.querySelector('.main-container')?.classList.remove('config-editor-open');
+        this._setConfigFindHostActive(false);
+    }
+
+    unparkConfigEditor() {
+        const overlay = document.querySelector('#rename-mod-overlay.config-editor-page.config-editor-parked');
+        if (!overlay) return;
+        overlay.classList.remove('config-editor-parked');
+        document.querySelector('.main-container')?.classList.add('config-editor-open');
+        this._setConfigFindHostActive(true);
+        const titleEl = document.getElementById('section-title');
+        const fileName = String(overlay.dataset.configRelativePath || '').split('/').pop();
+        if (titleEl && fileName) titleEl.textContent = fileName;
+        requestAnimationFrame(() => this._syncConfigEditorBackdropPad(overlay));
+    }
+
+    async _openRenameModalAfterParkedEditor(name, tab) {
+        if (this.isConfigEditorParked() && !(await this.requestCloseConfigEditor())) return;
+        this.showRenameModal(name, tab);
+    }
+
+    isConfigEditorDirty() {
+        const overlay = document.querySelector('#rename-mod-overlay.config-editor-page');
+        if (!overlay || this._configBaseline == null) return false;
+        const active = document.activeElement;
+        if (active && active.classList && active.classList.contains('jt-input') && overlay.contains(active)) active.blur();
+        const editor = overlay.querySelector('#mod-config-editor');
+        if (!editor || editor.disabled) return false;
+        return (editor.value ?? '') !== this._configBaseline;
+    }
+
+    async requestCloseConfigEditor() {
+        const overlay = document.querySelector('#rename-mod-overlay.config-editor-page');
+        if (!overlay) return true;
+        if (this._configClosePrompting) return false;
+        if (!this.isConfigEditorDirty()) {
+            this.hideRenameModal();
+            return true;
+        }
+        const fileName = String(overlay.querySelector('#rename-mod-input')?.value || overlay.dataset.configRelativePath || '').split('/').pop();
+        this._configClosePrompting = true;
+        let choice;
+        try {
+            choice = await window.appConfirm({
+                title: window._t('config_unsaved_title'),
+                message: window._t('config_unsaved_message', fileName),
+                okText: window._t('config_unsaved_save'),
+                altText: window._t('config_unsaved_discard'),
+                cancelText: window._t('config_unsaved_stay'),
+            });
+        } finally {
+            this._configClosePrompting = false;
+        }
+        if (choice === 'alt') {
+            this.hideRenameModal();
+            return true;
+        }
+        if (choice !== true) return false;
+        const saveBtn = overlay.querySelector('#mod-config-save');
+        if (!saveBtn || saveBtn.disabled) return false;
+        const saved = await new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                if (this._configSaveWaiter === done) this._configSaveWaiter = null;
+                resolve(false);
+            }, 15000);
+            const done = (ok) => { clearTimeout(timer); resolve(ok); };
+            this._configSaveWaiter = done;
+            saveBtn.click();
+        });
+        if (!saved || !document.body.contains(overlay)) return false;
+        this.hideRenameModal();
+        return true;
     }
 
     handleModFileAdoptResult(data) {
@@ -967,12 +1571,12 @@ export class ModsManager {
             if (data.ok) {
                 const tgt = String(data.targetMod || 'mod');
                 const msg = data.alreadyOwned
-                    ? `Already part of ${tgt}.`
-                    : `Adopted into ${tgt}.`;
+                    ? window._t('config_editor_adopt_already', tgt)
+                    : window._t('config_editor_adopted', tgt);
                 status.textContent = msg;
                 status.className = 'mod-config-status mod-config-status--success';
             } else {
-                const msg = String(data.error || 'Adopt failed.');
+                const msg = String(data.error || window._t('config_editor_adopt_failed'));
                 status.textContent = msg;
                 status.className = 'mod-config-status mod-config-status--error';
             }
@@ -1076,8 +1680,21 @@ export class ModsManager {
         this._pendingNexusResolve = null;
         const overlay = document.getElementById('rename-mod-overlay');
         if (overlay) {
+            const wasPage = overlay.classList.contains('config-editor-page');
             overlay.remove();
+            if (wasPage) {
+                document.querySelector('.main-container')?.classList.remove('config-editor-open');
+                const titleEl = document.getElementById('section-title');
+                const app = window.app;
+                if (titleEl && app?.currentSection && typeof app.formatSectionTitle === 'function')
+                    titleEl.textContent = app.formatSectionTitle(app.currentSection);
+            }
         }
+        this._configBaseline = null;
+        this._configPendingSave = null;
+        const pendingWaiter = this._configSaveWaiter;
+        this._configSaveWaiter = null;
+        if (pendingWaiter) pendingWaiter(false);
         if (this.renameModalKeyHandler) {
             document.removeEventListener('keydown', this.renameModalKeyHandler);
             this.renameModalKeyHandler = null;
@@ -1158,32 +1775,36 @@ export class ModsManager {
         const supportsFiles = !isConfigRow &&
             (isLooseMod || isPlainBa2Mod) &&
             !/^(Disabled\/)?(Bundles|Strings|GameRoot|CoreIni)\//i.test(normPath);
+        const mainContainer = document.querySelector('.main-container');
+        const pageMode = isConfigRow && !!mainContainer;
         const overlay = document.createElement('div');
         overlay.id = 'rename-mod-overlay';
-        overlay.className = 'modal-overlay active rename-mod-overlay';
+        overlay.className = pageMode ? 'config-editor-page rename-mod-overlay' : 'modal-overlay active rename-mod-overlay';
 
         if (isConfigRow) {
             const jsonMode = lower.endsWith('.json');
             const configSpellCheck = !!(window.app?.realData?.managerSettings?.configEditorSpellCheck);
             overlay.dataset.configRelativePath = normPath;
             overlay.innerHTML = `
-                <div class="custom-modal polished rename-mod-modal rename-mod-modal-config" role="dialog" aria-modal="true" aria-label="${escapeHtml(editableName || window._t('mods'))}">
+                <div class="custom-modal polished rename-mod-modal rename-mod-modal-config" role="${pageMode ? 'region' : 'dialog'}" ${pageMode ? '' : 'aria-modal="true"'} aria-label="${escapeHtml(editableName || window._t('mods'))}">
                     <div class="modal-body rename-mod-body">
                         <div class="config-editor-topbar">
                             <div class="config-editor-toprow">
-                                <label class="rename-mod-label" for="rename-mod-input">File</label>
+                                ${pageMode ? `<button type="button" class="btn-popup secondary config-editor-back" id="rename-mod-close-top"><i data-lucide="arrow-left"></i> ${escapeHtml(window._t('config_editor_back'))}</button>` : ``}
+                                <label class="rename-mod-label" for="rename-mod-input">${escapeHtml(window._t('config_editor_file'))}</label>
                                 <input id="rename-mod-input" class="rename-mod-input" type="text" value="${escapeHtml(editableName)}" ${isCoreIni ? 'readonly' : ''} />
                                 <div class="mod-config-actions mod-config-actions-inline config-editor-actions">
                                     ${jsonMode ? `
-                                    <div class="config-view-toggle mod-config-json-only" role="tablist" aria-label="View">
-                                        <button type="button" class="config-view-btn" id="mod-config-view-tree" role="tab" aria-selected="false">Tree</button>
-                                        <button type="button" class="config-view-btn active" id="mod-config-view-text" role="tab" aria-selected="true">Text</button>
+                                    <div class="config-view-toggle mod-config-json-only" role="tablist" aria-label="${escapeAttr(window._t('config_editor_view'))}">
+                                        <button type="button" class="config-view-btn" id="mod-config-view-tree" role="tab" aria-selected="false">${escapeHtml(window._t('config_editor_view_tree'))}</button>
+                                        <button type="button" class="config-view-btn active" id="mod-config-view-text" role="tab" aria-selected="true">${escapeHtml(window._t('config_editor_view_text'))}</button>
                                     </div>
-                                    <button type="button" class="btn-popup secondary mod-config-json-only config-tree-only config-icon-btn" id="mod-config-tree-fold" title="Collapse all" aria-label="Collapse all"><i data-lucide="chevrons-down-up"></i></button>` : ``}
-                                    ${jsonMode ? `<button type="button" class="btn-popup secondary mod-config-json-only" id="mod-config-validate" disabled>Validate JSON</button>` : ``}
-                                    ${jsonMode ? `<button type="button" class="btn-popup secondary mod-config-json-only" id="mod-config-format" disabled>Format JSON</button>` : ``}
+                                    <button type="button" class="btn-popup secondary mod-config-json-only config-tree-only config-icon-btn" id="mod-config-tree-fold" title="${escapeAttr(window._t('config_editor_collapse_all'))}" aria-label="${escapeAttr(window._t('config_editor_collapse_all'))}"><i data-lucide="chevrons-down-up"></i></button>` : ``}
+                                    ${jsonMode ? `<button type="button" class="btn-popup secondary mod-config-json-only" id="mod-config-validate" disabled>${escapeHtml(window._t('config_editor_validate_json'))}</button>` : ``}
+                                    ${jsonMode ? `<button type="button" class="btn-popup secondary mod-config-json-only" id="mod-config-format" disabled>${escapeHtml(window._t('config_editor_format_json'))}</button>` : ``}
+                                    <button type="button" class="btn-popup secondary config-icon-btn" id="mod-config-font-btn" aria-haspopup="dialog" aria-expanded="false" title="${escapeAttr(window._t('config_editor_font'))}" aria-label="${escapeAttr(window._t('config_editor_font'))}"><i data-lucide="type"></i></button>
                                 </div>
-                                <button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>
+                                ${pageMode ? `` : `<button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>`}
                             </div>
                         </div>
 
@@ -1192,19 +1813,19 @@ export class ModsManager {
                                 <div class="mod-config-single config-editor-single">
                                     <div class="mod-config-editor-wrap">
                                         <div id="mod-config-highlight-backdrop"></div>
-                                        <textarea id="mod-config-editor" class="rename-mod-details mod-config-editor mod-config-editor-single" placeholder="Loading…" disabled spellcheck="${configSpellCheck}"></textarea>
+                                        <textarea id="mod-config-editor" class="rename-mod-details mod-config-editor mod-config-editor-single" placeholder="${escapeAttr(window._t('config_editor_loading'))}" disabled spellcheck="${configSpellCheck}"></textarea>
                                         ${jsonMode ? `<div id="mod-config-json-tree" role="tree" aria-label="${escapeAttr(editableName)}"></div>` : ``}
                                     </div>
-                                    <div id="mod-config-file-status" class="mod-config-status text-muted" aria-live="polite"></div>
                                 </div>
                             </div>
                         </div>
                     </div>
                     <div class="modal-footer rename-mod-footer">
-                        <div class="rename-mod-footer-spacer" aria-hidden="true"></div>
-                        <button type="button" class="btn-popup secondary" id="rename-mod-cancel">${window._t('cancel')}</button>
-                        ${isCoreIni ? `` : `<button type="button" class="btn-popup secondary" id="mod-config-rename" disabled><i data-lucide="edit-3"></i> Rename</button>`}
-                        <button type="button" class="btn-popup primary" id="mod-config-save" disabled title="Save (Ctrl+S)"><i data-lucide="save"></i> Save file</button>
+                        <div id="mod-config-file-status" class="mod-config-status text-muted" aria-live="polite"></div>
+                        <span id="mod-config-encoding" class="mod-config-encoding" hidden></span>
+                        ${pageMode ? `` : `<button type="button" class="btn-popup secondary" id="rename-mod-cancel">${window._t('cancel')}</button>`}
+                        ${isCoreIni ? `` : `<button type="button" class="btn-popup secondary" id="mod-config-rename" disabled><i data-lucide="edit-3"></i> ${escapeHtml(window._t('config_editor_rename'))}</button>`}
+                        <button type="button" class="btn-popup primary" id="mod-config-save" disabled title="${escapeAttr(window._t('config_editor_save_tooltip'))}"><i data-lucide="save"></i> ${escapeHtml(window._t('config_editor_save_file'))}</button>
                     </div>
                 </div>
             `;
@@ -1274,7 +1895,15 @@ export class ModsManager {
             `;
         }
 
-        document.body.appendChild(overlay);
+        if (pageMode) {
+            overlay.dataset.originSection = window.app?.currentSection || '';
+            mainContainer.appendChild(overlay);
+            mainContainer.classList.add('config-editor-open');
+            const titleEl = document.getElementById('section-title');
+            if (titleEl) titleEl.textContent = String(editableName || '').split('/').pop() || editableName;
+        } else {
+            document.body.appendChild(overlay);
+        }
         if (window.lucide) {
             try { window.lucide.createIcons({ nodes: [overlay] }); } catch (_) {
                 try { window.lucide.createIcons(); } catch (__) { }
@@ -1595,12 +2224,14 @@ export class ModsManager {
             configBackdrop.innerHTML = this._renderConfigHighlight(configEditor.value, isJson) + '\n';
             configBackdrop.scrollTop = configEditor.scrollTop;
             this._syncConfigEditorBackdropPad(overlay);
+            this._applyConfigFindMarks?.(overlay);
         };
+        this._refreshConfigHighlight = updateConfigHighlighting;
 
         const isValidConfigFileBaseName = (value) => {
             const v = String(value ?? '').trim();
-            if (!v) return { ok: false, value: '', error: 'Enter a file name.' };
-            if (/[\\/]/.test(v)) return { ok: false, value: v, error: 'Filename only (no folders or slashes).' };
+            if (!v) return { ok: false, value: '', error: window._t('config_editor_name_required') };
+            if (/[\\/]/.test(v)) return { ok: false, value: v, error: window._t('config_editor_name_no_folders') };
             return { ok: true, value: v, error: '' };
         };
 
@@ -1660,6 +2291,7 @@ export class ModsManager {
             configSelect.addEventListener('change', () => {
                 const rel = configSelect.value || '';
                 configEditor.value = '';
+                this._configBaseline = null;
                 configEditor.disabled = true;
                 enableConfigButtons(false);
                 updateConfigHighlighting();
@@ -1667,7 +2299,7 @@ export class ModsManager {
                     setConfigStatus('');
                     return;
                 }
-                setConfigStatus('Loading…');
+                setConfigStatus(window._t('config_editor_loading'));
                 window.chrome.webview.postMessage({ type: 'READ_MOD_FILE', name: name, relativePath: rel });
             });
             enableConfigButtons(false);
@@ -1677,10 +2309,10 @@ export class ModsManager {
             configValidate.addEventListener('click', () => {
                 try {
                     const parsed = this._parseJsonRelaxed(configEditor.value || '');
-                    if (parsed.ok) setConfigStatus('JSON is valid.', 'success');
-                    else setConfigStatus(`Invalid JSON: ${parsed.error}`, 'error');
+                    if (parsed.ok) setConfigStatus(window._t('config_editor_json_valid'), 'success');
+                    else setConfigStatus(window._t('config_editor_json_invalid', parsed.error), 'error');
                 } catch (e) {
-                    setConfigStatus(`Invalid JSON: ${e.message}`, 'error');
+                    setConfigStatus(window._t('config_editor_json_invalid', e.message), 'error');
                 }
             });
         }
@@ -1690,14 +2322,14 @@ export class ModsManager {
                 try {
                     const parsed = this._parseJsonRelaxed(configEditor.value || '');
                     if (!parsed.ok) {
-                        setConfigStatus(`Invalid JSON: ${parsed.error}`, 'error');
+                        setConfigStatus(window._t('config_editor_json_invalid', parsed.error), 'error');
                         return;
                     }
                     configEditor.value = jsonc.format(configEditor.value || '', 2);
                     updateConfigHighlighting();
-                    setConfigStatus('Formatted JSON.', 'success');
+                    setConfigStatus(window._t('config_editor_json_formatted'), 'success');
                 } catch (e) {
-                    setConfigStatus(`Invalid JSON: ${e.message}`, 'error');
+                    setConfigStatus(window._t('config_editor_json_invalid', e.message), 'error');
                 }
             });
         }
@@ -1721,7 +2353,7 @@ export class ModsManager {
                     } else if (jsonc.hasComments(current)) {
                         tree.setValue(jsonc.parse(current), jsonc.commentMap(current));
                         syncFoldButton();
-                        setConfigStatus("This change can't be made without removing comments. Use Text view for this edit.", 'error');
+                        setConfigStatus(window._t('config_editor_tree_comment_conflict'), 'error');
                         return;
                     } else {
                         configEditor.value = JSON.stringify(value, null, 2);
@@ -1735,7 +2367,7 @@ export class ModsManager {
             const syncFoldButton = () => {
                 if (!foldBtn) return;
                 const expanded = tree.allExpanded;
-                const label = expanded ? 'Collapse all' : 'Expand all';
+                const label = window._t(expanded ? 'config_editor_collapse_all' : 'config_editor_expand_all');
                 foldBtn.title = label;
                 foldBtn.setAttribute('aria-label', label);
                 foldBtn.innerHTML = `<i data-lucide="${expanded ? 'chevrons-down-up' : 'chevrons-up-down'}"></i>`;
@@ -1747,7 +2379,7 @@ export class ModsManager {
                     const text = configEditor.value || '';
                     const parsed = this._parseJsonRelaxed(text);
                     if (!parsed.ok) {
-                        setConfigStatus(`Invalid JSON: ${parsed.error}`, 'error');
+                        setConfigStatus(window._t('config_editor_json_invalid', parsed.error), 'error');
                         view = 'text';
                     } else {
                         tree.setValue(parsed.value, jsonc.commentMap(text));
@@ -1763,6 +2395,8 @@ export class ModsManager {
                 if (view === 'text') {
                     updateConfigHighlighting();
                     requestAnimationFrame(() => this._syncConfigEditorBackdropPad(overlay));
+                } else {
+                    this._refreshConfigFind?.();
                 }
                 return view;
             };
@@ -1785,13 +2419,15 @@ export class ModsManager {
             configSave.addEventListener('click', () => {
                 const rel = getCurrentConfigRelativePath();
                 if (!rel) return;
-                setConfigStatus('Saving…');
+                setConfigStatus(window._t('config_editor_saving'));
+                this._configPendingSave = configEditor.value ?? '';
                 window.chrome.webview.postMessage({
                     type: 'WRITE_MOD_FILE',
                     name: name,
                     relativePath: rel,
                     content: configEditor.value ?? '',
-                    applyToIni: isAddToOverlay
+                    applyToIni: isAddToOverlay,
+                    encoding: overlay.dataset.configEncoding || 'utf-8'
                 });
             });
         }
@@ -1804,7 +2440,7 @@ export class ModsManager {
                     return;
                 }
                 if (parsed.value === String(editableName || '')) return;
-                setConfigStatus('Renaming…');
+                setConfigStatus(window._t('config_editor_renaming'));
                 window.chrome.webview.postMessage({
                     type: 'RENAME_MOD',
                     currentName: name,
@@ -1825,7 +2461,7 @@ export class ModsManager {
 
         if (isConfigRow && configEditor)
         {
-            setConfigStatus('Loading…');
+            setConfigStatus(window._t('config_editor_loading'));
             window.chrome.webview.postMessage({ type: 'READ_MOD_FILE', name: name, relativePath: normPath });
         }
 
@@ -1835,10 +2471,11 @@ export class ModsManager {
         }
         if (isConfigRow) {
             this._setupConfigEditorLayout(overlay);
+            this._mountConfigFontPopover(overlay);
         }
 
         if (cancelBtn) cancelBtn.onclick = closeAction;
-        if (closeTopBtn) closeTopBtn.onclick = closeAction;
+        if (closeTopBtn) closeTopBtn.onclick = pageMode ? () => { void this.requestCloseConfigEditor(); } : closeAction;
         if (confirmBtn) confirmBtn.onclick = submitAction;
         if (renameInput && confirmBtn) renameInput.oninput = updateConfirmState;
         if (detailsInput) detailsInput.oninput = updateConfirmState;
@@ -1848,14 +2485,23 @@ export class ModsManager {
         if (nexusFileIdInput) nexusFileIdInput.oninput = updateConfirmState;
         if (nexusUploadedInput) nexusUploadedInput.oninput = updateConfirmState;
 
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) closeAction();
-        });
+        if (!pageMode) {
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) closeAction();
+            });
+        }
 
         this.renameModalKeyHandler = (e) => {
+            if (overlay.classList.contains('config-editor-parked')) return;
+            if (pageMode && document.querySelector('#confirm-modal.active')) return;
             if (e.key === 'Escape') {
+                if (this._closeConfigFind?.()) {
+                    e.preventDefault();
+                    return;
+                }
                 e.preventDefault();
-                closeAction();
+                if (pageMode) void this.requestCloseConfigEditor();
+                else closeAction();
                 return;
             }
             if (isConfigRow && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && String(e.key).toLowerCase() === 's') {
@@ -1866,6 +2512,7 @@ export class ModsManager {
                 return;
             }
             const ae = document.activeElement;
+            if (ae && ae.closest && ae.closest('.config-find-bar')) return;
             const inTabs = ae && ae.closest && ae.closest('.rename-mod-tabs');
             const isMultilineEditor = ae && (
                 ae === detailsInput ||
@@ -1873,6 +2520,7 @@ export class ModsManager {
                 ae.tagName === 'TEXTAREA' ||
                 ae.isContentEditable
             );
+            if (pageMode && !(ae && overlay.contains(ae))) return;
             if (e.key === 'Enter' && !isMultilineEditor && !inTabs) {
                 e.preventDefault();
                 submitAction();
@@ -2528,12 +3176,12 @@ export class ModsManager {
                 menu.querySelector('[data-action="edit"]')?.addEventListener('click', (ev) => {
                     ev.stopPropagation();
                     this._closeModsContextMenu();
-                    this.showRenameModal(name, 'general');
+                    void this._openRenameModalAfterParkedEditor(name, 'general');
                 });
                 menu.querySelector('[data-action="nexus"]')?.addEventListener('click', (ev) => {
                     ev.stopPropagation();
                     this._closeModsContextMenu();
-                    this.showRenameModal(name, 'nexus');
+                    void this._openRenameModalAfterParkedEditor(name, 'nexus');
                 });
                 menu.querySelector('[data-action="toggle"]')?.addEventListener('click', (ev) => {
                     ev.stopPropagation();
