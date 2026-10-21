@@ -601,25 +601,13 @@ public static class ConfigFileMerger
                 {
                     CollectJsonAdditions(existingChild, prop.Value, new List<object>(path) { prop.Key }, additions);
                 }
-                else if (existingChild is JsonArray exChildArr && prop.Value is JsonArray inChildArr &&
-                         IsStringArray(exChildArr) && IsStringArray(inChildArr))
-                {
-                    CollectJsonAdditions(exChildArr, inChildArr, new List<object>(path) { prop.Key }, additions);
-                }
+                // Existing lists are left as the user has them: never append
+                // items back that they removed from a mod's default list.
             }
             return;
         }
 
-        if (existing is JsonArray exArr && incoming is JsonArray inArr)
-        {
-            var seen = exArr.ToList();
-            foreach (var item in inArr)
-            {
-                if (seen.Any(s => JsonNodesDeepEqual(s, item))) continue;
-                seen.Add(item);
-                additions.Add(new JsoncText.Addition(path.ToList(), null, item?.DeepClone()));
-            }
-        }
+        // A top-level list is an existing value too: leave it untouched.
     }
 
     private static JsonNode? ParseJsonLenient(string text)
@@ -653,44 +641,13 @@ public static class ConfigFileMerger
                 {
                     result[prop.Key] = MergeJsonNodes(existingChild, prop.Value, ref addedCount);
                 }
-                else if (existingChild is JsonArray exChildArr && prop.Value is JsonArray inChildArr &&
-                         IsStringArray(exChildArr) && IsStringArray(inChildArr))
-                {
-                    result[prop.Key] = MergeJsonNodes(exChildArr, inChildArr, ref addedCount);
-                }
-            }
-            return result;
-        }
-
-        if (existing is JsonArray exArr && incoming is JsonArray inArr)
-        {
-            var result = exArr.DeepClone().AsArray();
-            foreach (var item in inArr)
-            {
-                bool found = false;
-                foreach (var existingItem in result)
-                {
-                    if (JsonNodesDeepEqual(existingItem, item))
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found)
-                {
-                    result.Add(item?.DeepClone());
-                    addedCount++;
-                }
+                // Existing lists keep the user's items only (no appends).
             }
             return result;
         }
 
         return existing.DeepClone();
     }
-
-    private static bool IsStringArray(JsonArray array) =>
-        array.All(item => item is JsonValue value && value.GetValueKind() == JsonValueKind.String);
 
     private static bool JsonNodesDeepEqual(JsonNode? a, JsonNode? b)
     {

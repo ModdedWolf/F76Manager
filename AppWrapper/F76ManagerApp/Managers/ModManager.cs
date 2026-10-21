@@ -2934,16 +2934,17 @@ public partial class ModManager
     {
         var normalized = CollectNormalizedExtractedFiles(tempDir, out var emptyDirectories);
 
-        int skippedIniCount = 0;
+        int skippedConfigCount = 0;
         if (IgnoreArchiveIniFiles)
         {
             var kept = new List<(string AbsolutePath, string RelativePath)>();
             foreach (var item in normalized)
             {
-                if (Path.GetExtension(item.RelativePath).Equals(".ini", StringComparison.OrdinalIgnoreCase))
+                if (ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(item.RelativePath)) &&
+                    ConfigFileMerger.IsRootLooseConfigPath(item.RelativePath))
                 {
-                    skippedIniCount++;
-                    _logger($"[IMPORT] Skipped archive INI (setting ignoreArchiveIniFiles): {item.RelativePath}");
+                    skippedConfigCount++;
+                    _logger($"[IMPORT] Skipped archive config (setting ignoreArchiveIniFiles): {item.RelativePath}");
                 }
                 else
                 {
@@ -2951,16 +2952,16 @@ public partial class ModManager
                 }
             }
             normalized = kept;
-            if (skippedIniCount > 0 && normalized.Count > 0)
-                _statusReporter("info", $"Skipped {skippedIniCount} INI file(s) inside '{displayArchiveName}' (Ignore INI files in mod archives is on).");
+            if (skippedConfigCount > 0 && normalized.Count > 0)
+                _statusReporter("info", $"Skipped {skippedConfigCount} config file(s) inside '{displayArchiveName}' (Ignore config files in mod archives is on).");
         }
 
         if (normalized.Count == 0)
         {
-            if (skippedIniCount > 0)
+            if (skippedConfigCount > 0)
             {
-                _logger($"[IMPORT] Archive {displayArchiveName} contained only INI files, all skipped by the ignoreArchiveIniFiles setting.");
-                _statusReporter("warning", $"'{displayArchiveName}' only contained INI files, which were skipped by your 'Ignore INI files in mod archives' setting. Nothing was installed.");
+                _logger($"[IMPORT] Archive {displayArchiveName} contained only config files, all skipped by the ignoreArchiveIniFiles setting.");
+                _statusReporter("warning", $"'{displayArchiveName}' only contained config files, which were skipped by your 'Ignore config files in mod archives' setting. Nothing was installed.");
             }
             else
             {

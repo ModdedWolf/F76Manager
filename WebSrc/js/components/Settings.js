@@ -540,6 +540,10 @@ export class Settings {
             if (window.app?.realData?.managerSettings) {
                 window.app.realData.managerSettings[key] = checked;
             }
+            // This toggle must take effect right away, not only after Save Changes.
+            if (key === 'ignoreArchiveIniFiles') {
+                window.chrome.webview.postMessage({ type: 'UPDATE_SETTING', key, value: checked });
+            }
         };
         Settings.TOGGLES.forEach(p => {
             const el = document.getElementById(p.id);
