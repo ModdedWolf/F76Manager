@@ -9,6 +9,7 @@ public partial class ModManager
     private GameConfigManager _configManager;
     private Action<string> _logger;
     private Action<string, string> _statusReporter;
+    private Action<string, string, string?, object[]?>? _keyedStatus;
 
     public string ArchiveKeyPreference { get; set; } = "auto";
     public bool VirtualModMode { get; set; } = false;
@@ -743,17 +744,18 @@ public partial class ModManager
         }
     }
 
-    public ModManager(GameConfigManager configManager, Action<string> logger, Action<string, string> statusReporter)
+    public ModManager(GameConfigManager configManager, Action<string> logger, Action<string, string> statusReporter, Action<string, string, string?, object[]?>? keyedStatus = null)
     {
         _configManager = configManager;
         _logger = logger;
         _statusReporter = statusReporter;
+        _keyedStatus = keyedStatus;
 #if DEBUG
         _logger($"[DEBUG] ModManager initialized.");
 #endif
         
-        if (!string.IsNullOrEmpty(AppPaths.BundlesPath) && !Directory.Exists(AppPaths.BundlesPath)) {
-            Directory.CreateDirectory(AppPaths.BundlesPath);
+        if (!string.IsNullOrEmpty(AppPaths.LiveBundlesPath) && !Directory.Exists(AppPaths.LiveBundlesPath)) {
+            Directory.CreateDirectory(AppPaths.LiveBundlesPath);
             _logger($"[DEBUG] Created Bundles folder.");
         }
         
@@ -763,6 +765,14 @@ public partial class ModManager
         }
 
         EnsureActiveDataFolders();
+    }
+
+    private void ReportStatus(string type, string text, string? key = null, object[]? args = null)
+    {
+        if (key != null && _keyedStatus != null)
+            _keyedStatus(type, text, key, args);
+        else
+            _statusReporter?.Invoke(type, text);
     }
 
     public void InvalidateModsListCache()
@@ -778,6 +788,77 @@ public partial class ModManager
         $"{VirtualModMode}|{GetActiveDataPath()}|{GetActiveStringsPath()}|{AppPaths.BundlesPath}|{AppPaths.DisabledModsPath}";
 
     public const int UnassignedLoadOrder = 9999;
+
+    /// <summary>
+    /// Puts these mods at the front of the list. Mods that already have an order shift down.
+    /// Mods still at <see cref="UnassignedLoadOrder"/> stay at the bottom.
+    /// </summary>
+    public void InsertModsAtTopOfLoadOrder(IEnumerable<string> keys)
+    {
+        if (keys == null) return;
+        var metadata = LoadMetadata();
+        var incoming = new List<string>();
+        foreach (var raw in keys)
+        {
+            string resolved = ResolveMetadataKey(metadata, raw ?? "");
+            if (string.IsNullOrEmpty(resolved))
+                resolved = NormalizeMetadataKey(raw ?? "");
+            if (string.IsNullOrEmpty(resolved) || !metadata.ContainsKey(resolved)) continue;
+            if (incoming.Contains(resolved, StringComparer.OrdinalIgnoreCase)) continue;
+            incoming.Add(resolved);
+        }
+        if (incoming.Count == 0) return;
+
+        int shift = incoming.Count;
+        foreach (var meta in metadata.Values)
+        {
+            if (meta != null && meta.LoadOrder != UnassignedLoadOrder)
+                meta.LoadOrder += shift;
+        }
+        for (int i = 0; i < incoming.Count; i++)
+            metadata[incoming[i]].LoadOrder = i;
+        SaveMetadata(metadata);
+        _logger($"[ORDER] Placed {incoming.Count} new mod(s) at the top of the list.");
+    }
+
+    /// <summary>
+    /// List keys for a creation and its texture partner. Empty when <paramref name="originalName"/> is not a bundle.
+    /// </summary>
+    public List<string> GetBundlePresetKeys(string originalName)
+    {
+        var keys = new List<string>();
+        var metadata = LoadMetadata();
+        string normalized = NormalizeMetadataKey(originalName ?? "");
+        if (string.IsNullOrEmpty(normalized)) return keys;
+        if (!IsBundleModKey(metadata, normalized) &&
+            !normalized.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase))
+            return keys;
+
+        string resolved = ResolveMetadataKey(metadata, normalized);
+        ModMetadata? meta = null;
+        if (!string.IsNullOrEmpty(resolved))
+            metadata.TryGetValue(resolved, out meta);
+
+        void AddKey(string raw)
+        {
+            string fileName = Path.GetFileName(NormalizeMetadataKey(raw ?? ""));
+            if (string.IsNullOrWhiteSpace(fileName)) return;
+            string listKey = $"Bundles/{fileName}";
+            if (!keys.Contains(listKey, StringComparer.OrdinalIgnoreCase))
+                keys.Add(listKey);
+        }
+
+        if (meta?.Files != null && meta.Files.Count > 0)
+        {
+            foreach (var file in meta.Files)
+                AddKey(file);
+        }
+        else
+        {
+            AddKey(normalized);
+        }
+        return keys;
+    }
 
         public class ModMetadata
         {
@@ -1372,6 +1453,102 @@ public partial class ModManager
         }
     }
 
+    private void AdoptCreationsIntoSharedFolder(Dictionary<string, ModMetadata> metadata, string dataPath)
+    {
+        if (string.IsNullOrWhiteSpace(dataPath) || !Directory.Exists(dataPath)) return;
+        try
+        {
+            Directory.CreateDirectory(AppPaths.LiveBundlesPath);
+        }
+        catch (Exception ex)
+        {
+            _logger($"[BUNDLE] Could not create the shared Bundles folder: {ex.Message}");
+            return;
+        }
+
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in Directory.GetFiles(dataPath, "*.ba2"))
+        {
+            string name = Path.GetFileName(path);
+            string resolved = ResolveMetadataKey(metadata, name);
+            if (string.IsNullOrEmpty(resolved) ||
+                !metadata.TryGetValue(resolved, out var meta) ||
+                meta == null ||
+                !meta.IsBundle)
+                continue;
+
+            names.Add(name);
+            if (meta.Files == null) continue;
+            foreach (var listed in meta.Files)
+            {
+                string fileName = Path.GetFileName(NormalizeMetadataKey(listed ?? ""));
+                if (!string.IsNullOrWhiteSpace(fileName))
+                    names.Add(fileName);
+            }
+        }
+
+        foreach (var name in names)
+        {
+            bool alreadyShared = false;
+            foreach (var dir in AppPaths.CreationBundleDirectories())
+            {
+                if (!string.IsNullOrEmpty(dir) && File.Exists(Path.Combine(dir, name)))
+                {
+                    alreadyShared = true;
+                    break;
+                }
+            }
+            if (alreadyShared) continue;
+
+            string source = Path.Combine(dataPath, name);
+            if (!File.Exists(source)) continue;
+            string dest = Path.Combine(AppPaths.LiveBundlesPath, name);
+            try
+            {
+                File.Copy(source, dest, overwrite: false);
+                _logger($"[BUNDLE] Copied creation '{name}' into the shared Bundles folder.");
+            }
+            catch (Exception ex)
+            {
+                _logger($"[BUNDLE] Could not copy creation '{name}' into the shared Bundles folder: {ex.Message}");
+            }
+        }
+    }
+
+    private void CopyBundleDisplayFromOtherPlatform(
+        ModMetadata meta,
+        string bundleKey,
+        ref Dictionary<string, ModMetadata>? otherPlatformMetadata)
+    {
+        if (otherPlatformMetadata == null)
+        {
+            string path = AppPaths.IsPts ? AppPaths.LiveModsMetadataFile : AppPaths.PtsModsMetadataFile;
+            otherPlatformMetadata = LoadMetadataFrom(path);
+        }
+
+        string resolved = ResolveMetadataKey(otherPlatformMetadata, bundleKey);
+        if (string.IsNullOrEmpty(resolved) ||
+            !otherPlatformMetadata.TryGetValue(resolved, out var source) ||
+            source == null)
+            return;
+
+        if (!string.IsNullOrWhiteSpace(source.Name) && source.Name != "Unknown Mod")
+            meta.Name = source.Name;
+        if (!string.IsNullOrWhiteSpace(source.Author) && source.Author != "Unknown")
+            meta.Author = source.Author;
+        if (!string.IsNullOrWhiteSpace(source.Details))
+            meta.Details = source.Details;
+        if (!string.IsNullOrWhiteSpace(source.Version) && source.Version != "1.0")
+            meta.Version = source.Version;
+        if (!string.IsNullOrWhiteSpace(source.URL))
+            meta.URL = source.URL;
+        if (!string.IsNullOrWhiteSpace(source.Category) && source.Category != "General")
+            meta.Category = source.Category;
+        meta.IsBundle = true;
+        if ((meta.Files == null || meta.Files.Count == 0) && source.Files != null && source.Files.Count > 0)
+            meta.Files = new List<string>(source.Files);
+    }
+
     public List<object> GetModsList()
     {
         var cacheKey = GetModsListCacheKey();
@@ -1394,29 +1571,30 @@ public partial class ModManager
             EnsureManagedStagingHydrated();
         }
 
-        if (!Directory.Exists(activeDataPath)) return mods;
-
-        if (!Directory.Exists(activeDataPath)) {
+        bool dataPathExists = !string.IsNullOrWhiteSpace(activeDataPath) && Directory.Exists(activeDataPath);
+        if (!dataPathExists)
+        {
             _logger($"[ERROR] GetModsList: Active data path not found: '{activeDataPath}'");
             _statusReporter("error", $"Data folder not found at: {activeDataPath}. Please check settings.");
-            return mods;
         }
 
-
-        var files = Directory.GetFiles(activeDataPath, "*.*")
-            .Where(f => f.EndsWith(".ba2", StringComparison.OrdinalIgnoreCase) || 
-                        f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || 
-                        f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) ||
-                        f.EndsWith(".strings", StringComparison.OrdinalIgnoreCase) ||
-                        f.EndsWith(".dlstrings", StringComparison.OrdinalIgnoreCase) ||
-                        f.EndsWith(".ilstrings", StringComparison.OrdinalIgnoreCase))
-            .Select(Path.GetFileName)
-            .ToList();
-
-        foreach (var configKey in EnumerateLooseConfigListKeys(activeDataPath))
+        var files = new List<string>();
+        if (dataPathExists)
         {
-            if (!files.Contains(configKey, StringComparer.OrdinalIgnoreCase))
-                files.Add(configKey);
+            files.AddRange(Directory.GetFiles(activeDataPath, "*.*")
+                .Where(f => f.EndsWith(".ba2", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".strings", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".dlstrings", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".ilstrings", StringComparison.OrdinalIgnoreCase))
+                .Select(Path.GetFileName)!);
+
+            foreach (var configKey in EnumerateLooseConfigListKeys(activeDataPath))
+            {
+                if (!files.Contains(configKey, StringComparer.OrdinalIgnoreCase))
+                    files.Add(configKey);
+            }
         }
 
         foreach (var core in DiscoverCoreIniListPaths())
@@ -1441,7 +1619,6 @@ public partial class ModManager
                 metadataChanged = true;
             }
         }
-            
 
         string stringsDir = activeStringsPath;
         var disabledStringKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1472,14 +1649,33 @@ public partial class ModManager
         }
 #endif
 
-        string bundlesDir = AppPaths.BundlesPath;
-        if (!Directory.Exists(bundlesDir)) Directory.CreateDirectory(bundlesDir);
+        if (dataPathExists)
+            AdoptCreationsIntoSharedFolder(metadata, activeDataPath);
+        var sharedBundleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var bundleDir in AppPaths.CreationBundleDirectories())
+        {
+            if (string.IsNullOrEmpty(bundleDir) || !Directory.Exists(bundleDir)) continue;
+            foreach (var bundlePath in Directory.GetFiles(bundleDir, "*.ba2"))
+                sharedBundleNames.Add(Path.GetFileName(bundlePath));
+        }
+        try
+        {
+            if (!Directory.Exists(AppPaths.LiveBundlesPath))
+                Directory.CreateDirectory(AppPaths.LiveBundlesPath);
+        }
+        catch (Exception ex)
+        {
+            _logger($"[BUNDLE] Could not create the shared Bundles folder: {ex.Message}");
+        }
 
-        var bFiles = Directory.GetFiles(bundlesDir, "*.ba2")
-            .Select(f => $"Bundles/{Path.GetFileName(f)}");
-        files.AddRange(bFiles);
+        files.RemoveAll(f =>
+            !f.Contains('/') &&
+            f.EndsWith(".ba2", StringComparison.OrdinalIgnoreCase) &&
+            sharedBundleNames.Contains(f));
+        foreach (var bundleName in sharedBundleNames)
+            files.Add($"Bundles/{bundleName}");
 #if DEBUG
-        _logger($"[DEBUG] Found {bFiles.Count()} master bundle files in {bundlesDir}");
+        _logger($"[DEBUG] Found {sharedBundleNames.Count} creation(s) in the shared Bundles folders");
 #endif
 
         if (Directory.Exists(AppPaths.DisabledModsPath))
@@ -1503,11 +1699,14 @@ public partial class ModManager
 
         files.AddRange(DiscoverGameRootInjectorListPaths());
 
+        Dictionary<string, ModMetadata>? otherPlatformMetadata = null;
+
         var discoveredKeys = new HashSet<string>(
             files.Select(NormalizeMetadataKey).Where(k => !string.IsNullOrWhiteSpace(k)),
             StringComparer.OrdinalIgnoreCase);
 
         var looseOwnedPaths = BuildLooseOwnedPathSet(metadata, discoveredKeys);
+        var bundlePartnerPool = BuildPartnerPoolFromListKeys(files, metadata);
 
         foreach (var file in files) 
         {
@@ -1610,6 +1809,13 @@ public partial class ModManager
                 }
             }
 
+            if (string.IsNullOrWhiteSpace(resolvedKey) &&
+                normalizedFile.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase))
+            {
+                CopyBundleDisplayFromOtherPlatform(meta, normalizedFile, ref otherPlatformMetadata);
+                metadataChanged = true;
+            }
+
             if (string.IsNullOrWhiteSpace(resolvedKey))
             {
                 var minimal = new ModMetadata
@@ -1695,7 +1901,8 @@ public partial class ModManager
                     .Select(f => NormalizeMetadataKey(f ?? ""))
                     .Where(f => !string.IsNullOrWhiteSpace(f))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList()
+                    .ToList(),
+                bundlePartners = GetBundlePartnersForList(normalizedFile, isBundle, isLoose, bundlePartnerPool, metadata)
             });
         }
 
@@ -2515,6 +2722,15 @@ public partial class ModManager
                     }
                     else
                     {
+                        if (IsVanillaFile(listRel) && File.Exists(destPath))
+                        {
+                            if (BackUpVanillaIfNeeded(destPath, listRel))
+                                ReportStatus(
+                                    "warning",
+                                    $"{fileNameOnly} replaces game file {Path.GetFileName(listRel)}; the original was backed up.",
+                                    "vanilla_file_backed_up",
+                                    new object[] { fileNameOnly, Path.GetFileName(listRel) });
+                        }
                         File.Copy(abs, destPath, true);
                     }
                 }
@@ -2691,6 +2907,86 @@ public partial class ModManager
                 try { onComplete?.Invoke(); } catch {  }
             }
         });
+    }
+
+    public List<(string AbsolutePath, string RelativePath)>? CollectLoosePackFilesForBundle(
+        string modKey,
+        out string displayName,
+        out List<string> archivePaths,
+        out string errorMessage)
+    {
+        displayName = "";
+        archivePaths = new List<string>();
+        errorMessage = "";
+        string key = NormalizeMetadataKey(modKey ?? "");
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            errorMessage = "Missing mod name.";
+            return null;
+        }
+
+        var metadata = LoadMetadata();
+        string metaKey = ResolveMetadataKey(metadata, key);
+        if (string.IsNullOrEmpty(metaKey) || !metadata.TryGetValue(metaKey, out var meta) || meta == null)
+        {
+            errorMessage = $"Loose mod not found: {modKey}";
+            return null;
+        }
+        if (!meta.IsLoose && !metaKey.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase))
+        {
+            errorMessage = "Not a loose mod.";
+            return null;
+        }
+        if (meta.Files == null || meta.Files.Count == 0)
+        {
+            errorMessage = "Loose pack has no files.";
+            return null;
+        }
+
+        displayName = SanitizeLoosePackName(!string.IsNullOrWhiteSpace(meta.Name) ? meta.Name : metaKey);
+        string safeKey = GetLoosePackSafeKey(metaKey);
+        string dataRoot = GetActiveDataPath();
+        string stringsRoot = GetActiveStringsPath();
+        string disabledRoot = Path.Combine(AppPaths.DisabledModsPath, "Loose", safeKey);
+
+        var items = new List<(string AbsolutePath, string RelativePath)>();
+        int missing = 0;
+        foreach (var raw in meta.Files)
+        {
+            string rel = NormalizeMetadataKey(raw ?? "");
+            if (string.IsNullOrWhiteSpace(rel)) continue;
+            bool isArchive = rel.EndsWith(".ba2", StringComparison.OrdinalIgnoreCase);
+            if (!isArchive && ShouldKeepLooseOutsideBa2(rel)) continue;
+            if (!TryResolveLoosePackFilePath(rel, safeKey, meta.IsEnabled, dataRoot, stringsRoot, disabledRoot, out string abs) ||
+                !File.Exists(abs))
+            {
+                _logger($"[BUNDLE] Loose pack file missing on disk: {rel}");
+                missing++;
+                continue;
+            }
+
+            if (isArchive)
+            {
+                archivePaths.Add(abs);
+                continue;
+            }
+
+            string packRel = rel.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase)
+                ? rel.Substring("Disabled/".Length)
+                : rel;
+            if (packRel.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase))
+                packRel = packRel.Substring("Loose/".Length);
+            items.Add((abs, packRel.Replace("\\", "/")));
+        }
+
+        if (items.Count == 0 && archivePaths.Count == 0)
+        {
+            errorMessage = missing > 0
+                ? "The mod's files are missing from Data and Disabled Mods. Re-import the mod."
+                : "No packable assets found (meshes/textures/etc.). ESP/strings/config stay loose.";
+            return null;
+        }
+        return items;
     }
 
     private bool TryPackLooseModToBa2(
@@ -3231,7 +3527,11 @@ public partial class ModManager
                     string? destDir = Path.GetDirectoryName(activePath);
                     if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
                         Directory.CreateDirectory(destDir);
-                    if (File.Exists(activePath)) File.Delete(activePath);
+                    if (File.Exists(activePath))
+                    {
+                        BackUpVanillaIfNeeded(activePath, rel);
+                        File.Delete(activePath);
+                    }
                     File.Move(disabledPath, activePath);
                 }
                 else
@@ -3246,7 +3546,9 @@ public partial class ModManager
                     if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
                         Directory.CreateDirectory(destDir);
                     if (File.Exists(disabledPath)) File.Delete(disabledPath);
+                    BackUpVanillaIfNeeded(activePath, rel);
                     File.Move(activePath, disabledPath);
+                    RestoreVanillaIfBackedUp(activePath, rel);
                 }
             }
             catch (Exception ex)
@@ -3548,6 +3850,12 @@ public partial class ModManager
                     }
                     else
                     {
+                        if (IsVanillaFile(fileName) && File.Exists(destPath))
+                        {
+                            if (BackUpVanillaIfNeeded(destPath, fileName))
+                                _statusReporter?.Invoke("warning",
+                                    $"{fileName} replaces a game file; the original was backed up.");
+                        }
                         File.Copy(file, destPath, true);
                         _logger($"[IMPORT] [PC] Successfully imported mod: {fileName}");
                     }
@@ -3628,11 +3936,11 @@ public partial class ModManager
             files.AddRange(EnumerateLooseConfigListKeys(activeDataPath));
         }
 
-        if (Directory.Exists(AppPaths.BundlesPath))
+        foreach (var bundleDir in AppPaths.CreationBundleDirectories())
         {
-            var bFiles = Directory.GetFiles(AppPaths.BundlesPath, "*.ba2")
-                .Select(f => $"Bundles/{Path.GetFileName(f)}");
-            files.AddRange(bFiles);
+            if (string.IsNullOrEmpty(bundleDir) || !Directory.Exists(bundleDir)) continue;
+            files.AddRange(Directory.GetFiles(bundleDir, "*.ba2")
+                .Select(f => $"Bundles/{Path.GetFileName(f)}"));
         }
 
         files.AddRange(DiscoverGameRootInjectorListPaths());
@@ -4086,12 +4394,18 @@ public partial class ModManager
             var possiblePaths = new List<string> {
                 Path.Combine(GetActiveDataPath(), cleanF),
                 Path.Combine(AppPaths.DisabledModsPath, cleanF),
-                Path.Combine(AppPaths.BundlesPath, cleanF),
+            };
+            foreach (var bundleDir in AppPaths.CreationBundleDirectories())
+            {
+                if (!string.IsNullOrEmpty(bundleDir))
+                    possiblePaths.Add(Path.Combine(bundleDir, cleanF));
+            }
+            possiblePaths.AddRange(new[] {
                 Path.Combine(GetActiveDataPath(), f.Replace("/", "\\")),
                 GetFullPath(f),
                 GetFullPath(resolvedKey),
                 GetFullPath(NormalizeMetadataKey(fileName))
-            };
+            });
 
             if (VirtualModMode &&
                 IsConfigListKey(f) &&
@@ -4121,11 +4435,16 @@ public partial class ModManager
                 possiblePaths.Add(Path.Combine(AppPaths.ManagedStagingGameRootPath, injBn));
             }
 
+            string activeDataCandidate = Path.Combine(GetActiveDataPath(), cleanF.Replace("/", "\\"));
+            bool wasInActiveData = File.Exists(activeDataCandidate);
+
             foreach (var path in possiblePaths.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 if (File.Exists(path))
                 {
                     try {
+                        if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(activeDataCandidate), StringComparison.OrdinalIgnoreCase))
+                            BackUpVanillaIfNeeded(path, f);
                         File.Delete(path);
                         deletedAny = true;
                         _logger($"[DELETE] Physically deleted file: {path}");
@@ -4134,6 +4453,9 @@ public partial class ModManager
                     }
                 }
             }
+
+            if (wasInActiveData)
+                RestoreVanillaIfBackedUp(activeDataCandidate, f);
         }
 
         if (isLooseDelete && !string.IsNullOrWhiteSpace(looseSafeKey))
@@ -4289,9 +4611,7 @@ public partial class ModManager
                     ?? locations.FirstOrDefault(l =>
                         !string.IsNullOrEmpty(AppPaths.DisabledModsPath) &&
                         l.StartsWith(AppPaths.DisabledModsPath, StringComparison.OrdinalIgnoreCase))
-                    ?? locations.FirstOrDefault(l =>
-                        !string.IsNullOrEmpty(AppPaths.BundlesPath) &&
-                        l.StartsWith(AppPaths.BundlesPath, StringComparison.OrdinalIgnoreCase))
+                    ?? locations.FirstOrDefault(l => IsCreationBundlePath(l))
                     ?? locations[0];
 
                 if (!string.Equals(chosenSource, dst, StringComparison.OrdinalIgnoreCase) && File.Exists(dst))
@@ -4500,7 +4820,14 @@ public partial class ModManager
         }
         if (normalized.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase))
         {
-            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, normalized.Replace("/", "\\"));
+            string bundleFileName = Path.GetFileName(normalized);
+            foreach (var dir in AppPaths.CreationBundleDirectories())
+            {
+                if (string.IsNullOrEmpty(dir) || string.IsNullOrWhiteSpace(bundleFileName)) continue;
+                string candidate = Path.Combine(dir, bundleFileName);
+                if (File.Exists(candidate)) return candidate;
+            }
+            return Path.Combine(AppPaths.LiveBundlesPath, bundleFileName);
         }
         if (normalized.StartsWith("Disabled/GameRoot/", StringComparison.OrdinalIgnoreCase))
         {
@@ -4813,10 +5140,14 @@ public partial class ModManager
         {
             Path.Combine(GetActiveDataPath(), cleanF),
             Path.Combine(AppPaths.DisabledModsPath, cleanF),
-            Path.Combine(AppPaths.BundlesPath, cleanF),
             Path.Combine(GetActiveDataPath(), listKey.Replace("/", "\\")),
             GetFullPath(listKey)
         };
+        foreach (var bundleDir in AppPaths.CreationBundleDirectories())
+        {
+            if (!string.IsNullOrEmpty(bundleDir))
+                possiblePaths.Add(Path.Combine(bundleDir, cleanF));
+        }
 
         string injBn = Path.GetFileName(listKey.Replace("\\", "/"));
         if (IsGameRootInjectorName(injBn))
@@ -4932,6 +5263,25 @@ public partial class ModManager
                resolvedMeta.IsBundle;
     }
 
+    private static bool IsCreationBundlePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        string fullPath;
+        try { fullPath = Path.GetFullPath(path); }
+        catch { return false; }
+
+        foreach (var dir in AppPaths.CreationBundleDirectories())
+        {
+            if (string.IsNullOrEmpty(dir)) continue;
+            string fullDir;
+            try { fullDir = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
+            catch { continue; }
+            if (fullPath.StartsWith(fullDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
     private string? FindBundleFileOnDisk(string fileName, string? dataPath = null)
     {
         foreach (string path in FindAllBundleFileLocations(fileName, dataPath))
@@ -4946,8 +5296,11 @@ public partial class ModManager
 
         dataPath ??= GetActiveDataPath();
         var searchDirs = new List<string>();
-        if (!string.IsNullOrEmpty(AppPaths.BundlesPath) && Directory.Exists(AppPaths.BundlesPath))
-            searchDirs.Add(AppPaths.BundlesPath);
+        foreach (var bundleDir in AppPaths.CreationBundleDirectories())
+        {
+            if (!string.IsNullOrEmpty(bundleDir) && Directory.Exists(bundleDir))
+                searchDirs.Add(bundleDir);
+        }
         if (!string.IsNullOrEmpty(AppPaths.DisabledModsPath) && Directory.Exists(AppPaths.DisabledModsPath))
             searchDirs.Add(AppPaths.DisabledModsPath);
         if (!string.IsNullOrWhiteSpace(dataPath) && Directory.Exists(dataPath))
@@ -4965,7 +5318,7 @@ public partial class ModManager
 
     private void RemoveLeftoverBundleCopies(string fileName, string keepPath, string dataPath)
     {
-        foreach (string dir in new[] { AppPaths.BundlesPath, AppPaths.DisabledModsPath })
+        foreach (string dir in AppPaths.CreationBundleDirectories().Append(AppPaths.DisabledModsPath))
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
             string extra = Path.Combine(dir, fileName);
@@ -5072,11 +5425,14 @@ public partial class ModManager
                 return false;
             }
 
+            string vanillaRel = rel.Replace('\\', '/');
             if (enable && disabledExists)
             {
                 string? destDir = Path.GetDirectoryName(dataFilePath);
                 if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
                     Directory.CreateDirectory(destDir);
+                if (dataExists)
+                    BackUpVanillaIfNeeded(dataFilePath, vanillaRel);
                 File.Move(disabledFilePath, dataFilePath, true);
                 _logger($"[MODS] Enabled mod: Moved '{rel}' from Disabled Mods to Data folder");
             }
@@ -5085,7 +5441,9 @@ public partial class ModManager
                 string? destDir = Path.GetDirectoryName(disabledFilePath);
                 if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
                     Directory.CreateDirectory(destDir);
+                BackUpVanillaIfNeeded(dataFilePath, vanillaRel);
                 File.Move(dataFilePath, disabledFilePath, true);
+                RestoreVanillaIfBackedUp(dataFilePath, vanillaRel);
                 _logger($"[MODS] Disabled mod: Moved '{rel}' to Disabled Mods folder");
             }
 

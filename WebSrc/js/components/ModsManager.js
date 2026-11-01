@@ -6,15 +6,14 @@ import { openTabBadgeColorModal } from '../utils/badgeColorModal.js';
 import { JsonTreeEditor } from '../utils/jsonTreeEditor.js';
 import * as jsonc from '../utils/jsonc.js';
 import {
-    CONFIG_EDITOR_FONT_FAMILIES,
     CONFIG_EDITOR_FONT_DEFAULT_SIZE,
     CONFIG_EDITOR_FONT_DEFAULT_FAMILY,
     clampConfigEditorFontSize,
-    configEditorFontFamilyLabel,
     getConfigEditorFont,
     applyConfigEditorFont,
     saveConfigEditorFont
 } from '../utils/configEditorFont.js';
+import { mountConfigFontPopover } from '../utils/configEditorFontPopover.js';
 
 let _modsGlobalEventsAttached = false;
 let _deleteModInFlight = false;
@@ -537,119 +536,21 @@ export class ModsManager {
     _mountConfigFontPopover(overlay) {
         const btn = overlay.querySelector('#mod-config-font-btn');
         if (!btn) return;
-        const t = (key, fallback) => {
-            const v = window._t(key);
-            return v && v !== key ? v : fallback;
-        };
-        let pop = null;
-        const close = () => {
-            if (!pop) return;
-            pop.remove();
-            pop = null;
-            btn.setAttribute('aria-expanded', 'false');
-            document.removeEventListener('mousedown', onOutside, true);
-            document.removeEventListener('keydown', onKey, true);
-        };
-        const onOutside = (e) => {
-            if (!pop) return;
-            if (pop.contains(e.target) || btn.contains(e.target)) return;
-            if (e.target?.closest?.('.themed-select-menu')) return;
-            close();
-        };
-        const onKey = (e) => {
-            if (e.key !== 'Escape' || !pop) return;
-            if (overlay.classList.contains('config-editor-parked')) return;
-            if (document.querySelector('.themed-select-menu')) return;
-            const hint = pop.querySelector('#mod-config-font-hint');
-            if (hint && !hint.hidden) {
-                e.preventDefault();
-                e.stopPropagation();
-                hint.hidden = true;
-                const infoBtn = pop.querySelector('#mod-config-font-info');
-                infoBtn?.setAttribute('aria-expanded', 'false');
-                infoBtn?.classList.remove('active');
-                return;
-            }
-            e.preventDefault();
-            e.stopPropagation();
-            close();
-            btn.focus();
-        };
-        const open = () => {
-            const cur = this._configEditorFont || getConfigEditorFont();
-            pop = document.createElement('div');
-            pop.className = 'config-font-popover';
-            pop.setAttribute('role', 'dialog');
-            pop.setAttribute('aria-label', t('config_editor_font', 'Editor font'));
-            const hintText = t('config_editor_font_hint', 'Tip: Ctrl + Mouse Wheel in the editor changes the size. Ctrl + 0 resets it.');
-            pop.innerHTML = `
-                <div class="config-font-head">
-                    <h3>${escapeHtmlSafe(t('config_editor_font', 'Editor font'))}</h3>
-                    <div class="config-font-info-wrap">
-                        <button type="button" class="config-font-info" id="mod-config-font-info" aria-expanded="false" aria-controls="mod-config-font-hint" aria-label="${escapeAttr(hintText)}">
-                            <i data-lucide="info"></i>
-                        </button>
-                        <div class="config-font-hint" id="mod-config-font-hint" role="tooltip" hidden>${escapeHtmlSafe(hintText)}</div>
-                    </div>
-                </div>
-                <span class="config-font-label">${escapeHtmlSafe(t('config_editor_font_size_label', 'Font size'))}</span>
-                <div class="config-font-stepper">
-                    <button type="button" data-font-step="-1" aria-label="-"><i data-lucide="minus"></i></button>
-                    <span id="mod-config-font-size-value" class="config-font-value">${cur.size}px</span>
-                    <button type="button" data-font-step="1" aria-label="+"><i data-lucide="plus"></i></button>
-                </div>
-                <label class="config-font-label" for="mod-config-font-family">${escapeHtmlSafe(t('config_editor_font_family_label', 'Font'))}</label>
-                <select id="mod-config-font-family" class="tweak-select">
-                    ${CONFIG_EDITOR_FONT_FAMILIES.map(f => `<option value="${escapeAttr(f.id)}" ${f.id === cur.family ? 'selected' : ''}>${escapeHtmlSafe(configEditorFontFamilyLabel(f))}</option>`).join('')}
-                </select>
-                <div class="config-font-actions">
-                    <button type="button" class="btn-popup secondary" id="mod-config-font-reset">${escapeHtmlSafe(t('config_editor_font_reset', 'Reset'))}</button>
-                </div>`;
-            btn.parentElement.appendChild(pop);
-            const br = btn.getBoundingClientRect();
-            const pr = btn.parentElement.getBoundingClientRect();
-            pop.style.top = `${br.bottom - pr.top + 6}px`;
-            pop.style.right = `${Math.max(0, pr.right - br.right)}px`;
-            try { window.lucide?.createIcons({ nodes: [pop] }); } catch (_) { }
-            const infoBtn = pop.querySelector('#mod-config-font-info');
-            const hint = pop.querySelector('#mod-config-font-hint');
-            const setHintOpen = (openHint) => {
-                if (!hint || !infoBtn) return;
-                hint.hidden = !openHint;
-                infoBtn.setAttribute('aria-expanded', String(openHint));
-                infoBtn.classList.toggle('active', openHint);
-            };
-            infoBtn?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                setHintOpen(!!hint?.hidden);
-            });
-            pop.addEventListener('click', (e) => {
-                if (!hint || hint.hidden) return;
-                if (e.target.closest('#mod-config-font-info, #mod-config-font-hint')) return;
-                setHintOpen(false);
-            });
-            pop.querySelectorAll('[data-font-step]').forEach(b => {
-                b.addEventListener('click', () => this._stepConfigEditorFont(overlay, Number(b.dataset.fontStep)));
-            });
-            pop.querySelector('#mod-config-font-family')?.addEventListener('change', (e) => {
+        const popover = mountConfigFontPopover(btn, {
+            idPrefix: 'mod-config-font',
+            getFont: () => this._configEditorFont || getConfigEditorFont(),
+            onStep: (delta) => this._stepConfigEditorFont(overlay, delta),
+            onFamily: (family) => {
                 const curNow = this._configEditorFont || getConfigEditorFont();
-                this._setConfigEditorFont(overlay, { ...curNow, family: e.target.value });
-            });
-            pop.querySelector('#mod-config-font-reset')?.addEventListener('click', () => {
-                this._setConfigEditorFont(overlay, { size: CONFIG_EDITOR_FONT_DEFAULT_SIZE, family: CONFIG_EDITOR_FONT_DEFAULT_FAMILY });
-            });
-            btn.setAttribute('aria-expanded', 'true');
-            document.addEventListener('mousedown', onOutside, true);
-            document.addEventListener('keydown', onKey, true);
-        };
-        btn.addEventListener('click', () => {
-            if (pop) close();
-            else open();
+                this._setConfigEditorFont(overlay, { ...curNow, family });
+            },
+            onReset: () => this._setConfigEditorFont(overlay, { size: CONFIG_EDITOR_FONT_DEFAULT_SIZE, family: CONFIG_EDITOR_FONT_DEFAULT_FAMILY }),
+            isSuspended: () => overlay.classList.contains('config-editor-parked')
         });
-        this._closeConfigFontPopover = close;
+        this._closeConfigFontPopover = popover.close;
         const prevTeardown = this._teardownConfigEditorLayout;
         this._teardownConfigEditorLayout = () => {
-            close();
+            popover.destroy();
             this._closeConfigFontPopover = null;
             prevTeardown?.();
             this._teardownConfigEditorLayout = null;
@@ -1489,7 +1390,7 @@ export class ModsManager {
         if (overlay.contains(document.activeElement)) document.activeElement.blur();
         overlay.classList.add('config-editor-parked');
         document.querySelector('.main-container')?.classList.remove('config-editor-open');
-        this._setConfigFindHostActive(false);
+        if (overlay.querySelector('#mod-config-editor')) this._setConfigFindHostActive(false);
     }
 
     unparkConfigEditor() {
@@ -1497,9 +1398,9 @@ export class ModsManager {
         if (!overlay) return;
         overlay.classList.remove('config-editor-parked');
         document.querySelector('.main-container')?.classList.add('config-editor-open');
-        this._setConfigFindHostActive(true);
+        if (overlay.querySelector('#mod-config-editor')) this._setConfigFindHostActive(true);
         const titleEl = document.getElementById('section-title');
-        const fileName = String(overlay.dataset.configRelativePath || '').split('/').pop();
+        const fileName = String(overlay.dataset.pageTitle || overlay.dataset.configRelativePath || '').split('/').pop();
         if (titleEl && fileName) titleEl.textContent = fileName;
         requestAnimationFrame(() => this._syncConfigEditorBackdropPad(overlay));
     }
@@ -1771,15 +1672,18 @@ export class ModsManager {
         const lower = normPath.toLowerCase();
         const isConfigRow = lower.endsWith('.ini') || lower.endsWith('.json') || lower.endsWith('.txt') || lower.endsWith('.toml');
         const isLooseMod = !!(currentMod?.isLoose || currentMod?.type === 'loose' || /^(Disabled\/)?Loose\//i.test(normPath));
-        const isPlainBa2Mod = !isLooseMod && lower.endsWith('.ba2') && !currentMod?.isBundle;
+        const isBundleMod = !isLooseMod && (!!currentMod?.isBundle || /^(Disabled\/)?Bundles\/[^/]+\.ba2$/i.test(normPath));
+        const isPlainBa2Mod = !isLooseMod && lower.endsWith('.ba2') && !isBundleMod;
         const supportsFiles = !isConfigRow &&
-            (isLooseMod || isPlainBa2Mod) &&
-            !/^(Disabled\/)?(Bundles|Strings|GameRoot|CoreIni)\//i.test(normPath);
+            (isLooseMod || isPlainBa2Mod || isBundleMod) &&
+            !/^(Disabled\/)?(Strings|GameRoot|CoreIni)\//i.test(normPath);
         const mainContainer = document.querySelector('.main-container');
-        const pageMode = isConfigRow && !!mainContainer;
+        const pageMode = !!mainContainer;
         const overlay = document.createElement('div');
         overlay.id = 'rename-mod-overlay';
-        overlay.className = pageMode ? 'config-editor-page rename-mod-overlay' : 'modal-overlay active rename-mod-overlay';
+        overlay.className = pageMode
+            ? (isConfigRow ? 'config-editor-page rename-mod-overlay' : 'config-editor-page mod-editor-page rename-mod-overlay')
+            : 'modal-overlay active rename-mod-overlay';
 
         if (isConfigRow) {
             const jsonMode = lower.endsWith('.json');
@@ -1833,10 +1737,11 @@ export class ModsManager {
             overlay.innerHTML = `
                 <div class="custom-modal polished rename-mod-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(editableName || window._t('mods'))}">
                     <nav class="rename-mod-tabs" role="tablist" aria-label="${escapeAttr(window._t('rename_mod_tabs_label'))}">
+                        ${pageMode ? `<button type="button" class="btn-popup secondary config-editor-back" id="rename-mod-close-top"><i data-lucide="arrow-left"></i> ${escapeHtml(window._t('config_editor_back'))}</button>` : ``}
                         <button type="button" class="rename-mod-tab active" data-tab="general" role="tab" aria-selected="true" id="rename-mod-tab-general">${escapeHtml(window._t('rename_mod_tab_general'))}</button>
                         <button type="button" class="rename-mod-tab" data-tab="nexus" role="tab" aria-selected="false" id="rename-mod-tab-nexus">${escapeHtml(window._t('rename_mod_tab_nexus'))}</button>
                         ${supportsFiles ? `<button type="button" class="rename-mod-tab" data-tab="files" role="tab" aria-selected="false" id="rename-mod-tab-files">${escapeHtml(window._t('rename_mod_tab_files'))}</button>` : ``}
-                        <button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>
+                        ${pageMode ? `` : `<button type="button" class="close-status" id="rename-mod-close-top" aria-label="${escapeHtml(window._t('cancel'))}">&times;</button>`}
                     </nav>
                     <div class="rename-mod-name-row">
                         <label class="rename-mod-label" for="rename-mod-input">${window._t('rename_mod_name_label')}</label>
@@ -1888,7 +1793,7 @@ export class ModsManager {
                         </div>` : ``}
                     </div>
                     <div class="modal-footer rename-mod-footer">
-                        <button type="button" class="btn-popup secondary" id="rename-mod-cancel">${window._t('cancel')}</button>
+                        ${pageMode ? `` : `<button type="button" class="btn-popup secondary" id="rename-mod-cancel">${window._t('cancel')}</button>`}
                         <button type="button" class="btn-popup primary" id="rename-mod-confirm"><i data-lucide="save"></i> ${window._t('rename_mod_save')}</button>
                     </div>
                 </div>
@@ -1897,6 +1802,7 @@ export class ModsManager {
 
         if (pageMode) {
             overlay.dataset.originSection = window.app?.currentSection || '';
+            overlay.dataset.pageTitle = String(editableName || '').split('/').pop() || editableName;
             mainContainer.appendChild(overlay);
             mainContainer.classList.add('config-editor-open');
             const titleEl = document.getElementById('section-title');
@@ -2529,7 +2435,7 @@ export class ModsManager {
         document.addEventListener('keydown', this.renameModalKeyHandler);
 
         updateConfirmState();
-        if (renameInput) {
+        if (renameInput && !pageMode) {
             renameInput.focus();
             renameInput.select();
         }
@@ -2627,7 +2533,13 @@ export class ModsManager {
             .join('\n');
         const contentChanged = modSig(priorData?.mods) !== modSig(data?.mods);
 
-        if (!contentChanged && this.tryInPlaceUpdate(data)) {
+        const presetSig = (d) => [
+            String(d?.activeModPreset || ''),
+            ...Object.keys(d?.modPresets ?? d?.modGroups ?? {})
+        ].join('\n');
+        const presetsChanged = !!priorData && presetSig(priorData) !== presetSig(data);
+
+        if (!contentChanged && !presetsChanged && this.tryInPlaceUpdate(data)) {
             this._applyUpdateFlagsToVisibleRows();
             if (this._shouldRecheckModUpdates(priorData, data)) {
                 this.scheduleModUpdateCheck();
@@ -3126,6 +3038,10 @@ export class ModsManager {
                 const updateBtn = row.querySelector('.btn-mod-update:not(.btn-mod-state-off):not([disabled])');
                 const hasUpdate = !!updateBtn;
                 const presetMgr = this.modGroupsManager;
+                const rowMod = (window.app?.realData?.mods || []).find(m => m?.originalName === name);
+                const canMoveToBundles = Boolean(rowMod) &&
+                    !rowMod.isBundle && !rowMod.isLoose &&
+                    /^(Disabled\/)?[^/]+\.ba2$/i.test(String(name).replace(/\\/g, '/'));
                 const activePreset = presetMgr?.getActiveName?.() || '';
                 const inPreset = !!presetMgr?.isModInActivePreset?.(name);
                 const addTargets = (presetMgr?.listNames?.() || [])
@@ -3166,12 +3082,35 @@ export class ModsManager {
                         <i data-lucide="folder-minus"></i>
                         <span>${escapeAttr(window._t('preset_remove_from', activePreset))}</span>
                     </div>
+                    ${canMoveToBundles ? `
+                    <div class="bundle-menu-divider" role="separator"></div>
+                    <div class="bundle-menu-item" data-action="move-to-bundles">
+                        <i data-lucide="package-plus"></i>
+                        <span>${escapeAttr(window._t('move_mod_to_bundles'))}</span>
+                    </div>` : ''}
                     <div class="bundle-menu-divider" role="separator"></div>
                     <div class="bundle-menu-item danger" data-action="delete">
                         <i data-lucide="trash-2"></i>
                         <span>${window._t('delete') || 'Delete'}</span>
                     </div>
                 `;
+
+                menu.querySelector('[data-action="move-to-bundles"]')?.addEventListener('click', async (ev) => {
+                    ev.stopPropagation();
+                    this._closeModsContextMenu();
+                    const fileName = (n) => String(n || '').split('/').pop();
+                    const partners = Array.isArray(rowMod?.bundlePartners) ? rowMod.bundlePartners : [];
+                    const fileList = [name, ...partners].map(fileName).join(', ');
+                    const ok = await window.appConfirm({
+                        title: window._t('move_mod_to_bundles'),
+                        message: window._t('move_mod_to_bundles_confirm', fileList),
+                        okText: window._t('move_mod_to_bundles'),
+                        cancelText: window._t('cancel'),
+                        danger: false
+                    });
+                    if (!ok) return;
+                    window.chrome?.webview?.postMessage?.({ type: 'MOVE_MOD_TO_BUNDLES', name });
+                });
 
                 menu.querySelector('[data-action="edit"]')?.addEventListener('click', (ev) => {
                     ev.stopPropagation();

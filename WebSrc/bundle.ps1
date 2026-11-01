@@ -68,5 +68,6 @@ function Invoke-Esbuild {
 Write-Host "Bundling WebSrc JS ($Configuration)..." -ForegroundColor Cyan
 Invoke-Esbuild -Entry (Join-Path $webSrc "js\main.js") -OutFile (Join-Path $webSrc "js\app.bundle.js")
 Invoke-Esbuild -Entry (Join-Path $webSrc "js\logs-popout.js") -OutFile (Join-Path $webSrc "js\logs-popout.bundle.js")
+Invoke-Esbuild -Entry (Join-Path $webSrc "js\bundle-preview-popout.js") -OutFile (Join-Path $webSrc "js\bundle-preview-popout.bundle.js")
 Invoke-Esbuild -Entry (Join-Path $webSrc "js\theme-creator.js") -OutFile (Join-Path $webSrc "js\theme-creator.bundle.js")
 exit 0

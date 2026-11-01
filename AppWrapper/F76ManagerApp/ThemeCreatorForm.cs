@@ -97,6 +97,7 @@ internal sealed class ThemeCreatorForm : Form
 
             core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.AreDevToolsEnabled = false;
+            core.Settings.IsStatusBarEnabled = false;
 
             core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
             core.WebResourceRequested += (_, e) => _owner.ServeAppResource(core, e, kickoffStartup: false);

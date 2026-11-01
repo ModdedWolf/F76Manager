@@ -2,12 +2,14 @@ import { escapeAttr, escapeHtml } from '../utils/htmlSafe.js';
 
 const STORAGE_KEY = 'dashboardUserLinks';
 const SEEDED_KEY = 'dashboardUserLinksSeeded';
+const ADDED_DEFAULTS_KEY = 'dashboardUserLinksAddedDefaults';
 const MAX_LINKS = 4;
 const END_TARGET = '__end__';
 
 const KNOWN_FAVICONS = {
     'nukacrypt.com': 'assets/nukacrypt.png',
-    'nukaknights.com': 'assets/nukaknights.png'
+    'nukaknights.com': 'assets/nukaknights.png',
+    'uf.atomicshop.fyi': 'assets/atomicshop.svg'
 };
 
 const DEFAULT_LINKS = [
@@ -20,8 +22,15 @@ const DEFAULT_LINKS = [
         id: 'minerva',
         name: 'Minerva schedule',
         url: 'https://nukaknights.com/minerva-dates-inventory.html'
+    },
+    {
+        id: 'atomicshop',
+        name: 'Atomic Shop',
+        url: 'https://uf.atomicshop.fyi/'
     }
 ];
+
+const LATER_DEFAULT_IDS = ['atomicshop'];
 
 function label(key, fallback) {
     const translate = typeof window !== 'undefined' ? window._t : null;
@@ -141,11 +150,41 @@ export class DashboardLinks {
     }
 
     ensureSeeded() {
-        if (localStorage.getItem(SEEDED_KEY) === '1') return;
-        if (!localStorage.getItem(STORAGE_KEY)) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_LINKS));
+        if (localStorage.getItem(SEEDED_KEY) !== '1') {
+            if (!localStorage.getItem(STORAGE_KEY)) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_LINKS));
+            }
+            localStorage.setItem(SEEDED_KEY, '1');
         }
-        localStorage.setItem(SEEDED_KEY, '1');
+        this.addLaterDefaults();
+    }
+
+    addLaterDefaults() {
+        let added;
+        try {
+            added = JSON.parse(localStorage.getItem(ADDED_DEFAULTS_KEY) || '[]');
+        } catch {
+            added = [];
+        }
+        if (!Array.isArray(added)) added = [];
+        const pending = LATER_DEFAULT_IDS.filter(id => !added.includes(id));
+        if (!pending.length) return;
+        let links;
+        try {
+            links = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        } catch {
+            links = [];
+        }
+        if (!Array.isArray(links)) links = [];
+        for (const id of pending) {
+            const def = DEFAULT_LINKS.find(link => link.id === id);
+            const host = def ? hostLabel(def.url) : '';
+            const present = links.some(link => link?.id === id || hostLabel(normalizeLinkUrl(link?.url)) === host);
+            if (def && !present && links.length < MAX_LINKS) links.push({ ...def });
+            added.push(id);
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(links));
+        localStorage.setItem(ADDED_DEFAULTS_KEY, JSON.stringify(added));
     }
 
     getLinks() {
@@ -166,6 +205,7 @@ export class DashboardLinks {
     displayName(link) {
         if (link.id === 'nukacrypt') return label('user_links_nukacrypt', 'Nukacrypt');
         if (link.id === 'minerva') return label('user_links_minerva', 'Minerva schedule');
+        if (link.id === 'atomicshop') return label('user_links_atomicshop', 'Atomic Shop');
         return link.name;
     }
 

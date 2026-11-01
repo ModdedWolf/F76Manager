@@ -1,5 +1,6 @@
 import { BundleRenderer } from './BundleRenderer.js';
 import { mountMeshViewer } from '../utils/meshViewer.js';
+import { mountBa2TextView } from './Ba2TextEditor.js';
 let _bundleEventsAttached = false;
 let _bundleIpcHandlerAttached = false;
 
@@ -20,6 +21,19 @@ function formatPlayerTime(seconds) {
     return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function escapeMenuText(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function shortenMenuName(name, max = 28) {
+    const text = String(name || '');
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 function showBundleStatus(type, text) {
     if (window.app && typeof window.app.showBanner === 'function') {
         window.app.showBanner({ type, text });
@@ -35,7 +49,10 @@ export class BundleManager {
         this.selectedMods = new Set();
         this.externalFiles = new Set();
         this.selectedFolders = new Set();
+        this.isolatedFolders = new Set();
+        this.looseStaged = new Map();
         this.bundleName = 'MyCustomBundle';
+        this.editingBundle = null;
         this.isPickingInternal = false;
         this.inspectedBa2Path = '';
         this.inspectedFolderPath = '';
@@ -50,6 +67,12 @@ export class BundleManager {
         this.ba2Selections = new Map();
         this.ba2TotalPaths = new Map();
         this.ba2AllPaths = new Map();
+        this.folderDataPaths = new Map();
+        this.ba2Replacements = new Map();
+        this.ba2Removed = new Map();
+        this.overlaySourceSizes = new Map();
+        this.inspectedResolvedPath = '';
+        this.previewCacheKey = '';
         this.gameDataPath = '';
         this.pendingAutoInspectPath = '';
         this.pendingAutoInspectFolderPath = '';
@@ -67,6 +90,7 @@ export class BundleManager {
         this._audioBlobUrl = null;
         this._audioVolume = 1;
         this._audioToggle = null;
+        this._meshAnimToggle = null;
         this._audioProgressRaf = null;
         this._audioInfoOpen = false;
         this._audioKeyAbort = null;
@@ -94,12 +118,16 @@ export class BundleManager {
         if (createFirstBtn) createFirstBtn.onclick = () => { this.isCreating = true; this.refresh(); };
         if (cancelBtn) cancelBtn.onclick = () => {
             this.isCreating = false;
+            this.exitEditMode();
+            this.discardAllIsolatedFolders();
             this.selectedMods.clear();
             this.externalFiles.clear();
             this.selectedFolders.clear();
             this.ba2Selections.clear();
             this.ba2TotalPaths.clear();
             this.ba2AllPaths.clear();
+            this.ba2Replacements.clear();
+            this.ba2Removed.clear();
             this.resetInspector();
             this.refresh();
         };
@@ -129,6 +157,9 @@ export class BundleManager {
                 this.pendingAutoInspectFolderPath = '';
                 this.inspectFolder(path);
             }
+        } else if (this._bundleCreateInfoAbort) {
+            this._bundleCreateInfoAbort.abort();
+            this._bundleCreateInfoAbort = null;
         }
     }
 
@@ -194,8 +225,15 @@ export class BundleManager {
                     try {
                         // WebView2 does not expose File.path; hand the File
                         // objects to the host so it can read the real paths.
+                        const sources = [];
+                        for (const src of this.collectBa2Sources()) {
+                            sources.push({ kind: 'ba2', ref: src.modRef });
+                        }
+                        for (const folder of this.selectedFolders) {
+                            sources.push({ kind: 'folder', ref: folder });
+                        }
                         webview.postMessageWithAdditionalObjects(
-                            { type: 'BUNDLE_ADD_DROPPED_FILES' },
+                            { type: 'BUNDLE_ADD_DROPPED_FILES', sources },
                             Array.from(files)
                         );
                         return;
@@ -244,10 +282,67 @@ export class BundleManager {
         });
     }
 
-    promptAddFolder() {
+    async promptAddFolder() {
         if (!window.chrome?.webview) return;
         this._closeBundleActionsMenu();
+        this._closeFileEntryContextMenu();
+
+        const mergeArchive = this.inspectedBa2Path ? this.toHostArchiveRef(this.inspectedBa2Path) : '';
+        if (mergeArchive) {
+            const archiveName = String(this.inspectedBa2Path).split(/[\\/]/).pop();
+            const choice = await window.appConfirm?.({
+                title: window._t('bundle_merge_folder_title'),
+                message: window._t('bundle_merge_folder_prompt', archiveName),
+                okText: window._t('bundle_merge_folder_ok'),
+                altText: window._t('bundle_add_separately'),
+                cancelText: window._t('cancel')
+            });
+            if (choice === true) {
+                window.chrome.webview.postMessage({ type: 'BUNDLE_BROWSE_FOLDER', mergeInto: mergeArchive });
+                return;
+            }
+            if (choice !== 'alt') return;
+        }
+
         window.chrome.webview.postMessage({ type: 'BUNDLE_BROWSE_FOLDER' });
+    }
+
+    promptOverlayIntoTree(targetDir, mode) {
+        if (!window.chrome?.webview || !this.inspectedBa2Path) return;
+        this._closeFileEntryContextMenu();
+        window.chrome.webview.postMessage({
+            type: 'BUNDLE_PICK_OVERLAY',
+            archive: this.toHostArchiveRef(this.inspectedBa2Path),
+            targetDir: this.normalizeBa2InternalPath(targetDir || ''),
+            mode: mode === 'folder' ? 'folder' : 'files'
+        });
+    }
+
+    async offerMergeDroppedFolders(folders) {
+        const list = (folders || []).filter(Boolean);
+        if (list.length === 0) return false;
+        const mergeArchive = this.inspectedBa2Path ? this.toHostArchiveRef(this.inspectedBa2Path) : '';
+        if (!mergeArchive || !window.chrome?.webview) return false;
+
+        const archiveName = String(this.inspectedBa2Path).split(/[\\/]/).pop();
+        const choice = await window.appConfirm?.({
+            title: window._t('bundle_merge_folder_title'),
+            message: window._t('bundle_merge_folder_prompt', archiveName),
+            okText: window._t('bundle_merge_folder_ok'),
+            altText: window._t('bundle_add_separately'),
+            cancelText: window._t('cancel')
+        });
+        if (choice === true) {
+            window.chrome.webview.postMessage({
+                type: 'BUNDLE_OVERLAY_FROM_FOLDERS',
+                archive: mergeArchive,
+                folders: list,
+                targetDir: ''
+            });
+            return true;
+        }
+        if (choice === 'alt') return false;
+        return true;
     }
 
     openInternalModPicker() {
@@ -263,8 +358,24 @@ export class BundleManager {
                 const name = btn.dataset.name;
                 const type = btn.dataset.type;
                 if (type === 'internal') this.selectedMods.delete(name);
-                else if (type === 'folder') this.selectedFolders.delete(name);
-                else this.externalFiles.delete(name);
+                else if (type === 'folder') {
+                    this.forgetLooseStagedFolder(name);
+                    this.discardIsolatedFolder(name);
+                    this.selectedFolders.delete(name);
+                }
+                else {
+                    this.externalFiles.delete(name);
+                    this.forgetLooseStagedArchive(name);
+                }
+                if (type === 'folder') {
+                    const folderKey = this.normalizeFolderKey(name);
+                    this.ba2Replacements.delete(folderKey);
+                    this.ba2Removed.delete(folderKey);
+                } else {
+                    const archiveKey = this.normalizeArchiveKey(name);
+                    this.ba2Replacements.delete(archiveKey);
+                    this.ba2Removed.delete(archiveKey);
+                }
                 this.syncInspectorWithStaged();
                 this.refresh();
             };
@@ -299,14 +410,480 @@ export class BundleManager {
     clearWorkspace() {
         this._closeBundleActionsMenu();
         this._closeFileEntryContextMenu();
+        this.discardAllIsolatedFolders();
         this.selectedMods.clear();
         this.externalFiles.clear();
         this.selectedFolders.clear();
         this.ba2Selections.clear();
         this.ba2TotalPaths.clear();
         this.ba2AllPaths.clear();
+        this.ba2Replacements.clear();
+        this.ba2Removed.clear();
         this.resetInspector();
         this.refresh();
+    }
+
+    discardIsolatedFolder(path) {
+        if (!path) return;
+        const key = this.normalizeFolderKey(path);
+        let matched = '';
+        for (const folder of this.isolatedFolders) {
+            if (this.normalizeFolderKey(folder) === key) {
+                matched = folder;
+                break;
+            }
+        }
+        if (!matched) return;
+        this.isolatedFolders.delete(matched);
+        if (window.chrome?.webview) {
+            window.chrome.webview.postMessage({ type: 'BUNDLE_DISCARD_ISOLATED', path: matched });
+        }
+    }
+
+    discardAllIsolatedFolders({ deleteOnDisk = true } = {}) {
+        this.looseStaged?.clear();
+        if (!this.isolatedFolders?.size) {
+            this.isolatedFolders = new Set();
+            return;
+        }
+        if (deleteOnDisk && window.chrome?.webview) {
+            for (const folder of [...this.isolatedFolders]) {
+                window.chrome.webview.postMessage({ type: 'BUNDLE_DISCARD_ISOLATED', path: folder });
+            }
+        }
+        this.isolatedFolders.clear();
+    }
+
+    isLooseModKey(name) {
+        if (!name) return false;
+        if (/^(Disabled\/)?Loose\//i.test(String(name))) return true;
+        const mods = this.data?.mods || window.app?.realData?.mods || [];
+        const mod = mods.find(m => m?.originalName === name);
+        return !!(mod?.isLoose || mod?.type === 'loose');
+    }
+
+    isModStaged(name) {
+        return this.selectedMods.has(name) || this.looseStaged.has(name);
+    }
+
+    getStagedModCount() {
+        return this.selectedMods.size + this.looseStaged.size;
+    }
+
+    stageLooseMod(key) {
+        if (!key || this.looseStaged.has(key) || !window.chrome?.webview) return;
+        this.looseStaged.set(key, null);
+        window.chrome.webview.postMessage({ type: 'BUNDLE_STAGE_LOOSE', key });
+    }
+
+    unstageLooseMod(key) {
+        if (!this.looseStaged.has(key)) return;
+        const entry = this.looseStaged.get(key);
+        this.looseStaged.delete(key);
+        if (!entry) return;
+        const folder = entry.folder;
+        if (folder) {
+            const folderKey = this.normalizeFolderKey(folder);
+            this.discardIsolatedFolder(folder);
+            this.selectedFolders.delete(folder);
+            this.ba2Selections.delete(folderKey);
+            this.ba2TotalPaths.delete(folderKey);
+            this.ba2AllPaths.delete(folderKey);
+            this.ba2Replacements.delete(folderKey);
+            this.ba2Removed.delete(folderKey);
+            this.folderDataPaths.delete(folderKey);
+        }
+        for (const archive of entry.archives) {
+            this.removeArchiveFromWorkspace(archive);
+        }
+        this.syncInspectorWithStaged();
+    }
+
+    forgetLooseStagedFolder(folder) {
+        const key = this.normalizeFolderKey(folder);
+        for (const [looseKey, entry] of [...this.looseStaged]) {
+            if (!entry?.folder || this.normalizeFolderKey(entry.folder) !== key) continue;
+            entry.folder = '';
+            if (entry.archives.length === 0) this.looseStaged.delete(looseKey);
+        }
+    }
+
+    forgetLooseStagedArchive(archive) {
+        const key = this.normalizeArchiveKey(archive);
+        for (const [looseKey, entry] of [...this.looseStaged]) {
+            if (!entry) continue;
+            entry.archives = entry.archives.filter(a => this.normalizeArchiveKey(a) !== key);
+            if (!entry.folder && entry.archives.length === 0) this.looseStaged.delete(looseKey);
+        }
+    }
+
+    handleLooseStaged(data) {
+        const key = data?.key;
+        const folder = data?.path || '';
+        const archives = Array.isArray(data?.archives) ? data.archives.filter(Boolean) : [];
+        if (!key || (!folder && archives.length === 0)) return;
+        if (!this.looseStaged.has(key)) {
+            if (folder) window.chrome?.webview?.postMessage({ type: 'BUNDLE_DISCARD_ISOLATED', path: folder });
+            return;
+        }
+        this.looseStaged.set(key, { folder, archives });
+        if (folder) {
+            this.selectedFolders.add(folder);
+            this.isolatedFolders.add(folder);
+        }
+        archives.forEach(a => this.externalFiles.add(a));
+        if (this.isPickingInternal) {
+            this.syncPickerSelection();
+        } else {
+            if (folder) this.pendingAutoInspectFolderPath = folder;
+            else this.pendingAutoInspectPath = archives[archives.length - 1];
+            this.refresh();
+        }
+    }
+
+    handleLooseStageFailed(data) {
+        const key = data?.key;
+        if (key) this.looseStaged.delete(key);
+        const name = String(key || '').split('/').pop();
+        showBundleStatus('error', window._t('bundle_loose_stage_failed', name, data?.error || ''));
+        if (this.isPickingInternal) this.syncPickerSelection();
+    }
+
+    syncPickerSelection() {
+        document.querySelectorAll('.picker-item').forEach(item => {
+            const selected = this.isModStaged(item.dataset.name);
+            item.classList.toggle('selected', selected);
+            const checkbox = item.querySelector('.picker-checkbox');
+            if (checkbox) {
+                checkbox.style.border = selected ? '2px solid var(--primary-green)' : '2px solid rgba(255,255,255,0.2)';
+                checkbox.style.background = selected ? 'var(--primary-green)' : 'transparent';
+                checkbox.innerHTML = selected ? '<i data-lucide="check" style="width: 14px; color: #121212;"></i>' : '';
+            }
+        });
+        if (window.lucide) window.lucide.createIcons();
+        const countBadge = document.getElementById('picker-count-badge');
+        if (countBadge) countBadge.innerText = window._t('n_selected_badge', this.getStagedModCount());
+    }
+
+    startEditBundle(originalName) {
+        const mods = this.data?.mods || window.app?.realData?.mods || [];
+        const mod = mods.find(m => m?.originalName === originalName);
+        const files = (mod?.files?.length ? mod.files : [originalName])
+            .filter(f => /\.ba2$/i.test(String(f || '')));
+        if (files.length === 0) return;
+
+        if (!this.editingBundle) this._nameBeforeEdit = this.bundleName;
+        this._closeFileEntryContextMenu();
+        this.discardAllIsolatedFolders();
+        this.selectedMods.clear();
+        this.externalFiles.clear();
+        this.selectedFolders.clear();
+        this.ba2Selections.clear();
+        this.ba2TotalPaths.clear();
+        this.ba2AllPaths.clear();
+        this.ba2Replacements.clear();
+        this.ba2Removed.clear();
+        this.resetInspector();
+
+        const baseName = String(originalName).split('/').pop()
+            .replace(/\.ba2$/i, '')
+            .replace(/ - Textures$/i, '');
+        this.editingBundle = { key: originalName, name: mod?.name || baseName };
+        this.bundleName = baseName;
+        files.forEach(f => this.selectedMods.add(f));
+
+        this.isCreating = true;
+        this.isPickingInternal = false;
+        this.pendingAutoInspectPath = this.resolveArchivePath(files[0]);
+        this.refresh();
+    }
+
+    exitEditMode() {
+        if (!this.editingBundle) return;
+        this.editingBundle = null;
+        this.bundleName = this._nameBeforeEdit || 'MyCustomBundle';
+        this._nameBeforeEdit = null;
+    }
+
+    getReplacement(archiveKey, internalPath) {
+        if (!archiveKey || !internalPath) return '';
+        return this.ba2Replacements.get(archiveKey)?.get(this.normalizeBa2InternalPath(internalPath)) || '';
+    }
+
+    rememberOverlaySourceSize(source, size) {
+        const bytes = Number(size);
+        if (source && Number.isFinite(bytes) && bytes > 0) this.overlaySourceSizes.set(source, bytes);
+    }
+
+    getOverlaySourceSize(source) {
+        return source ? this.overlaySourceSizes.get(source) : undefined;
+    }
+
+    getReplacementCount(archiveKey) {
+        return this.getOverlayCounts(archiveKey).replaced;
+    }
+
+    getAddedCount(archiveKey) {
+        return this.getOverlayCounts(archiveKey).added;
+    }
+
+    getOverlayCounts(archiveKey) {
+        const map = this.ba2Replacements.get(archiveKey);
+        if (!map || map.size === 0) return { replaced: 0, added: 0 };
+        const allPaths = this.ba2AllPaths.get(archiveKey);
+        let replaced = 0;
+        let added = 0;
+        for (const path of map.keys()) {
+            if (allPaths?.has(path)) replaced++;
+            else added++;
+        }
+        return { replaced, added };
+    }
+
+    isOverlayAddition(archiveKey, internalPath) {
+        const norm = this.normalizeBa2InternalPath(internalPath);
+        if (!archiveKey || !norm || !this.getReplacement(archiveKey, norm)) return false;
+        return !this.ba2AllPaths.get(archiveKey)?.has(norm);
+    }
+
+    getOverlayAdditions(archiveKey) {
+        const map = this.ba2Replacements.get(archiveKey);
+        if (!map) return [];
+        const allPaths = this.ba2AllPaths.get(archiveKey);
+        const out = [];
+        for (const [path, source] of map) {
+            if (!allPaths?.has(path)) out.push({ path, source });
+        }
+        return out;
+    }
+
+    setReplacement(archiveKey, internalPath, source) {
+        if (!archiveKey || !internalPath || !source) return;
+        const norm = this.normalizeBa2InternalPath(internalPath);
+        const removed = this.ba2Removed.get(archiveKey);
+        if (removed?.has(norm)) {
+            removed.delete(norm);
+            if (removed.size === 0) this.ba2Removed.delete(archiveKey);
+            if (!this.ba2AllPaths.has(archiveKey)) this.ba2AllPaths.set(archiveKey, new Set());
+            this.ba2AllPaths.get(archiveKey).add(norm);
+            this.ba2TotalPaths.set(archiveKey, this.ba2AllPaths.get(archiveKey).size);
+            if (!this.ba2Contents.some(e => this.normalizeBa2InternalPath(e.path) === norm)) {
+                this.ba2Contents.push({ path: norm, unpackedSize: 0, added: true });
+            }
+        }
+        if (!this.ba2Replacements.has(archiveKey)) this.ba2Replacements.set(archiveKey, new Map());
+        this.ba2Replacements.get(archiveKey).set(norm, source);
+        this.previewCache.delete(`${archiveKey}|${norm}`);
+        this.previewCache.delete(`${archiveKey}|${norm}|${source}`);
+        this.enforceReplacementSelections(archiveKey);
+    }
+
+    collectPathsForRemoval(archiveKey, filePath, folderPath) {
+        const paths = [];
+        if (filePath) {
+            const norm = this.normalizeBa2InternalPath(filePath);
+            if (norm) paths.push(norm);
+            return paths;
+        }
+        if (folderPath == null) return paths;
+        const prefix = folderPath ? `${this.normalizeBa2InternalPath(folderPath)}/` : '';
+        const folderNorm = folderPath ? this.normalizeBa2InternalPath(folderPath) : '';
+        const allPaths = this.ba2AllPaths.get(archiveKey);
+        if (allPaths) {
+            for (const path of allPaths) {
+                if (!folderNorm || path === folderNorm || path.startsWith(prefix)) paths.push(path);
+            }
+        } else {
+            for (const entry of this.ba2Contents || []) {
+                const norm = this.normalizeBa2InternalPath(entry.path);
+                if (!folderNorm || norm === folderNorm || norm.startsWith(prefix)) paths.push(norm);
+            }
+        }
+        return paths;
+    }
+
+    removeEntries(archiveKey, paths) {
+        if (!archiveKey || !paths?.length) return;
+        if (!this.ba2Removed.has(archiveKey)) this.ba2Removed.set(archiveKey, new Set());
+        const removed = this.ba2Removed.get(archiveKey);
+        const allPaths = this.ba2AllPaths.get(archiveKey) || new Set();
+        const selected = this.getSelectionForArchive(archiveKey);
+        let removedCount = 0;
+        const removedSet = new Set();
+
+        for (const raw of paths) {
+            const norm = this.normalizeBa2InternalPath(raw);
+            if (!norm || removed.has(norm)) continue;
+            removed.add(norm);
+            removedSet.add(norm);
+            allPaths.delete(norm);
+            selected.delete(norm);
+            this.clearReplacement(archiveKey, norm);
+            removedCount++;
+        }
+        if (removedCount === 0) return;
+
+        this.ba2AllPaths.set(archiveKey, allPaths);
+        this.ba2Selections.set(archiveKey, selected);
+        this.ba2TotalPaths.set(archiveKey, allPaths.size);
+        this.ba2Contents = (this.ba2Contents || []).filter(
+            e => !removedSet.has(this.normalizeBa2InternalPath(e.path))
+        );
+        this.inspectorFileCount = Math.max(0, (this.inspectorFileCount || 0) - removedCount);
+
+        if (this.previewPath && removedSet.has(this.normalizeBa2InternalPath(this.previewPath))) {
+            this.clearPreview();
+        }
+        this.afterSelectionChange();
+        showBundleStatus('success', window._t('bundle_removed_entries', removedCount));
+    }
+
+    restoreRemoved(archiveKey) {
+        if (!archiveKey) return;
+        const removed = this.ba2Removed.get(archiveKey);
+        if (!removed?.size) return;
+
+        if (!this.ba2AllPaths.has(archiveKey)) this.ba2AllPaths.set(archiveKey, new Set());
+        const allPaths = this.ba2AllPaths.get(archiveKey);
+        const selected = new Set(this.getSelectionForArchive(archiveKey));
+        for (const path of removed) {
+            allPaths.add(path);
+            selected.add(path);
+        }
+        this.ba2AllPaths.set(archiveKey, allPaths);
+        this.ba2Selections.set(archiveKey, selected);
+        this.ba2TotalPaths.set(archiveKey, allPaths.size);
+        this.ba2Removed.delete(archiveKey);
+
+        if (this.inspectedBa2Path && this.normalizeArchiveKey(this.inspectedBa2Path) === archiveKey) {
+            this.inspectBa2(this.inspectedBa2Path);
+        } else if (this.inspectedFolderPath && this.normalizeFolderKey(this.inspectedFolderPath) === archiveKey) {
+            this.inspectFolder(this.inspectedFolderPath);
+        } else {
+            this.afterSelectionChange();
+        }
+    }
+
+    applyRemovedFilterToContents(archiveKey, entries) {
+        const removed = this.ba2Removed.get(archiveKey);
+        if (!removed?.size || !Array.isArray(entries)) return { entries: entries || [], removedCount: 0 };
+        const filtered = [];
+        let removedCount = 0;
+        for (const entry of entries) {
+            const norm = this.normalizeBa2InternalPath(entry?.path);
+            if (norm && removed.has(norm)) {
+                removedCount++;
+                continue;
+            }
+            filtered.push(entry);
+        }
+        return { entries: filtered, removedCount };
+    }
+
+    clearReplacement(archiveKey, internalPath) {
+        const map = this.ba2Replacements.get(archiveKey);
+        if (!map) return;
+        const norm = this.normalizeBa2InternalPath(internalPath);
+        const source = map.get(norm);
+        map.delete(norm);
+        if (map.size === 0) this.ba2Replacements.delete(archiveKey);
+        this.previewCache.delete(`${archiveKey}|${norm}`);
+        if (source) this.previewCache.delete(`${archiveKey}|${norm}|${source}`);
+    }
+
+    enforceReplacementSelections(onlyKey = '') {
+        for (const [archiveKey, map] of this.ba2Replacements) {
+            if (onlyKey && archiveKey !== onlyKey) continue;
+            if (!this.ba2Selections.has(archiveKey)) continue;
+            const allPaths = this.ba2AllPaths.get(archiveKey);
+            const set = new Set(this.getSelectionForArchive(archiveKey));
+            for (const path of map.keys()) {
+                if (!allPaths || allPaths.has(path)) set.add(path);
+            }
+            this.ba2Selections.set(archiveKey, set);
+        }
+    }
+
+    promptReplaceFile(internalPath) {
+        if (!window.chrome?.webview || !this.inspectedBa2Path || !internalPath) return;
+        this._closeFileEntryContextMenu();
+        window.chrome.webview.postMessage({
+            type: 'BUNDLE_PICK_REPLACEMENT',
+            archive: this.toHostArchiveRef(this.inspectedBa2Path),
+            path: internalPath
+        });
+    }
+
+    undoReplaceFile(internalPath) {
+        const archiveKey = this.getArchiveSelectionKey();
+        this._closeFileEntryContextMenu();
+        if (!archiveKey || !internalPath) return;
+        this.clearReplacement(archiveKey, internalPath);
+        if (this.previewPath === this.normalizeBa2InternalPath(internalPath)) {
+            this.previewFile(this.previewPath);
+        }
+        this.afterSelectionChange();
+    }
+
+    handleReplacementSelected(data) {
+        const archiveKey = this.normalizeArchiveKey(data.archive);
+        if (!archiveKey || !this.isStagedBa2Path(data.archive)) return;
+        const norm = this.normalizeBa2InternalPath(data.path);
+        this.rememberOverlaySourceSize(data.source, data.size);
+        this.setReplacement(archiveKey, norm, data.source);
+        if (archiveKey === this.getArchiveSelectionKey()) {
+            this.afterSelectionChange();
+            if (this.previewPath === norm) this.previewFile(norm);
+        } else {
+            this.updateStagedPanelBadges();
+        }
+        const fileName = String(data.path || '').split('/').pop();
+        showBundleStatus('success', window._t('bundle_replace_done', fileName));
+    }
+
+    handleOverlayFiles(data) {
+        const archiveKey = this.normalizeArchiveKey(data.archive);
+        if (!archiveKey || !this.isStagedBa2Path(data.archive)) return;
+        const files = Array.isArray(data.files) ? data.files : [];
+        if (files.length === 0) return;
+
+        let replaced = 0;
+        let added = 0;
+        const allPaths = this.ba2AllPaths.get(archiveKey);
+        for (const file of files) {
+            const path = this.normalizeBa2InternalPath(file?.path);
+            const source = file?.source;
+            if (!path || !source) continue;
+            const existed = allPaths?.has(path);
+            this.rememberOverlaySourceSize(source, file?.size);
+            this.setReplacement(archiveKey, path, source);
+            if (existed) replaced++;
+            else added++;
+        }
+
+        if (archiveKey === this.getArchiveSelectionKey()) {
+            this.afterSelectionChange();
+        } else {
+            this.updateStagedPanelBadges();
+        }
+
+        const archiveName = String(data.archive || '').split(/[\\/]/).pop();
+        showBundleStatus('success', window._t('bundle_overlay_result', added, replaced, archiveName));
+    }
+
+    getModPartners(originalName) {
+        const mods = this.data?.mods || window.app?.realData?.mods || [];
+        const mod = mods.find(m => m?.originalName === originalName);
+        return Array.isArray(mod?.bundlePartners) ? mod.bundlePartners.filter(Boolean) : [];
+    }
+
+    toHostArchiveRef(path) {
+        if (!path) return path;
+        const key = this.normalizeArchiveKey(path);
+        for (const src of this.collectBa2Sources()) {
+            if (src.key === key) return src.modRef;
+        }
+        return path;
     }
 
     setupFileEntryContextMenu() {
@@ -323,25 +900,86 @@ export class BundleManager {
             if (e.target.closest('.ba2-preview-pane')) return;
             const archiveKey = this.getArchiveSelectionKey();
             const isInspecting = Boolean(this.inspectedBa2Path || this.inspectedFolderPath);
-            if (!archiveKey || !isInspecting || this.inspectorLoading) return;
-            if (!this.ba2Contents?.length && !this.ba2TotalPaths.has(archiveKey)) return;
+            const hasStaged = (this.selectedMods?.size || 0) + (this.externalFiles?.size || 0) + (this.selectedFolders?.size || 0) > 0;
+            const showInspectItems = Boolean(archiveKey && isInspecting && !this.inspectorLoading
+                && (this.ba2Contents?.length || this.ba2TotalPaths.has(archiveKey)));
 
             e.preventDefault();
             e.stopPropagation();
             this._closeFileEntryContextMenu();
 
-            const { all, none } = this.getArchiveSelectionMenuState();
-            const canExtract = this.canExtractSelection();
+            const { all, none } = showInspectItems ? this.getArchiveSelectionMenuState() : { all: false, none: true };
+            const canExtract = showInspectItems ? this.canExtractSelection() : false;
             const isBa2 = Boolean(this.inspectedBa2Path);
-            const expandPaths = BundleRenderer.collectFolderPaths(this, {
+            const fileRow = showInspectItems ? e.target.closest('.ba2-tree-file[data-preview-path]') : null;
+            const fileRowPath = fileRow?.dataset.previewPath || '';
+            const fileRowReplaced = Boolean(fileRowPath && this.getReplacement(archiveKey, fileRowPath));
+            const fileRowIsAddition = fileRowReplaced && this.isOverlayAddition(archiveKey, fileRowPath);
+            const folderHeader = showInspectItems && !fileRow
+                ? e.target.closest('.ba2-tree-folder-row')
+                : null;
+            const folderRowPath = folderHeader?.closest('.ba2-tree-folder[data-folder-path]')?.dataset.folderPath || '';
+            const archiveRootRow = showInspectItems && isBa2 && !fileRow
+                ? e.target.closest('.ba2-tree-archive-root')
+                : null;
+            const overlayTargetDir = isBa2 ? (folderRowPath || (archiveRootRow ? '' : null)) : null;
+            const showOverlayHere = overlayTargetDir !== null;
+            const canRemoveEntry = Boolean(showInspectItems && (fileRowPath || folderHeader));
+            const removePaths = canRemoveEntry
+                ? this.collectPathsForRemoval(archiveKey, fileRowPath || '', fileRowPath ? null : (folderRowPath || ''))
+                : [];
+            const removeTargetPath = fileRowPath || folderRowPath || '';
+            const removeTargetName = removeTargetPath.split('/').filter(Boolean).pop() || removeTargetPath;
+            const removeLabel = !canRemoveEntry || removePaths.length === 0
+                ? ''
+                : fileRowPath
+                    ? window._t('bundle_remove_file', shortenMenuName(removeTargetName))
+                    : window._t('bundle_remove_folder', shortenMenuName(removeTargetName), removePaths.length);
+            const removedCount = showInspectItems ? (this.ba2Removed.get(archiveKey)?.size || 0) : 0;
+            const expandPaths = showInspectItems ? BundleRenderer.collectFolderPaths(this, {
                 foldersWithSubfoldersOnly: this.getFilteredEntryCount() > 5000
-            });
+            }) : [];
             const allExpanded = expandPaths.length === 0
                 || expandPaths.every(path => this.inspectorExpandedDirs.has(path));
             const noneExpanded = this.inspectorExpandedDirs.size === 0;
             const menu = document.createElement('div');
             menu.className = 'bundle-menu-dropdown file-entry-context-menu';
             menu.innerHTML = `
+                ${fileRowPath && isBa2 ? `
+                <div class="bundle-menu-item" data-action="replace-file">
+                    <i data-lucide="replace"></i>
+                    <span>${window._t('bundle_replace_file')}</span>
+                </div>
+                ${fileRowReplaced ? `
+                <div class="bundle-menu-item" data-action="undo-replace">
+                    <i data-lucide="undo-2"></i>
+                    <span>${window._t(fileRowIsAddition ? 'bundle_remove_added' : 'bundle_undo_replace')}</span>
+                </div>` : ''}
+                <div class="bundle-menu-divider" role="separator"></div>` : ''}
+                ${showOverlayHere ? `
+                <div class="bundle-menu-item" data-action="add-files-here">
+                    <i data-lucide="file-plus"></i>
+                    <span>${window._t('bundle_add_files_here')}</span>
+                </div>
+                <div class="bundle-menu-item" data-action="add-folder-here">
+                    <i data-lucide="folder-input"></i>
+                    <span>${window._t('bundle_add_folder_here')}</span>
+                </div>
+                <div class="bundle-menu-divider" role="separator"></div>` : ''}
+                <div class="bundle-menu-item" data-action="add-external">
+                    <i data-lucide="plus"></i>
+                    <span>${window._t('add_external_ba2')}</span>
+                </div>
+                <div class="bundle-menu-item" data-action="add-internal">
+                    <i data-lucide="list-plus"></i>
+                    <span>${window._t('add_mod_from_list')}</span>
+                </div>
+                <div class="bundle-menu-item" data-action="add-folder">
+                    <i data-lucide="folder-plus"></i>
+                    <span>${window._t('add_folder')}</span>
+                </div>
+                ${showInspectItems ? `
+                <div class="bundle-menu-divider" role="separator"></div>
                 <div class="bundle-menu-item${all ? ' bundle-menu-item--muted' : ''}" data-action="select-all">
                     <i data-lucide="list-checks"></i>
                     <span>${window._t('inspector_select_all')}</span>
@@ -360,15 +998,31 @@ export class BundleManager {
                     <span>${window._t('inspector_collapse_all')}</span>
                 </div>
                 ${isBa2 ? `
+                <div class="bundle-menu-item${canExtract ? '' : ' bundle-menu-item--muted'}" data-action="isolate">
+                    <i data-lucide="package-plus"></i>
+                    <span>${window._t('bundle_add_to_bundle')}</span>
+                </div>
                 <div class="bundle-menu-item${canExtract ? '' : ' bundle-menu-item--muted'}" data-action="extract">
                     <i data-lucide="folder-open"></i>
                     <span>${window._t('bundle_extract_to_folder')}</span>
+                </div>` : ''}` : ''}
+                ${removeLabel || removedCount > 0 || hasStaged ? `
+                <div class="bundle-menu-divider" role="separator"></div>` : ''}
+                ${removedCount > 0 ? `
+                <div class="bundle-menu-item" data-action="restore-removed">
+                    <i data-lucide="undo-2"></i>
+                    <span>${window._t('bundle_restore_removed', removedCount)}</span>
                 </div>` : ''}
-                <div class="bundle-menu-divider" role="separator"></div>
+                ${removeLabel ? `
+                <div class="bundle-menu-item danger" data-action="remove-entry" title="${escapeMenuText(removeTargetPath)}">
+                    <i data-lucide="${fileRowPath ? 'file-x' : 'folder-x'}"></i>
+                    <span>${escapeMenuText(removeLabel)}</span>
+                </div>` : ''}
+                ${hasStaged ? `
                 <div class="bundle-menu-item danger" data-action="clear-workspace">
-                    <i data-lucide="trash-2"></i>
+                    <i data-lucide="eraser"></i>
                     <span>${window._t('clear_workspace')}</span>
-                </div>
+                </div>` : ''}
             `;
             document.body.appendChild(menu);
             if (window.lucide) window.lucide.createIcons();
@@ -376,13 +1030,95 @@ export class BundleManager {
             menu.style.position = 'fixed';
             menu.style.left = `${e.clientX}px`;
             menu.style.top = `${e.clientY}px`;
+            const menuRect = menu.getBoundingClientRect();
+            menu.style.left = `${Math.max(8, Math.min(e.clientX, window.innerWidth - menuRect.width - 8))}px`;
+            menu.style.top = `${Math.max(8, Math.min(e.clientY, window.innerHeight - menuRect.height - 8))}px`;
 
+            const addInternalItem = menu.querySelector('[data-action="add-internal"]');
+            const addExternalItem = menu.querySelector('[data-action="add-external"]');
+            const addFolderItem = menu.querySelector('[data-action="add-folder"]');
+            const addFilesHereItem = menu.querySelector('[data-action="add-files-here"]');
+            const addFolderHereItem = menu.querySelector('[data-action="add-folder-here"]');
+            const replaceFileItem = menu.querySelector('[data-action="replace-file"]');
+            const undoReplaceItem = menu.querySelector('[data-action="undo-replace"]');
+
+            if (replaceFileItem) {
+                replaceFileItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.promptReplaceFile(fileRowPath);
+                };
+            }
+
+            if (undoReplaceItem) {
+                undoReplaceItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.undoReplaceFile(fileRowPath);
+                };
+            }
+
+            if (addFilesHereItem) {
+                addFilesHereItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.promptOverlayIntoTree(overlayTargetDir || '', 'files');
+                };
+            }
+
+            if (addFolderHereItem) {
+                addFolderHereItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.promptOverlayIntoTree(overlayTargetDir || '', 'folder');
+                };
+            }
+
+            if (addInternalItem) {
+                addInternalItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this._closeFileEntryContextMenu();
+                    this.openInternalModPicker();
+                };
+            }
+
+            if (addExternalItem) {
+                addExternalItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this._closeFileEntryContextMenu();
+                    this.promptAddExternalBa2();
+                };
+            }
+
+            if (addFolderItem) {
+                addFolderItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this._closeFileEntryContextMenu();
+                    void this.promptAddFolder();
+                };
+            }
+
+            const removeEntryItem = menu.querySelector('[data-action="remove-entry"]');
+            const restoreRemovedItem = menu.querySelector('[data-action="restore-removed"]');
             const selectAllItem = menu.querySelector('[data-action="select-all"]');
             const deselectAllItem = menu.querySelector('[data-action="deselect-all"]');
             const expandAllItem = menu.querySelector('[data-action="expand-all"]');
             const collapseAllItem = menu.querySelector('[data-action="collapse-all"]');
+            const isolateItem = menu.querySelector('[data-action="isolate"]');
             const extractItem = menu.querySelector('[data-action="extract"]');
             const clearWorkspaceItem = menu.querySelector('[data-action="clear-workspace"]');
+
+            if (removeEntryItem) {
+                removeEntryItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.removeEntries(archiveKey, removePaths);
+                    this._closeFileEntryContextMenu();
+                };
+            }
+
+            if (restoreRemovedItem) {
+                restoreRemovedItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.restoreRemoved(archiveKey);
+                    this._closeFileEntryContextMenu();
+                };
+            }
 
             if (selectAllItem) {
                 selectAllItem.onclick = (ev) => {
@@ -417,6 +1153,14 @@ export class BundleManager {
                     if (noneExpanded) return;
                     this.collapseAllInspectorFolders();
                     this._closeFileEntryContextMenu();
+                };
+            }
+
+            if (isolateItem) {
+                isolateItem.onclick = (ev) => {
+                    ev.stopPropagation();
+                    if (!this.canExtractSelection()) return;
+                    this.isolateSelection();
                 };
             }
 
@@ -463,6 +1207,32 @@ export class BundleManager {
 
     normalizeFolderKey(path) {
         return String(path || '').toLowerCase().replace(/\\/g, '/');
+    }
+
+    getFolderOverrides() {
+        const parts = [];
+        for (const folder of this.selectedFolders) {
+            const key = this.normalizeFolderKey(folder);
+            const paths = this.ba2Selections.get(key) || this.ba2AllPaths.get(key);
+            parts.push(`${key}:${paths ? paths.size : -1}:${this.folderDataPaths.has(key) ? 1 : 0}`);
+        }
+        const signature = parts.join('|');
+        if (this._folderOverrideCache?.signature === signature) return this._folderOverrideCache.map;
+
+        const map = new Map();
+        for (const folder of this.selectedFolders) {
+            const key = this.normalizeFolderKey(folder);
+            const paths = this.ba2Selections.get(key) || this.ba2AllPaths.get(key);
+            const dataPaths = this.folderDataPaths.get(key);
+            if (!paths || !dataPaths) continue;
+            const folderName = String(folder).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+            for (const p of paths) {
+                const dataPath = dataPaths.get(p);
+                if (dataPath) map.set(dataPath, folderName);
+            }
+        }
+        this._folderOverrideCache = { signature, map };
+        return map;
     }
 
     resolveArchivePath(modOrPath) {
@@ -669,6 +1439,7 @@ export class BundleManager {
         };
 
         for (const mod of this.selectedMods) {
+            if (this.isLooseModKey(mod)) continue;
             addSource(mod, mod);
             const base = String(mod || '').replace(/\.ba2$/i, '');
             if (base && !/ - Textures$/i.test(base)) {
@@ -733,25 +1504,40 @@ export class BundleManager {
 
         const fullMods = [];
         const ba2Partial = [];
+        const replacements = [];
 
         for (const src of this.collectBa2Sources()) {
+            const replaced = this.ba2Replacements.get(src.key);
+            if (replaced) {
+                for (const [path, source] of replaced) {
+                    replacements.push({ archive: src.modRef, path, source });
+                }
+            }
+
             if (!this.ba2TotalPaths.has(src.key)) {
                 fullMods.push(src.modRef);
                 continue;
             }
 
             const effectivePaths = this.getEffectiveSelectionPaths(src.key);
+            if (replaced) {
+                const allPaths = this.ba2AllPaths.get(src.key);
+                for (const path of replaced.keys()) {
+                    if (allPaths?.has(path) && !effectivePaths.includes(path)) effectivePaths.push(path);
+                }
+            }
             if (effectivePaths.length === 0) continue;
 
             const totalInArchive = this.ba2TotalPaths.get(src.key) || 0;
             const isFullArchive = effectivePaths.length >= totalInArchive
-                && !(this.inspectorFilter && src.key === this.getArchiveSelectionKey());
+                && !(this.inspectorFilter && src.key === this.getArchiveSelectionKey())
+                && !this.ba2Removed.get(src.key)?.size;
 
             if (isFullArchive) {
                 fullMods.push(src.modRef);
             } else {
                 ba2Partial.push({
-                    archive: src.path,
+                    archive: src.modRef,
                     paths: effectivePaths
                 });
             }
@@ -762,17 +1548,34 @@ export class BundleManager {
 
         for (const folder of this.selectedFolders) {
             const key = this.normalizeFolderKey(folder);
+            const replaced = this.ba2Replacements.get(key);
+            const dataPaths = this.folderDataPaths.get(key);
+            if (replaced && dataPaths) {
+                for (const [relPath, source] of replaced) {
+                    const dataPath = dataPaths.get(relPath);
+                    if (!dataPath) continue;
+                    replacements.push({ archive: folder, path: dataPath, source });
+                }
+            }
+
             if (!this.ba2TotalPaths.has(key)) {
                 fullFolders.push(folder);
                 continue;
             }
 
             const effectivePaths = this.getEffectiveSelectionPaths(key);
+            if (replaced) {
+                const allPaths = this.ba2AllPaths.get(key);
+                for (const path of replaced.keys()) {
+                    if (allPaths?.has(path) && !effectivePaths.includes(path)) effectivePaths.push(path);
+                }
+            }
             if (effectivePaths.length === 0) continue;
 
             const totalInFolder = this.ba2TotalPaths.get(key) || 0;
             const isFullFolder = effectivePaths.length >= totalInFolder
-                && !(this.inspectorFilter && key === this.getArchiveSelectionKey());
+                && !(this.inspectorFilter && key === this.getArchiveSelectionKey())
+                && !this.ba2Removed.get(key)?.size;
 
             if (isFullFolder) {
                 fullFolders.push(folder);
@@ -791,9 +1594,11 @@ export class BundleManager {
             ba2Partial,
             folders: fullFolders,
             folderPartial,
+            replacements,
             compression,
             format
         };
+        if (this.editingBundle) payload.editBundle = this.editingBundle.key;
 
         if (payload.mods.length === 0 && payload.ba2Partial.length === 0 && payload.folders.length === 0 && payload.folderPartial.length === 0) {
             if (window.chrome?.webview) {
@@ -817,14 +1622,40 @@ export class BundleManager {
         const totalInArchive = this.ba2TotalPaths.get(archiveKey) || 0;
         const payload = {
             type: 'BUNDLE_EXTRACT',
-            archive: this.resolveArchivePath(this.inspectedBa2Path)
+            archive: this.toHostArchiveRef(this.inspectedBa2Path)
         };
 
-        if (effectivePaths.length < totalInArchive) {
+        if (effectivePaths.length < totalInArchive || this.ba2Removed.get(archiveKey)?.size) {
             payload.paths = effectivePaths;
         }
 
         return payload;
+    }
+
+    buildIsolatePayload() {
+        const archiveKey = this.getArchiveSelectionKey();
+        if (!archiveKey || !this.inspectedBa2Path) return null;
+
+        const effectivePaths = this.getEffectiveSelectionPaths(archiveKey);
+        if (effectivePaths.length === 0) return null;
+
+        const selected = new Set(effectivePaths);
+        const replacements = [];
+        const replaced = this.ba2Replacements.get(archiveKey);
+        if (replaced) {
+            for (const [path, source] of replaced) {
+                if (selected.has(path) || this.isOverlayAddition(archiveKey, path)) {
+                    replacements.push({ path, source });
+                }
+            }
+        }
+
+        return {
+            type: 'BUNDLE_ISOLATE_SELECTION',
+            archive: this.toHostArchiveRef(this.inspectedBa2Path),
+            paths: effectivePaths,
+            replacements
+        };
     }
 
     promptExtractToFolder() {
@@ -841,9 +1672,68 @@ export class BundleManager {
         window.chrome.webview.postMessage(payload);
     }
 
+    isolateSelection() {
+        if (!window.chrome?.webview) return;
+        this._closeBundleActionsMenu();
+        this._closeFileEntryContextMenu();
+
+        const payload = this.buildIsolatePayload();
+        if (!payload) {
+            showBundleStatus('error', window._t('bundle_nothing_to_extract'));
+            return;
+        }
+
+        const archiveName = String(this.inspectedBa2Path || '').split(/[\\/]/).pop() || payload.archive;
+        showBundleStatus('info', window._t('bundle_isolate_started', payload.paths.length, archiveName));
+        window.chrome.webview.postMessage(payload);
+    }
+
+    removeArchiveFromWorkspace(archiveRef) {
+        if (!archiveRef) return;
+        const targetKey = this.normalizeArchiveKey(this.resolveArchivePath(archiveRef) || archiveRef);
+        const matches = (value) => {
+            const key = this.normalizeArchiveKey(value);
+            if (key === targetKey) return true;
+            return this.normalizeArchiveKey(this.resolveArchivePath(value) || value) === targetKey;
+        };
+
+        for (const mod of [...this.selectedMods]) {
+            if (matches(mod)) this.selectedMods.delete(mod);
+        }
+        for (const file of [...this.externalFiles]) {
+            if (matches(file)) {
+                this.externalFiles.delete(file);
+                this.forgetLooseStagedArchive(file);
+            }
+        }
+
+        this.ba2Selections.delete(targetKey);
+        this.ba2TotalPaths.delete(targetKey);
+        this.ba2AllPaths.delete(targetKey);
+        this.ba2Replacements.delete(targetKey);
+        this.ba2Removed.delete(targetKey);
+        this.folderDataPaths?.delete?.(targetKey);
+
+        if (this.inspectedBa2Path && matches(this.inspectedBa2Path)) {
+            this.resetInspector();
+        }
+    }
+
+    applyIsolatedSelection(archiveRef, folderPath, count) {
+        if (!folderPath) return;
+        this.removeArchiveFromWorkspace(archiveRef);
+        this.selectedFolders.add(folderPath);
+        this.isolatedFolders.add(folderPath);
+        this.pendingAutoInspectFolderPath = folderPath;
+        const archiveName = String(archiveRef || '').split(/[\\/]/).pop() || archiveRef;
+        showBundleStatus('success', window._t('bundle_isolate_success', count || 0, archiveName));
+        this.refresh();
+    }
+
     resetInspector() {
         this.clearInspectorLoadTimeout();
         this.inspectedBa2Path = '';
+        this.inspectedResolvedPath = '';
         this.inspectedFolderPath = '';
         this.ba2Contents = [];
         this.inspectorArchiveType = '';
@@ -857,6 +1747,9 @@ export class BundleManager {
     clearPreview() {
         this.disposeMeshViewer();
         this.disposeAudioPlayer();
+        this._textView?.destroy();
+        this._textView = null;
+        this._textViewPath = '';
         this.previewPath = '';
         this.previewResult = null;
         this.previewLoading = false;
@@ -870,6 +1763,7 @@ export class BundleManager {
             this._meshViewer.dispose();
             this._meshViewer = null;
         }
+        this._meshAnimToggle = null;
     }
 
     disposeAudioPlayer() {
@@ -914,7 +1808,7 @@ export class BundleManager {
             if (playIcon) playIcon.hidden = playing;
             if (pauseIcon) pauseIcon.hidden = !playing;
             const label = window._t(playing ? 'preview_audio_pause' : 'preview_audio_play');
-            playBtn.title = `${label} (Space)`;
+            playBtn.title = window._t('preview_shortcut_space', label);
             playBtn.setAttribute('aria-label', label);
         };
         const renderMuteState = () => {
@@ -1028,11 +1922,16 @@ export class BundleManager {
             if (event.code !== 'Space') return;
             if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
             if (window.app?.currentSection !== 'bundle') return;
-            if (!this._audioToggle) return;
-            if (!document.getElementById('ba2-preview-audio')) return;
             const target = event.target;
             if (target && typeof target.closest === 'function'
                 && target.closest('input, textarea, select, [contenteditable], button')) return;
+            if (this._meshAnimToggle && document.getElementById('ba2-mesh-anim')) {
+                event.preventDefault();
+                this._meshAnimToggle();
+                return;
+            }
+            if (!this._audioToggle) return;
+            if (!document.getElementById('ba2-preview-audio')) return;
             event.preventDefault();
             this._audioToggle();
         }, { signal: this._audioKeyAbort.signal });
@@ -1132,39 +2031,163 @@ export class BundleManager {
         }
     }
 
-    previewFile(path) {
+    getPreviewReadTarget(path) {
+        const archiveKey = this.getArchiveSelectionKey();
+        const replacement = archiveKey ? this.getReplacement(archiveKey, path) : '';
+        if (replacement) {
+            const sepIndex = Math.max(replacement.lastIndexOf('\\'), replacement.lastIndexOf('/'));
+            return {
+                source: replacement.slice(0, sepIndex),
+                mode: 'folder',
+                path: replacement.slice(sepIndex + 1),
+                archive: archiveKey,
+                entryPath: path
+            };
+        }
+        const folder = Boolean(this.inspectedFolderPath);
+        return {
+            source: folder ? this.inspectedFolderPath : this.toHostArchiveRef(this.inspectedBa2Path),
+            mode: folder ? 'folder' : 'ba2',
+            path,
+            archive: archiveKey,
+            entryPath: path
+        };
+    }
+
+    confirmDiscardTextEdit(message = window._t('bundle_preview_unsaved_confirm')) {
+        return window.appConfirm({
+            title: window._t('bundle_preview_unsaved'),
+            message,
+            okText: window._t('bundle_preview_discard'),
+            cancelText: window._t('cancel'),
+            danger: true
+        });
+    }
+
+    reloadPreviewIfFileChanged(data) {
+        if (!this.previewPath || this._textView?.isDirty()) return;
+        const target = this.getPreviewReadTarget(this.previewPath);
+        if (target.mode !== 'folder') return;
+        const changed = this.normalizeBa2InternalPath(data?.path || '');
+        const current = this.normalizeBa2InternalPath(target.path || '');
+        if (!changed || changed !== current) return;
+        if (data?.source && this.normalizeFolderKey(data.source) !== this.normalizeFolderKey(target.source)) return;
+        this.previewFile(this.previewPath, { quiet: true });
+    }
+
+    previewFile(path, { force = false, quiet = false } = {}) {
         if (!path || !window.chrome?.webview) return;
         const archiveKey = this.getArchiveSelectionKey();
         if (!archiveKey) return;
+        if (!force && this._textView?.isDirty()) {
+            if (path === this.previewPath) return;
+            void this.confirmDiscardTextEdit().then(ok => {
+                if (!ok) return;
+                this._textView?.destroy();
+                this._textView = null;
+                this.previewFile(path, { force: true });
+            });
+            return;
+        }
 
-        const cacheKey = `${archiveKey}|${path}`;
+        const replacement = this.getReplacement(archiveKey, path);
+        const cacheKey = replacement ? `${archiveKey}|${path}|${replacement}` : `${archiveKey}|${path}`;
+        const modelCacheKey = this._meshModelRequest ? `${cacheKey}|model` : cacheKey;
+        this.previewCacheKey = modelCacheKey;
         this._audioAutoplay = false;
         this.previewPath = path;
-        this.previewMaterialZoom = null;
-        this._meshWireframe = false;
-        const cached = this.previewCache.get(cacheKey);
+        if (!quiet) {
+            this.previewMaterialZoom = null;
+            this._meshWireframe = false;
+            if (!this._meshModelRequest) {
+                this._meshModelVisible = false;
+                this._meshModelLoading = false;
+            }
+        }
+        const target = this.getPreviewReadTarget(path);
+        // Loose files change on disk. Replaying the last decode is what kept the old emote
+        // on screen until the app was restarted.
+        const liveDisk = target.mode === 'folder';
+        if (liveDisk) this.previewCache.delete(modelCacheKey);
+        const cached = liveDisk ? null : this.previewCache.get(modelCacheKey);
         if (cached) {
             this.previewLoading = false;
             this.previewResult = cached;
+            if (this._meshModelRequest) {
+                this._meshModelVisible = true;
+                this._meshModelLoading = false;
+                this._meshModelRequest = false;
+            }
             this.previewRequestId += 1;
             this.updatePreviewPane();
             return;
         }
 
-        this.previewLoading = true;
-        this.previewResult = null;
+        const keepVisible = Boolean(quiet && this.previewResult);
+        this.previewLoading = !keepVisible;
+        if (!keepVisible) this.previewResult = null;
         this.previewRequestId += 1;
         const requestId = this.previewRequestId;
-        this.updatePreviewPane();
+        if (!keepVisible) this.updatePreviewPane();
 
-        const folder = Boolean(this.inspectedFolderPath);
-        window.chrome.webview.postMessage({
+        const payload = {
             type: 'BUNDLE_PREVIEW_FILE',
-            source: folder ? this.inspectedFolderPath : this.resolveArchivePath(this.inspectedBa2Path),
-            mode: folder ? 'folder' : 'ba2',
-            path,
+            source: target.source,
+            mode: target.mode,
+            path: target.path,
             requestId
+        };
+        if (this._meshModelRequest) payload.model = true;
+        window.chrome.webview.postMessage(payload);
+    }
+
+    openPreviewPopout() {
+        if (!window.chrome?.webview || !this.previewPath) return;
+        const target = this.getPreviewReadTarget(this.previewPath);
+        window.chrome.webview.postMessage({
+            type: 'OPEN_BUNDLE_PREVIEW_POPOUT',
+            ...target,
+            name: this.previewPath.split('/').pop()
         });
+    }
+
+    mountTextView() {
+        const prevState = this._textView?.getEditState() || null;
+        const prevPath = this._textViewPath;
+        this._textView?.destroy();
+        this._textView = null;
+        this._textViewPath = '';
+        const pane = document.querySelector('.ba2-preview-pane');
+        if (!pane || this.previewLoading || this.previewResult?.kind !== 'text' || !this.previewPath) return;
+        this._textViewPath = this.previewPath;
+        this._textView = mountBa2TextView(pane, {
+            idPrefix: 'ba2-text-font',
+            target: this.getPreviewReadTarget(this.previewPath),
+            post: (msg) => window.chrome?.webview?.postMessage(msg),
+            confirm: (message) => this.confirmDiscardTextEdit(message),
+            onStatus: (type, text) => showBundleStatus(type, text),
+            onPopout: () => this.openPreviewPopout(),
+            initialEdit: prevPath === this.previewPath ? prevState : null
+        });
+    }
+
+    handleTextEditMessage(data) {
+        const handled = this._textView?.handleMessage(data);
+        if (data.type !== 'BUNDLE_TEXT_EDIT_SAVED' || !data.archive || !data.path || !data.source) return;
+        const norm = this.normalizeBa2InternalPath(data.path);
+        this.rememberOverlaySourceSize(data.source, data.size);
+        this.setReplacement(data.archive, norm, data.source);
+        showBundleStatus('success', window._t('bundle_preview_saved', norm.split('/').pop()));
+        if (!this.isCreating) return;
+        if (data.archive === this.getArchiveSelectionKey()) {
+            this.afterSelectionChange();
+            // Only re-preview when the save came from the other window; local saves stay put.
+            if (!handled && this.previewPath === norm && !this._textView?.isDirty()) {
+                this.previewFile(norm, { force: true });
+            }
+        } else {
+            this.updateStagedPanelBadges();
+        }
     }
 
     extractPreviewFile() {
@@ -1173,7 +2196,7 @@ export class BundleManager {
         this._closeFileEntryContextMenu();
         window.chrome.webview.postMessage({
             type: 'BUNDLE_EXTRACT',
-            archive: this.resolveArchivePath(this.inspectedBa2Path),
+            archive: this.toHostArchiveRef(this.inspectedBa2Path),
             paths: [this.previewPath],
             single: true
         });
@@ -1188,6 +2211,10 @@ export class BundleManager {
     bindPreviewEvents() {
         const extractBtn = document.getElementById('btn-preview-extract');
         if (extractBtn) extractBtn.onclick = () => this.extractPreviewFile();
+        document.querySelectorAll('.ba2-preview-footer [data-preview-popout]').forEach(btn => {
+            btn.onclick = () => this.openPreviewPopout();
+        });
+        this.mountTextView();
 
         document.querySelectorAll('[data-material-texture]').forEach(btn => {
             btn.onclick = () => {
@@ -1212,8 +2239,37 @@ export class BundleManager {
                 if (this._meshViewer) this._meshViewer.setWireframe(this._meshWireframe);
             };
         }
+        const modelBtn = document.getElementById('btn-mesh-model');
+        if (modelBtn) {
+            modelBtn.onclick = () => this.toggleMeshModel();
+        }
         const resetBtn = document.getElementById('btn-mesh-reset');
         if (resetBtn) resetBtn.onclick = () => this._meshViewer?.reset();
+        this.bindMeshAnimControls();
+    }
+
+    toggleMeshModel() {
+        if (this._meshModelLoading || !this.previewPath) return;
+        const mesh = this.previewResult?.mesh;
+        const hasModel = Array.isArray(mesh?.shapes) && mesh.shapes.length > 0;
+        if (this._meshModelVisible && hasModel) {
+            this._meshModelVisible = false;
+            this.updatePreviewPane();
+            return;
+        }
+        if (hasModel) {
+            this._meshModelVisible = true;
+            this.updatePreviewPane();
+            return;
+        }
+        this._meshModelRequest = true;
+        this._meshModelLoading = true;
+        const btn = document.getElementById('btn-mesh-model');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = window._t('preview_hkx_model_loading');
+        }
+        this.previewFile(this.previewPath, { force: true, quiet: true });
     }
 
     mountMeshViewer() {
@@ -1221,8 +2277,97 @@ export class BundleManager {
         const stage = document.getElementById('ba2-mesh-stage');
         const mesh = this.previewResult?.kind === 'mesh' ? this.previewResult.mesh : null;
         if (!stage || !mesh) return;
-        this._meshViewer = mountMeshViewer(stage, mesh);
+        const showModel = Boolean(this._meshModelVisible) && Array.isArray(mesh.shapes) && mesh.shapes.length > 0;
+        const display = showModel
+            ? { ...mesh, bones: null }
+            : { ...mesh, shapes: [], textures: [], vertexCount: 0, triangleCount: 0 };
+        this._meshViewer = mountMeshViewer(stage, display);
         if (this._meshWireframe) this._meshViewer.setWireframe(true);
+        this.bindMeshAnimControls();
+    }
+
+    bindMeshAnimControls() {
+        const viewer = this._meshViewer;
+        const root = document.getElementById('ba2-mesh-anim');
+        if (!viewer?.hasAnimation || !root) {
+            this._meshAnimToggle = null;
+            return;
+        }
+        const playBtn = document.getElementById('ba2-mesh-anim-play');
+        const playIcon = document.getElementById('ba2-mesh-anim-icon-play');
+        const pauseIcon = document.getElementById('ba2-mesh-anim-icon-pause');
+        const seek = document.getElementById('ba2-mesh-anim-seek');
+        const timeLabel = document.getElementById('ba2-mesh-anim-time');
+        const loopBtn = document.getElementById('ba2-mesh-anim-loop');
+        const duration = viewer.getDuration();
+
+        const formatTime = (sec) => {
+            const total = Math.max(0, Math.floor(sec || 0));
+            const m = Math.floor(total / 60);
+            const s = total % 60;
+            return `${m}:${String(s).padStart(2, '0')}`;
+        };
+
+        const renderPlay = () => {
+            const playing = viewer.isPlaying();
+            if (playIcon) playIcon.hidden = playing;
+            if (pauseIcon) pauseIcon.hidden = !playing;
+            if (playBtn) {
+                const label = window._t(playing ? 'preview_audio_pause' : 'preview_audio_play');
+                playBtn.title = window._t('preview_shortcut_space', label);
+                playBtn.setAttribute('aria-label', label);
+            }
+        };
+
+        const renderProgress = () => {
+            const t = viewer.getTime();
+            const pct = duration > 0 ? Math.min(100, Math.max(0, (t / duration) * 100)) : 0;
+            if (seek) {
+                seek.value = String(Math.round(pct * 10));
+                seek.style.setProperty('--value', `${pct}%`);
+            }
+            if (timeLabel) timeLabel.textContent = `${formatTime(t)} / ${formatTime(duration)}`;
+        };
+
+        const toggle = () => {
+            viewer.toggle();
+            renderPlay();
+            if (viewer.isPlaying()) startProgress();
+        };
+
+        let progressRaf = 0;
+        const startProgress = () => {
+            if (progressRaf) return;
+            const tick = () => {
+                renderProgress();
+                if (viewer.isPlaying()) progressRaf = requestAnimationFrame(tick);
+                else progressRaf = 0;
+            };
+            progressRaf = requestAnimationFrame(tick);
+        };
+
+        if (playBtn) playBtn.onclick = () => toggle();
+        if (loopBtn) {
+            loopBtn.onclick = () => {
+                const next = !viewer.isLooping();
+                viewer.setLoop(next);
+                loopBtn.classList.toggle('ba2-audio-icon-btn--on', next);
+                loopBtn.setAttribute('aria-pressed', next ? 'true' : 'false');
+            };
+        }
+        if (seek) {
+            seek.oninput = () => {
+                const pct = Number(seek.value) / 1000;
+                viewer.seek(pct * duration);
+                renderProgress();
+            };
+        }
+
+        this._meshAnimToggle = toggle;
+        this.ensureAudioSpaceHandler();
+        renderPlay();
+        renderProgress();
+        if (viewer.isPlaying()) startProgress();
     }
 
     updatePreviewPane() {
@@ -1298,7 +2443,7 @@ export class BundleManager {
         this.scheduleInspectorLoadTimeout(path, 'ba2');
         window.chrome.webview.postMessage({
             type: 'BUNDLE_LIST_BA2',
-            path: this.resolveArchivePath(path)
+            path: this.toHostArchiveRef(path)
         });
     }
 
@@ -1328,11 +2473,16 @@ export class BundleManager {
                 return;
             }
             this.clearInspectorLoadTimeout();
-            this.inspectedBa2Path = path || this.inspectedBa2Path;
+            if (path && (!this.inspectedBa2Path || this.normalizeArchiveKey(this.inspectedBa2Path) !== this.normalizeArchiveKey(path))) {
+                this.inspectedBa2Path = path;
+            }
+            this.inspectedResolvedPath = data.resolvedPath || '';
             this.inspectedFolderPath = '';
-            this.ba2Contents = Array.isArray(data.entries) ? data.entries : [];
+            const archiveKeyHint = this.normalizeArchiveKey(path || this.inspectedBa2Path);
+            const filteredBa2 = this.applyRemovedFilterToContents(archiveKeyHint, Array.isArray(data.entries) ? data.entries : []);
+            this.ba2Contents = filteredBa2.entries;
             this.inspectorArchiveType = data.archiveType || '';
-            this.inspectorFileCount = data.fileCount ?? this.ba2Contents.length;
+            this.inspectorFileCount = Math.max(0, (data.fileCount ?? (Array.isArray(data.entries) ? data.entries.length : 0)) - filteredBa2.removedCount);
             this.inspectorLoading = false;
             const archiveKey = this.getArchiveSelectionKey();
             if (archiveKey && this.ba2Contents.length) {
@@ -1358,13 +2508,20 @@ export class BundleManager {
             this.clearInspectorLoadTimeout();
             this.inspectedFolderPath = path || this.inspectedFolderPath;
             this.inspectedBa2Path = '';
-            this.ba2Contents = Array.isArray(data.entries) ? data.entries : [];
+            const folderKeyHint = this.normalizeFolderKey(path || this.inspectedFolderPath);
+            const filteredFolder = this.applyRemovedFilterToContents(folderKeyHint, Array.isArray(data.entries) ? data.entries : []);
+            this.ba2Contents = filteredFolder.entries;
             this.inspectorArchiveType = '';
-            this.inspectorFileCount = data.fileCount ?? this.ba2Contents.length;
+            this.inspectorFileCount = Math.max(0, (data.fileCount ?? (Array.isArray(data.entries) ? data.entries.length : 0)) - filteredFolder.removedCount);
             this.inspectorLoading = false;
             const folderKey = this.getArchiveSelectionKey();
             if (folderKey && this.ba2Contents.length) {
                 this.initArchiveSelection(folderKey, this.ba2Contents);
+                const dataPaths = new Map();
+                for (const entry of this.ba2Contents) {
+                    if (entry.dataPath) dataPaths.set(this.normalizeBa2InternalPath(entry.path), entry.dataPath);
+                }
+                this.folderDataPaths.set(folderKey, dataPaths);
             }
             this.ensureDefaultExpandedDirs();
             this.maybeAutoSwitchFormat(this.ba2Contents);
@@ -1375,12 +2532,24 @@ export class BundleManager {
             return;
         }
 
+        if (data.type === 'BUNDLE_PREVIEW_SOURCE_CHANGED') {
+            this.reloadPreviewIfFileChanged(data);
+            return;
+        }
+
         if (data.type === 'BUNDLE_FILE_PREVIEW') {
             if (Number(data.requestId) !== this.previewRequestId) return;
             this.previewLoading = false;
             this.previewResult = data;
-            if (this.previewPath && data.kind !== 'audio' && (!data.error || data.error === 'unsupported')) {
-                this.rememberPreview(`${this.getArchiveSelectionKey()}|${this.previewPath}`, data);
+            if (this._meshModelRequest) {
+                this._meshModelLoading = false;
+                this._meshModelRequest = false;
+                const shapes = data?.mesh?.shapes;
+                this._meshModelVisible = Array.isArray(shapes) && shapes.length > 0;
+            }
+            const liveDisk = this.getPreviewReadTarget(this.previewPath).mode === 'folder';
+            if (!liveDisk && this.previewPath && data.kind !== 'audio' && (!data.error || data.error === 'unsupported')) {
+                this.rememberPreview(this.previewCacheKey || `${this.getArchiveSelectionKey()}|${this.previewPath}`, data);
             }
             this.updatePreviewPane();
             return;
@@ -1395,6 +2564,8 @@ export class BundleManager {
     }
 
     updateFileEntryHeaderToolbar() {
+        const pathFooter = document.getElementById('file-entry-path-footer');
+        if (pathFooter) pathFooter.innerHTML = BundleRenderer.renderInspectorPathFooter(this);
         const headerToolbar = document.getElementById('file-entry-header-toolbar');
         if (!headerToolbar) return;
         this._inspectorMetaMinWidth = 0;
@@ -1445,10 +2616,12 @@ export class BundleManager {
             }
         }
 
+        const canIsolateOrExtract = this.canExtractSelection();
+        const isolateBtn = document.getElementById('btn-inspector-isolate');
+        if (isolateBtn) isolateBtn.disabled = !canIsolateOrExtract;
         const extractBtn = document.getElementById('btn-inspector-extract');
         if (extractBtn) {
-            const archiveKey = this.getArchiveSelectionKey();
-            extractBtn.disabled = !(archiveKey && this.getEffectiveSelectionPaths(archiveKey).length > 0);
+            extractBtn.disabled = !canIsolateOrExtract;
         }
 
         this._updateSelectionMenuItemStates();
@@ -1505,7 +2678,7 @@ export class BundleManager {
             if (!key) return;
             const total = this.ba2TotalPaths.get(key);
             const selected = this.getSelectedCount(key);
-            let badge = row.querySelector('.staged-partial-badge');
+            let badge = row.querySelector('.staged-partial-badge:not(.staged-replaced-badge)');
             if (total && selected < total) {
                 const text = window._t('staged_partial_files', selected, total);
                 if (!badge) {
@@ -1519,9 +2692,41 @@ export class BundleManager {
             }
         };
 
+        const applyReplacedBadge = (row, key) => {
+            const { replaced, added } = this.getOverlayCounts(key);
+            const body = row.querySelector('.bundle-staged-item-body');
+            let replacedBadge = row.querySelector('.staged-replaced-badge:not(.staged-added-badge)');
+            let addedBadge = row.querySelector('.staged-added-badge');
+
+            if (replaced > 0) {
+                if (!replacedBadge) {
+                    replacedBadge = document.createElement('div');
+                    replacedBadge.className = 'staged-partial-badge staged-replaced-badge';
+                    body?.appendChild(replacedBadge);
+                }
+                replacedBadge.textContent = window._t('bundle_replaced_count', replaced);
+            } else if (replacedBadge) {
+                replacedBadge.remove();
+            }
+
+            if (added > 0) {
+                if (!addedBadge) {
+                    addedBadge = document.createElement('div');
+                    addedBadge.className = 'staged-partial-badge staged-replaced-badge staged-added-badge';
+                    body?.appendChild(addedBadge);
+                }
+                addedBadge.textContent = window._t('bundle_added_count', added);
+            } else if (addedBadge) {
+                addedBadge.remove();
+            }
+        };
+
         document.querySelectorAll('.file-entry-staged-ba2').forEach(row => {
             const path = row.dataset.path;
-            if (path) applyBadge(row, this.normalizeArchiveKey(path));
+            if (!path) return;
+            const key = this.normalizeArchiveKey(path);
+            applyBadge(row, key);
+            applyReplacedBadge(row, key);
         });
 
         document.querySelectorAll('.file-entry-staged-folder').forEach(row => {
@@ -1531,6 +2736,7 @@ export class BundleManager {
     }
 
     afterSelectionChange() {
+        this.enforceReplacementSelections();
         this.updateInspectorPanel();
         this.updateStagedPanelBadges();
     }
@@ -1718,6 +2924,14 @@ export class BundleManager {
             };
         }
 
+        const isolateBtn = document.getElementById('btn-inspector-isolate');
+        if (isolateBtn) {
+            isolateBtn.onclick = () => {
+                if (isolateBtn.disabled) return;
+                this.isolateSelection();
+            };
+        }
+
         const extractBtn = document.getElementById('btn-inspector-extract');
         if (extractBtn) {
             extractBtn.onclick = () => {
@@ -1780,7 +2994,33 @@ export class BundleManager {
             try {
                 const data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
                 const bundle = window.app?.sections?.bundle;
-                if (!bundle || !bundle.isCreating) return;
+                if (data?.type === 'CONFIG_EDITOR_FONT_CHANGED') {
+                    const ms = window.app?.realData?.managerSettings;
+                    if (ms) {
+                        ms.configEditorFontSize = data.fontSize;
+                        ms.configEditorFontFamily = data.fontFamily;
+                    }
+                    bundle?._textView?.applyFont({ size: data.fontSize, family: data.fontFamily });
+                    return;
+                }
+                if (!bundle) return;
+                if (data?.type === 'BUNDLE_TEXT_EDIT_CONTENT'
+                    || data?.type === 'BUNDLE_TEXT_EDIT_SAVED'
+                    || data?.type === 'BUNDLE_TEXT_EDIT_SAVE_FAILED') {
+                    bundle.handleTextEditMessage(data);
+                    return;
+                }
+                if (!bundle.isCreating) return;
+
+                if (data.type === 'BUNDLE_REPLACEMENT_SELECTED' && data.path && data.source) {
+                    bundle.handleReplacementSelected(data);
+                    return;
+                }
+
+                if (data.type === 'BUNDLE_OVERLAY_FILES' && data.archive && Array.isArray(data.files)) {
+                    bundle.handleOverlayFiles(data);
+                    return;
+                }
 
                 if (data.type === 'FOLDER_SELECTED' && data.path) {
                     bundle.selectedFolders.add(data.path);
@@ -1789,19 +3029,96 @@ export class BundleManager {
                     return;
                 }
 
+                if (data.type === 'BUNDLE_LOOSE_STAGED') {
+                    bundle.handleLooseStaged(data);
+                    return;
+                }
+
+                if (data.type === 'BUNDLE_LOOSE_STAGE_FAILED') {
+                    bundle.handleLooseStageFailed(data);
+                    return;
+                }
+
+                if (data.type === 'BUNDLE_ISOLATED' && data.path) {
+                    bundle.applyIsolatedSelection(data.archive, data.path, data.count);
+                    return;
+                }
+
                 if (data.type === 'BUNDLE_FILES_DROPPED') {
                     const droppedFiles = Array.isArray(data.files) ? data.files.filter(Boolean) : [];
                     const droppedFolders = Array.isArray(data.folders) ? data.folders.filter(Boolean) : [];
+                    const replacements = Array.isArray(data.replacements) ? data.replacements : [];
+                    const unmatched = Array.isArray(data.unmatched) ? data.unmatched.filter(Boolean) : [];
                     droppedFiles.forEach(f => bundle.externalFiles.add(f));
-                    droppedFolders.forEach(f => bundle.selectedFolders.add(f));
-                    if (droppedFiles.length > 0) {
-                        bundle.pendingAutoInspectPath = droppedFiles[droppedFiles.length - 1];
-                    } else if (droppedFolders.length > 0) {
-                        bundle.pendingAutoInspectFolderPath = droppedFolders[droppedFolders.length - 1];
-                    }
-                    if (droppedFiles.length > 0 || droppedFolders.length > 0) {
-                        bundle.refresh();
-                    }
+                    void (async () => {
+                        let foldersHandled = false;
+                        if (droppedFolders.length > 0 && bundle.inspectedBa2Path) {
+                            foldersHandled = await bundle.offerMergeDroppedFolders(droppedFolders);
+                        }
+                        if (!foldersHandled) {
+                            droppedFolders.forEach(f => bundle.selectedFolders.add(f));
+                        }
+                        if (droppedFiles.length > 0) {
+                            bundle.pendingAutoInspectPath = droppedFiles[droppedFiles.length - 1];
+                        } else if (!foldersHandled && droppedFolders.length > 0) {
+                            bundle.pendingAutoInspectFolderPath = droppedFolders[droppedFolders.length - 1];
+                        }
+
+                        let replacedCount = 0;
+                        let touchedOpen = false;
+                        const openKey = bundle.getArchiveSelectionKey();
+                        for (const rep of replacements) {
+                            const source = rep?.source;
+                            if (!source) continue;
+                            const kind = String(rep.kind || '').toLowerCase();
+                            if (kind === 'ba2') {
+                                const archiveKey = bundle.normalizeArchiveKey(rep.archive);
+                                if (!archiveKey || !bundle.isStagedBa2Path(rep.archive)) continue;
+                                const norm = bundle.normalizeBa2InternalPath(rep.path);
+                                if (!norm) continue;
+                                bundle.rememberOverlaySourceSize(source, rep.size);
+                                bundle.setReplacement(archiveKey, norm, source);
+                                replacedCount++;
+                                if (archiveKey === openKey) {
+                                    touchedOpen = true;
+                                    if (bundle.previewPath === norm) bundle.previewFile(norm);
+                                }
+                            } else if (kind === 'folder') {
+                                const folderKey = bundle.normalizeFolderKey(rep.folder);
+                                if (!folderKey || !bundle.isStagedFolderPath(rep.folder)) continue;
+                                const norm = bundle.normalizeBa2InternalPath(rep.path);
+                                if (!norm) continue;
+                                bundle.rememberOverlaySourceSize(source, rep.size);
+                                bundle.setReplacement(folderKey, norm, source);
+                                if (rep.dataPath) {
+                                    if (!bundle.folderDataPaths.has(folderKey)) {
+                                        bundle.folderDataPaths.set(folderKey, new Map());
+                                    }
+                                    bundle.folderDataPaths.get(folderKey).set(norm, String(rep.dataPath).toLowerCase());
+                                }
+                                replacedCount++;
+                                if (folderKey === openKey) {
+                                    touchedOpen = true;
+                                    if (bundle.previewPath === norm) bundle.previewFile(norm);
+                                }
+                            }
+                        }
+                        if (replacedCount > 0) {
+                            if (touchedOpen) bundle.afterSelectionChange();
+                            else bundle.updateStagedPanelBadges();
+                            showBundleStatus('success', window._t('bundle_drop_replace_result', replacedCount));
+                        }
+                        if (unmatched.length > 0) {
+                            showBundleStatus(
+                                replacedCount > 0 ? 'info' : 'error',
+                                window._t('bundle_drop_replace_none', unmatched.join(', '))
+                            );
+                        }
+
+                        if (droppedFiles.length > 0 || (!foldersHandled && droppedFolders.length > 0)) {
+                            bundle.refresh();
+                        }
+                    })();
                 }
             } catch (_) { }
         });
@@ -1833,6 +3150,13 @@ export class BundleManager {
     }
 
     initGlobalHandlers() {
+        if (!window.handleEditBundle) {
+            window.handleEditBundle = (name) => {
+                document.querySelectorAll('.bundle-menu-dropdown').forEach(d => d.remove());
+                this.startEditBundle(name);
+            };
+        }
+
         if (!window.handleRenameBundle) {
             window.handleRenameBundle = async (name) => {
                 document.querySelectorAll('.bundle-menu-dropdown').forEach(d => d.remove());
@@ -1904,7 +3228,13 @@ export class BundleManager {
 
         if (!window.handleAddToBundle) {
             window.handleAddToBundle = (originalName) => {
+                if (this.isLooseModKey(originalName)) {
+                    this.stageLooseMod(originalName);
+                    showBundleStatus('success', window._t('added_to_workspace_banner'));
+                    return;
+                }
                 this.selectedMods.add(originalName);
+                for (const partner of this.getModPartners(originalName)) this.selectedMods.add(partner);
                 showBundleStatus('success', window._t('added_to_workspace_banner'));
                 this.refresh();
             };
@@ -1935,6 +3265,9 @@ export class BundleManager {
                     const escapedName = name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
                     menu.innerHTML = `
+                        <div class="bundle-menu-item" onclick="window.handleEditBundle('${escapedName}')">
+                            <i data-lucide="file-pen" style="width: 14px;"></i> ${window._t('edit_bundle')}
+                        </div>
                         <div class="bundle-menu-item" onclick="window.handleRenameBundle('${escapedName}')">
                             <i data-lucide="edit-2" style="width: 14px;"></i> ${window._t('rename')}
                         </div>
@@ -1973,6 +3306,16 @@ export class BundleManager {
                 const toggleAction = status === 'enabled' ? window._t('remove_from_list') : window._t('add_to_list');
                 const menu = document.createElement('div');
                 menu.className = 'bundle-menu-dropdown';
+
+                const itemEdit = document.createElement('div');
+                itemEdit.className = 'bundle-menu-item';
+                itemEdit.innerHTML = `<i data-lucide="file-pen" style="width: 14px;"></i> ${window._t('edit_bundle')}`;
+                itemEdit.onclick = (e) => {
+                    e.stopPropagation();
+                    menu.remove();
+                    this.startEditBundle(name);
+                };
+                menu.appendChild(itemEdit);
                 
                 const itemRename = document.createElement('div');
                 itemRename.className = 'bundle-menu-item';
@@ -2057,12 +3400,13 @@ export class BundleManager {
         const clearBtn = document.getElementById('btn-clear-workspace');
         const menuSelectAllBtn = document.getElementById('btn-menu-select-all');
         const menuDeselectAllBtn = document.getElementById('btn-menu-deselect-all');
+        const menuIsolateBtn = document.getElementById('btn-menu-isolate');
         const menuExtractBtn = document.getElementById('btn-menu-extract');
 
         if (nameInput) {
             const nameClear = document.getElementById('bundle-name-clear');
             const syncNameClear = () => {
-                if (nameClear) nameClear.hidden = !nameInput.value;
+                if (nameClear) nameClear.hidden = !nameInput.value || nameInput.disabled;
             };
             nameInput.addEventListener('input', (e) => {
                 this.bundleName = e.target.value.replace(/[^a-z0-9-_]/gi, '');
@@ -2138,6 +3482,13 @@ export class BundleManager {
             };
         }
 
+        if (menuIsolateBtn) {
+            menuIsolateBtn.onclick = () => {
+                if (menuIsolateBtn.disabled) return;
+                this.isolateSelection();
+            };
+        }
+
         if (menuExtractBtn) {
             menuExtractBtn.onclick = () => {
                 if (menuExtractBtn.disabled) return;
@@ -2156,28 +3507,20 @@ export class BundleManager {
         document.querySelectorAll('.picker-item').forEach(item => {
             item.onclick = (e) => {
                 const name = item.dataset.name;
+                if (this.isLooseModKey(name)) {
+                    if (this.looseStaged.has(name)) this.unstageLooseMod(name);
+                    else this.stageLooseMod(name);
+                    this.syncPickerSelection();
+                    return;
+                }
+
                 const isSelected = this.selectedMods.has(name);
-                
-                if (isSelected) {
-                    this.selectedMods.delete(name);
-                    item.classList.remove('selected');
-                } else {
-                    this.selectedMods.add(name);
-                    item.classList.add('selected');
+                const group = [name, ...this.getModPartners(name)];
+                for (const member of group) {
+                    if (isSelected) this.selectedMods.delete(member);
+                    else this.selectedMods.add(member);
                 }
-
-                const checkbox = item.querySelector('.picker-checkbox');
-                if (checkbox) {
-                    checkbox.style.border = this.selectedMods.has(name) ? '2px solid var(--primary-green)' : '2px solid rgba(255,255,255,0.2)';
-                    checkbox.style.background = this.selectedMods.has(name) ? 'var(--primary-green)' : 'transparent';
-                    checkbox.innerHTML = this.selectedMods.has(name) ? '<i data-lucide="check" style="width: 14px; color: #121212;"></i>' : '';
-                    if (window.lucide) window.lucide.createIcons();
-                }
-
-                const countBadge = document.getElementById('picker-count-badge');
-                if (countBadge) {
-                    countBadge.innerText = window._t('n_selected_badge', this.selectedMods.size);
-                }
+                this.syncPickerSelection();
             };
         });
 
@@ -2191,7 +3534,72 @@ export class BundleManager {
             btn.onclick = startBundlingClick;
         });
 
+        this._mountCreateBa2Info();
         this.updateWizardState();
+    }
+
+    _mountCreateBa2Info() {
+        if (this._bundleCreateInfoAbort) {
+            this._bundleCreateInfoAbort.abort();
+            this._bundleCreateInfoAbort = null;
+        }
+
+        const wrap = document.querySelector('.bundle-create-info-wrap');
+        const btn = document.getElementById('btn-create-ba2-info');
+        const popover = document.getElementById('create-ba2-info-popover');
+        if (!wrap || !btn || !popover) return;
+
+        this._bundleCreateInfoAbort = new AbortController();
+        const { signal } = this._bundleCreateInfoAbort;
+        let pinned = false;
+        let holdClosed = false;
+
+        const setOpen = (open) => {
+            popover.hidden = !open;
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            btn.classList.toggle('active', open);
+        };
+
+        const showIfAllowed = () => {
+            if (!holdClosed) setOpen(true);
+        };
+
+        wrap.addEventListener('mouseenter', showIfAllowed, { signal });
+        wrap.addEventListener('mouseleave', () => {
+            holdClosed = false;
+            if (!pinned && document.activeElement !== btn) setOpen(false);
+        }, { signal });
+        btn.addEventListener('focus', showIfAllowed, { signal });
+        btn.addEventListener('blur', () => {
+            holdClosed = false;
+            if (!pinned && !wrap.matches(':hover')) setOpen(false);
+        }, { signal });
+        btn.addEventListener('click', () => {
+            pinned = !pinned;
+            if (pinned) {
+                holdClosed = false;
+                setOpen(true);
+            } else {
+                holdClosed = true;
+                setOpen(false);
+            }
+        }, { signal });
+
+        document.addEventListener('click', (e) => {
+            if (!document.getElementById('btn-create-ba2-info')) return;
+            if (e.target.closest('.bundle-create-info-wrap')) return;
+            pinned = false;
+            holdClosed = false;
+            setOpen(false);
+        }, { signal });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape' || popover.hidden) return;
+            pinned = false;
+            holdClosed = true;
+            setOpen(false);
+            if (document.activeElement !== btn) btn.focus();
+        }, { signal });
     }
 
     _closeBundleActionsMenu() {
@@ -2254,12 +3662,15 @@ export class BundleManager {
         });
 
         const canSelectArchive = this.canUseArchiveSelection();
+        const canIsolateOrExtract = this.canExtractSelection();
         const menuSelectAllBtn = document.getElementById('btn-menu-select-all');
         const menuDeselectAllBtn = document.getElementById('btn-menu-deselect-all');
+        const menuIsolateBtn = document.getElementById('btn-menu-isolate');
         const menuExtractBtn = document.getElementById('btn-menu-extract');
         if (menuSelectAllBtn) menuSelectAllBtn.disabled = !canSelectArchive;
         if (menuDeselectAllBtn) menuDeselectAllBtn.disabled = !canSelectArchive;
-        if (menuExtractBtn) menuExtractBtn.disabled = !this.canExtractSelection();
+        if (menuIsolateBtn) menuIsolateBtn.disabled = !canIsolateOrExtract;
+        if (menuExtractBtn) menuExtractBtn.disabled = !canIsolateOrExtract;
         this._updateSelectionMenuItemStates();
     }
 
@@ -2284,16 +3695,23 @@ export class BundleManager {
 
             window.chrome.webview.postMessage(payload);
             
-            showBundleStatus('info', window._t('starting_bundle_banner', bundleName));
+            showBundleStatus('info', this.editingBundle
+                ? window._t('saving_bundle_banner', this.editingBundle.name)
+                : window._t('starting_bundle_banner', bundleName));
 
             this.isCreating = false;
+            this.exitEditMode();
             this.isPickingInternal = false;
+            // Leave isolated folders on disk until CreateBundle finishes copying; startup cleans leftovers.
+            this.discardAllIsolatedFolders({ deleteOnDisk: false });
             this.selectedMods.clear();
             this.externalFiles.clear();
             this.selectedFolders.clear();
             this.ba2Selections.clear();
             this.ba2TotalPaths.clear();
             this.ba2AllPaths.clear();
+            this.ba2Replacements.clear();
+            this.ba2Removed.clear();
             this.resetInspector();
 
             if (window.app && typeof window.app.replaceCurrentSectionContent === 'function') {

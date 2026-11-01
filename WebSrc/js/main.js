@@ -22,7 +22,7 @@ import {
 } from './utils/keybinds.js';
 
 import { translator } from './Translations.js';
-import { applyUiTheme, registerUserThemesFromHost, unregisterUserTheme, updateThemePreview, endThemePreview } from './utils/themeManager.js';
+import { applyUiTheme, registerUserThemesFromHost, unregisterUserTheme, updateThemePreview, endThemePreview, reportHeroBannerSize } from './utils/themeManager.js';
 import { DEFAULT_UI_THEME } from './themes/registry.js';
 import { refreshSharpLogos } from './utils/logoSharpen.js';
 import {
@@ -394,7 +394,8 @@ export class App {
 
         if (data.type === 'THEME_PREVIEW') {
             try {
-                updateThemePreview(data.css || '', data.logoUrl || '', data.layout || null);
+                updateThemePreview(data.css || '', data.logoUrl || '', data.layout || null, data.bannerUrl, data.bannerLayout || null);
+                requestAnimationFrame(() => reportHeroBannerSize());
             } catch (e) {
                 console.warn('[THEME] preview apply failed', e);
             }
@@ -593,7 +594,7 @@ export class App {
             return;
         }
 
-        if (data.type === 'BA2_CONTENTS' || data.type === 'GAME_BA2_LIST' || data.type === 'FOLDER_CONTENTS' || data.type === 'BUNDLE_FILE_PREVIEW') {
+        if (data.type === 'BA2_CONTENTS' || data.type === 'GAME_BA2_LIST' || data.type === 'FOLDER_CONTENTS' || data.type === 'BUNDLE_FILE_PREVIEW' || data.type === 'BUNDLE_PREVIEW_SOURCE_CHANGED') {
             const bundle = this.sections?.bundle;
             if (this.currentSection === 'bundle' && bundle?.isCreating && typeof bundle.handleInspectorMessage === 'function') {
                 bundle.handleInspectorMessage(data);
@@ -707,7 +708,7 @@ export class App {
              return;
         }
 
-        if (data.type === 'FILE_SELECTED' || data.type === 'FOLDER_SELECTED' || data.type === 'BUNDLE_FILES_DROPPED') {
+        if (data.type === 'FILE_SELECTED' || data.type === 'FOLDER_SELECTED' || data.type === 'BUNDLE_FILES_DROPPED' || data.type === 'BUNDLE_REPLACEMENT_SELECTED' || data.type === 'BUNDLE_OVERLAY_FILES') {
             return;
         }
 
@@ -842,12 +843,18 @@ export class App {
             'settings': 'settings'
         };
 
+        const bootLabels = {};
         Object.entries(navMappings).forEach(([section, key]) => {
             const navItem = document.querySelector(`[data-section="${section}"] .nav-label`);
             if (navItem) {
                 navItem.textContent = window._t(key);
+                bootLabels[section] = navItem.textContent;
             }
         });
+        try {
+            localStorage.setItem('f76_boot_nav_labels', JSON.stringify(bootLabels));
+            localStorage.setItem('f76_boot_bundle_header', window._t('bundle_studio_header'));
+        } catch {  }
 
         const endorseLabel = document.querySelector('#endorsement-nav-item .nav-label');
         if (endorseLabel) endorseLabel.textContent = window._t('endorse_on_nexus').split(' ')[0] || 'Endorse';
@@ -855,6 +862,11 @@ export class App {
         const laterLabel = document.getElementById('endorsement-later');
         if (laterLabel) laterLabel.textContent = window._t('maybe_later');
         this.syncUpdateNavBadge();
+
+        const titleEl = document.getElementById('section-title');
+        if (titleEl && this.currentSection && !this.sections.mods?.isConfigEditorOpen?.()) {
+            titleEl.textContent = this.formatSectionTitle(this.currentSection);
+        }
     }
 
     syncTweaksPendingBanner() {
@@ -1170,13 +1182,26 @@ export class App {
         const id = String(sectionId || '').trim();
         if (!id) return '';
 
-        switch (id) {
-            case 'config':
-                return 'Configs';
-            case 'pipboy':
-                return 'Pip-Boy';
-            default:
-                break;
+        const titleKeys = {
+            dashboard: 'dashboard',
+            mods: 'mods',
+            config: 'config',
+            tweaks: 'tweaks',
+            pipboy: 'pip_boy',
+            profiles: 'profiles',
+            logs: 'logs',
+            update: 'update',
+            settings: 'settings',
+            bundle: 'bundle_studio_header'
+        };
+
+        const key = titleKeys[id];
+        if (key) {
+            const translated = window._t?.(key);
+            if (translated && translated !== key) return translated;
+            if (id === 'bundle') return 'Bundle · Build · Create';
+            if (id === 'config') return 'Configs';
+            if (id === 'pipboy') return 'Pip-Boy';
         }
 
         return id

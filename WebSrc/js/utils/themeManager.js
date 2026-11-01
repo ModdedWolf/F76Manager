@@ -4,6 +4,7 @@ import { setSharpLogo, refreshSharpLogos } from './logoSharpen.js';
 
 const STORAGE_KEY = 'f76_ui_theme';
 const DEFAULT_LOGO = 'assets/Icon-nobg.png';
+const DEFAULT_HERO_BANNER = 'assets/dashboard_hero.jpg';
 const VHOST = 'https://f76manager.app/';
 const PREVIEW_THEME_ID = '__draft';
 const PREVIEW_STYLE_ID = 'user-theme-__draft';
@@ -25,6 +26,27 @@ function assetVersion() {
     return m ? m[1] : String(Date.now());
 }
 
+export const DEFAULT_BANNER_LAYOUT = Object.freeze({ x: 50, y: 35, zoom: 1 });
+
+export function normalizeBannerLayout(layout) {
+    const num = (v, lo, hi, def) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : def;
+    };
+    const L = layout || {};
+    return {
+        x: num(L.x, 0, 100, DEFAULT_BANNER_LAYOUT.x),
+        y: num(L.y, 0, 100, DEFAULT_BANNER_LAYOUT.y),
+        zoom: num(L.zoom, 1, 4, DEFAULT_BANNER_LAYOUT.zoom),
+    };
+}
+
+export function heroBannerStyle(layout) {
+    const L = normalizeBannerLayout(layout);
+    const pos = `${L.x}% ${L.y}%`;
+    return `object-position: ${pos}; transform-origin: ${pos}; transform: scale(${L.zoom});`;
+}
+
 function withAssetVersion(url) {
     if (!url || url.startsWith('data:')) return url;
     const sep = url.includes('?') ? '&' : '?';
@@ -44,6 +66,7 @@ export function registerUserThemesFromHost(themes, { authoritative = false } = {
     const previous = new Map(userThemesById);
     userThemesById.clear();
     const bootCss = typeof window !== 'undefined' ? window.__F76_USER_THEME_CSS : null;
+    const bootBanners = typeof window !== 'undefined' ? window.__F76_USER_THEME_BANNERS : null;
     if (authoritative) pruneRemovedUserThemes(previous, themes, bootCss);
     for (const t of themes) {
         if (!t?.id) continue;
@@ -53,6 +76,8 @@ export function registerUserThemesFromHost(themes, { authoritative = false } = {
             id: t.id,
             displayName: t.displayName || prev?.displayName || t.id,
             logo: t.logo || prev?.logo || `user-theme-logo/${t.id}`,
+            banner: t.banner !== undefined ? t.banner : (prev?.banner || bootBanners?.[t.id]?.banner || ''),
+            bannerLayout: normalizeBannerLayout(t.bannerLayout || prev?.bannerLayout || bootBanners?.[t.id]?.bannerLayout),
             css: t.css || prev?.css || bootCss?.[t.id] || '',
         });
     }
@@ -61,7 +86,7 @@ export function registerUserThemesFromHost(themes, { authoritative = false } = {
             const entry = userThemesById.get(id);
             if (entry && !entry.css) entry.css = css;
             else if (!entry && css) {
-                userThemesById.set(id, { id, displayName: id, logo: `user-theme-logo/${id}`, css });
+                userThemesById.set(id, { id, displayName: id, logo: `user-theme-logo/${id}`, banner: '', bannerLayout: normalizeBannerLayout(null), css });
             }
         }
     }
@@ -181,6 +206,41 @@ function applyThemeLogo(themeId) {
     refreshSharpLogos();
 }
 
+export function getHeroBannerUrl() {
+    if (previewState && previewState.bannerUrl !== undefined) {
+        return previewState.bannerUrl
+            ? toVirtualHostUrl(previewState.bannerUrl)
+            : toVirtualHostUrl(DEFAULT_HERO_BANNER);
+    }
+    const themeId = getAppliedThemeId();
+    const user = themeId ? userThemesById.get(themeId) : null;
+    if (user?.banner) return toVirtualHostUrl(user.banner);
+    return toVirtualHostUrl(DEFAULT_HERO_BANNER);
+}
+
+export function getBannerForTheme(themeId) {
+    const user = themeId ? userThemesById.get(themeId) : null;
+    if (!user?.banner) return null;
+    return { url: toVirtualHostUrl(user.banner), layout: normalizeBannerLayout(user.bannerLayout) };
+}
+
+export function getHeroBannerLayout() {
+    if (previewState && previewState.bannerLayout) return normalizeBannerLayout(previewState.bannerLayout);
+    const themeId = getAppliedThemeId();
+    const user = themeId ? userThemesById.get(themeId) : null;
+    return normalizeBannerLayout(user?.banner ? user.bannerLayout : null);
+}
+
+export function applyHeroBanner(root = document) {
+    const url = getHeroBannerUrl();
+    const next = url.startsWith('data:') ? url : withAssetVersion(url);
+    const style = heroBannerStyle(getHeroBannerLayout());
+    root.querySelectorAll('.hero-img').forEach((img) => {
+        if (img.getAttribute('src') !== next) img.src = next;
+        img.style.cssText = style;
+    });
+}
+
 export function getUiTheme() {
     if (previewState) return PREVIEW_THEME_ID;
     const fromDom = document.documentElement.dataset.theme;
@@ -203,6 +263,7 @@ export function applyUiTheme(id) {
     const user = userThemesById.get(themeId);
     if (user?.css) ensureUserThemeStyle(themeId, user.css);
     applyThemeLogo(themeId);
+    applyHeroBanner();
     try {
         localStorage.setItem(STORAGE_KEY, themeId);
     } catch {
@@ -298,25 +359,28 @@ export function buildDraftThemeCss(themeId, tokens, logoLayout) {
     return lines.join('\n');
 }
 
-export function beginThemePreview(css, logoUrl, layout) {
+export function beginThemePreview(css, logoUrl, layout, bannerUrl, bannerLayout) {
     if (!previewState) {
         const logoEl = document.getElementById('app-logo');
         previewState = {
             previousThemeId: document.documentElement.dataset.theme || getUiTheme(),
             previousLogoSrc: logoEl?.getAttribute('src') || null,
+            bannerUrl: undefined,
+            bannerLayout: null,
         };
         if (previewState.previousThemeId === PREVIEW_THEME_ID) {
             previewState.previousThemeId = DEFAULT_UI_THEME;
         }
     }
-    updateThemePreview(css, logoUrl, layout);
+    updateThemePreview(css, logoUrl, layout, bannerUrl, bannerLayout);
 }
 
-export function updateThemePreview(css, logoUrl, layout) {
+export function updateThemePreview(css, logoUrl, layout, bannerUrl, bannerLayout) {
     if (!previewState) {
-        beginThemePreview(css, logoUrl, layout);
+        beginThemePreview(css, logoUrl, layout, bannerUrl, bannerLayout);
         return;
     }
+    if (bannerLayout) previewState.bannerLayout = normalizeBannerLayout(bannerLayout);
     ensureUserThemeStyle(PREVIEW_THEME_ID, css || '');
     document.documentElement.dataset.theme = PREVIEW_THEME_ID;
     clearInlineLogoVars();
@@ -326,16 +390,49 @@ export function updateThemePreview(css, logoUrl, layout) {
     if (logoEl && logoUrl) {
         setSharpLogo(logoEl, withAssetVersion(logoUrl));
     }
+    if (bannerUrl !== undefined) previewState.bannerUrl = bannerUrl || '';
+    applyHeroBanner();
     postWindowChromeColors();
+}
+
+let lastHeroSizeKey = '';
+let heroResizeTimer = null;
+let heroResizeBound = false;
+
+export function reportHeroBannerSize() {
+    if (!heroResizeBound && typeof window !== 'undefined') {
+        heroResizeBound = true;
+        window.addEventListener('resize', () => {
+            if (!previewState) return;
+            clearTimeout(heroResizeTimer);
+            heroResizeTimer = setTimeout(() => reportHeroBannerSize(), 150);
+        });
+    }
+    const el = document.querySelector('#content-area .hero-banner');
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+    if (width <= 0 || height <= 0) return;
+    const key = `${width}x${height}`;
+    if (key === lastHeroSizeKey) return;
+    lastHeroSizeKey = key;
+    try {
+        window.chrome?.webview?.postMessage({ type: 'HERO_BANNER_SIZE', width, height });
+    } catch {  }
 }
 
 export function endThemePreview({ restore = true } = {}) {
     const state = previewState;
     previewState = null;
+    lastHeroSizeKey = '';
     const styleEl = document.getElementById(PREVIEW_STYLE_ID);
     if (styleEl) styleEl.remove();
 
-    if (!restore || !state) return;
+    if (!restore || !state) {
+        applyHeroBanner();
+        return;
+    }
 
     const themeId = isValidUiTheme(state.previousThemeId) && state.previousThemeId !== PREVIEW_THEME_ID
         ? state.previousThemeId

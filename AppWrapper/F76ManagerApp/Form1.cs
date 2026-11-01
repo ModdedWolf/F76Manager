@@ -51,9 +51,10 @@ public partial class Form1 : Form, IMessageFilter
 
     private WebView2? webView;
     private bool _webViewRecoveryAttempted = false;
+    private int _webViewRendererReloadCount;
     private bool _ipcServerStarted;
     private bool _ipcHandleCreatedHooked;
-    public const string CurrentVersion = "1.1.1";
+    public const string CurrentVersion = "1.1.2";
 
     public static string GetRunningProductVersion()
     {
@@ -452,7 +453,7 @@ public partial class Form1 : Form, IMessageFilter
         {
              e.Cancel = true;
              this.Hide();
-             trayIcon?.ShowBalloonTip(3000, "Fallout 76 Manager", "The application is still running in the system tray.", ToolTipIcon.Info);
+             trayIcon?.ShowBalloonTip(3000, "F76 Manager", "The application is still running in the system tray.", ToolTipIcon.Info);
              return;
         }
 
@@ -502,6 +503,8 @@ public partial class Form1 : Form, IMessageFilter
         }
         catch { }
         CloseLogsPopout();
+        ClosePreviewPopout();
+        StopPreviewFolderWatch();
         CloseThemeCreator();
         
         if (this.WindowState == FormWindowState.Maximized)
@@ -615,6 +618,7 @@ public partial class Form1 : Form, IMessageFilter
             Border = border,
         };
         NotifyLogsPopoutTheme();
+        NotifyPreviewPopoutTheme();
     }
 
     private void InitializeTrayIcon()
@@ -641,7 +645,7 @@ public partial class Form1 : Form, IMessageFilter
         {
             Icon = trayImage,
             Visible = true,
-            Text = "Fallout 76 Manager",
+            Text = "F76 Manager",
             ContextMenuStrip = trayContextMenu
         };
         trayIcon.DoubleClick += TrayIcon_DoubleClick;

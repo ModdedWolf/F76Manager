@@ -169,6 +169,17 @@ namespace F76ManagerApp.Managers
         public static string LiveBundlesPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Bundles");
         public static string PtsBundlesPath => Path.Combine(PtsRootFolder, "Bundles");
         public static string BundlesPath => IsPts ? PtsBundlesPath : LiveBundlesPath;
+
+        /// <summary>
+        /// Creations are one shared library. Live is where new bundles are saved.
+        /// PTS/Bundles is still scanned so a creation already stored there keeps showing.
+        /// </summary>
+        public static IEnumerable<string> CreationBundleDirectories()
+        {
+            yield return LiveBundlesPath;
+            if (!string.Equals(PtsBundlesPath, LiveBundlesPath, StringComparison.OrdinalIgnoreCase))
+                yield return PtsBundlesPath;
+        }
         public static string LiveDisabledModsPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Disabled Mods");
         public static string PtsDisabledModsPath => Path.Combine(PtsRootFolder, "Disabled Mods");
         public static string DisabledModsPath => IsPts ? PtsDisabledModsPath : LiveDisabledModsPath;
@@ -177,6 +188,7 @@ namespace F76ManagerApp.Managers
         public static string ManagedStagingStringsPath => Path.Combine(ManagedStagingDataPath, "Strings");
         public static string ManagedStagingGameRootPath => Path.Combine(ManagedStagingPath, "GameRoot");
         public static string LegacyManagedStagingPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Managed Staging", "Data");
+        public static string BundleIsolatePath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Bundle Workspace");
 
         public static string PluginsFilePath => Path.Combine(LocalAppDataPath, "plugins.txt");
         public static string GlobalStatsFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "F76Manager", "stats.json");

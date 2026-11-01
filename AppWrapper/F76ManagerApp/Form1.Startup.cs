@@ -196,15 +196,11 @@ public partial class Form1
 
 
 
-            MessageBox.Show(
+            ShowStartupError(
 
-                $"Fallout 76 Manager failed to start:\r\n\r\n{ex.Message}",
+                $"F76 Manager failed to start:\r\n\r\n{ex.Message}",
 
-                "Startup Error",
-
-                MessageBoxButtons.OK,
-
-                MessageBoxIcon.Error);
+                "Startup Error");
 
         }
 
@@ -422,7 +418,11 @@ public partial class Form1
 
         _configManager = new GameConfigManager(LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)));
 
-        _modManager = new ModManager(_configManager, LogActivity, (t, m) => this.Invoke(() => SendStatusMessage(t, m)));
+        _modManager = new ModManager(
+            _configManager,
+            LogActivity,
+            (t, m) => this.Invoke(() => SendStatusMessage(t, m)),
+            (t, m, key, args) => this.Invoke(() => SendStatusMessage(t, m, key, args)));
 
         _conflictManager = new ConflictManager(LogActivity);
 
@@ -448,7 +448,13 @@ public partial class Form1
 
             _modManager.ToggleMods,
 
-            LogError);
+            LogError,
+
+            _modManager.ResolveArchiveOnDisk,
+
+            _modManager.ToActiveDataModKey,
+
+            () => AppPaths.LiveBundlesPath);
 
 
 
@@ -485,6 +491,8 @@ public partial class Form1
             Directory.CreateDirectory(profilesFolderPath);
 
             Directory.CreateDirectory(settingsFolderPath);
+
+            CleanupBundleIsolateWorkspace();
 
         }
 
@@ -701,7 +709,7 @@ public partial class Form1
 
                         LogActivity("===========================================");
 
-                        LogActivity($"Fallout 76 Manager v{CurrentVersion} Initialized");
+                        LogActivity($"F76 Manager v{CurrentVersion} Initialized");
 
                         LogActivity($"• Game Path: {gamePath}");
 
@@ -795,7 +803,7 @@ public partial class Form1
 
     {
 
-        this.Text = "Fallout 76 Manager";
+        this.Text = "F76 Manager";
 
         this.BackColor = Color.FromArgb(18, 18, 18);
 
@@ -842,6 +850,31 @@ public partial class Form1
     }
 
 
+
+    private static void CleanupBundleIsolateWorkspace()
+    {
+        try
+        {
+            string isolateRoot = AppPaths.BundleIsolatePath;
+            if (!Directory.Exists(isolateRoot)) return;
+
+            foreach (string dir in Directory.GetDirectories(isolateRoot))
+            {
+                try { Directory.Delete(dir, recursive: true); }
+                catch (Exception ex) { Debug.WriteLine($"[INIT] Bundle workspace cleanup failed for '{dir}': {ex.Message}"); }
+            }
+
+            foreach (string file in Directory.GetFiles(isolateRoot))
+            {
+                try { File.Delete(file); }
+                catch (Exception ex) { Debug.WriteLine($"[INIT] Bundle workspace file cleanup failed for '{file}': {ex.Message}"); }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[INIT] Bundle workspace cleanup failed: {ex.Message}");
+        }
+    }
 
     internal static string GetDefaultWebViewUserDataFolder() =>
 

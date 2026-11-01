@@ -11,6 +11,7 @@ public partial class ModManager
     {
         var entries = new List<(string SourcePath, string EntryName)>();
         var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         void TryAdd(string? sourcePath, string? entryName)
         {
@@ -26,7 +27,10 @@ public partial class ModManager
             string ext = Path.GetExtension(full);
             if (!ModsBackupExtensions.Contains(ext)) return;
 
-            entries.Add((full, entryName.Replace('\\', '/')));
+            string normalizedEntry = entryName.Replace('\\', '/');
+            if (!seenEntries.Add(normalizedEntry)) return;
+
+            entries.Add((full, normalizedEntry));
         }
 
         var metadata = LoadMetadata();
@@ -56,13 +60,14 @@ public partial class ModManager
             }
         }
 
-        AppendDirectoryModFiles(AppPaths.BundlesPath, "Bundles", TryAdd, recursive: true);
+        foreach (var bundleDir in AppPaths.CreationBundleDirectories())
+            AppendDirectoryModFiles(bundleDir, "Bundles", TryAdd, recursive: true);
         AppendDirectoryModFiles(AppPaths.DisabledModsPath, "Disabled Mods", TryAdd, recursive: true);
 
         return entries;
     }
 
-    public List<(string SourcePath, string EntryName)> CollectModsBackupEntriesForListKeys(IEnumerable<string> listKeys)
+    private static HashSet<string> BuildWantedListKeys(IEnumerable<string> listKeys)
     {
         var wanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var raw in listKeys ?? Array.Empty<string>())
@@ -75,7 +80,35 @@ public partial class ModManager
             else if (!key.Contains('/'))
                 wanted.Add("Disabled/" + key);
         }
+        return wanted;
+    }
 
+    /// <summary>
+    /// Metadata keys for the wanted list keys, resolved the same way the mod list resolves them.
+    /// </summary>
+    private HashSet<string> ResolveExportMetadataKeys(Dictionary<string, ModMetadata> metadata, HashSet<string> wanted)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var k in metadata.Keys)
+        {
+            string n = (k ?? "").Replace('\\', '/');
+            if (wanted.Contains(n)
+                || (n.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) && wanted.Contains(n.Substring("Disabled/".Length)))
+                || (!n.Contains('/') && wanted.Contains("Disabled/" + n)))
+                keys.Add(k);
+        }
+        foreach (var w in wanted)
+        {
+            string resolved = ResolveMetadataKey(metadata, w);
+            if (!string.IsNullOrEmpty(resolved)) keys.Add(resolved);
+        }
+        keys.RemoveWhere(k => AppPaths.IsProtectedCoreIniListKey(k));
+        return keys;
+    }
+
+    public List<(string SourcePath, string EntryName)> CollectModsBackupEntriesForListKeys(IEnumerable<string> listKeys)
+    {
+        var wanted = BuildWantedListKeys(listKeys);
         if (wanted.Count == 0)
             return new List<(string, string)>();
 
@@ -91,40 +124,43 @@ public partial class ModManager
             try { full = Path.GetFullPath(sourcePath); }
             catch { return; }
 
+            if (IsVanillaFile(Path.GetFileName(full)))
+            {
+                _logger($"[PRESETS] Not packing vanilla game file '{Path.GetFileName(full)}'.");
+                return;
+            }
+
             if (!seenSources.Add(full)) return;
-
-            string ext = Path.GetExtension(full);
-            if (!ModsBackupExtensions.Contains(ext)) return;
-
             entries.Add((full, entryName.Replace('\\', '/')));
         }
 
-        bool MatchesWanted(string metaKey)
+        void TryAddListFile(string normalized)
         {
-            string k = (metaKey ?? "").Replace('\\', '/');
-            if (wanted.Contains(k)) return true;
-            if (k.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) &&
-                wanted.Contains(k.Substring("Disabled/".Length)))
-                return true;
-            if (!k.Contains('/') && wanted.Contains("Disabled/" + k))
-                return true;
-            if (k.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase))
+            string? entryName = MapRelativeKeyToArchiveEntry(normalized);
+            if (entryName == null) return;
+
+            string fullPath = GetFullPath(normalized);
+            if (!File.Exists(fullPath) && IsPlainDataRelativeKey(normalized))
             {
-                if (wanted.Contains(k)) return true;
+                string disabledPath = Path.Combine(AppPaths.DisabledModsPath, normalized.Replace('/', '\\'));
+                if (File.Exists(disabledPath))
+                {
+                    fullPath = disabledPath;
+                    entryName = $"Disabled Mods/{normalized}";
+                }
             }
-            return false;
+            TryAdd(fullPath, entryName);
         }
 
         var metadata = LoadMetadata();
-        foreach (var kvp in metadata)
+        foreach (var metaKey in ResolveExportMetadataKeys(metadata, wanted))
         {
-            if (AppPaths.IsProtectedCoreIniListKey(kvp.Key)) continue;
-            if (!MatchesWanted(kvp.Key)) continue;
+            if (!metadata.TryGetValue(metaKey, out var meta) || meta == null) continue;
 
-            var fileKeys = kvp.Value.Files ?? new List<string>();
+            var fileKeys = meta.Files ?? new List<string>();
             if (fileKeys.Count == 0)
             {
-                string key = (kvp.Key ?? "").Replace('\\', '/');
+                string key = (metaKey ?? "").Replace('\\', '/');
                 if (!string.IsNullOrWhiteSpace(key) && !key.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase))
                     fileKeys = new List<string> { key };
             }
@@ -134,55 +170,58 @@ public partial class ModManager
                 string normalized = (rel ?? "").Replace('\\', '/').Trim();
                 if (string.IsNullOrWhiteSpace(normalized)) continue;
                 if (normalized.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase)) continue;
-
-                string? entryName = MapRelativeKeyToArchiveEntry(normalized);
-                if (entryName == null) continue;
-
-                string fullPath = GetFullPath(normalized);
-                TryAdd(fullPath, entryName);
+                TryAddListFile(normalized);
             }
         }
 
         foreach (var raw in wanted.ToList())
         {
-            string? full = ResolveListKeyToFullPath(raw);
-            if (string.IsNullOrWhiteSpace(full) || !File.Exists(full)) continue;
-            string? entry = MapRelativeKeyToArchiveEntry(raw.Replace('\\', '/'));
-            if (entry != null) TryAdd(full, entry);
+            string normalized = raw.Replace('\\', '/');
+            if (normalized.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase))
+                continue;
+            TryAddListFile(normalized);
         }
 
         return entries;
     }
 
+    private static bool IsPlainDataRelativeKey(string normalizedKey) =>
+        !normalizedKey.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase) &&
+        !normalizedKey.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) &&
+        !normalizedKey.StartsWith("GameRoot/", StringComparison.OrdinalIgnoreCase) &&
+        !normalizedKey.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) &&
+        !normalizedKey.StartsWith("CoreIni/", StringComparison.OrdinalIgnoreCase) &&
+        !normalizedKey.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase);
+
     public Dictionary<string, ModMetadata> GetMetadataSubsetForListKeys(IEnumerable<string> listKeys)
     {
-        var wanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var raw in listKeys ?? Array.Empty<string>())
-        {
-            string key = (raw ?? "").Replace('\\', '/').Trim();
-            if (string.IsNullOrWhiteSpace(key)) continue;
-            wanted.Add(key);
-            if (key.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase))
-                wanted.Add(key.Substring("Disabled/".Length));
-            else if (!key.Contains('/'))
-                wanted.Add("Disabled/" + key);
-        }
-
+        var wanted = BuildWantedListKeys(listKeys);
         var result = new Dictionary<string, ModMetadata>(StringComparer.OrdinalIgnoreCase);
         var metadata = LoadMetadata();
-        foreach (var kvp in metadata)
+        foreach (var key in ResolveExportMetadataKeys(metadata, wanted))
         {
-            string k = (kvp.Key ?? "").Replace('\\', '/');
-            bool match = wanted.Contains(k)
-                || (k.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) && wanted.Contains(k.Substring("Disabled/".Length)))
-                || (!k.Contains('/') && wanted.Contains("Disabled/" + k));
-            if (!match) continue;
-            result[kvp.Key] = kvp.Value ?? new ModMetadata();
+            if (!metadata.TryGetValue(key, out var source) || source == null) continue;
+
+            var copy = MergeMetadataEntries(new ModMetadata(), source);
+            copy = MergeMissingFieldsFromSiblings(metadata, copy, key, Path.GetFileName(key));
+            foreach (var file in (copy.Files ?? new List<string>()).ToList())
+            {
+                if (copy.NexusModId.HasValue) break;
+                string fileName = Path.GetFileName((file ?? "").Replace('\\', '/'));
+                if (!string.IsNullOrWhiteSpace(fileName))
+                    copy = MergeMissingFieldsFromSiblings(metadata, copy, key, fileName);
+            }
+            result[key] = copy;
         }
         return result;
     }
 
-    public void MergeMetadataSubset(Dictionary<string, ModMetadata> incoming)
+    /// <param name="preferIncoming">
+    /// Incoming details and Nexus linkage replace existing values; existing entries keep their
+    /// enabled state and load order because those describe where the files are on this machine.
+    /// </param>
+    public void MergeMetadataSubset(Dictionary<string, ModMetadata> incoming, bool preferIncoming = false)
     {
         if (incoming == null || incoming.Count == 0) return;
         var metadata = LoadMetadata();
@@ -194,12 +233,41 @@ public partial class ModManager
             if (string.IsNullOrEmpty(key)) continue;
 
             if (metadata.TryGetValue(key, out var existing) && existing != null)
-                metadata[key] = MergeMetadataEntries(existing, kvp.Value);
+                metadata[key] = preferIncoming
+                    ? OverlayMetadataEntry(existing, kvp.Value)
+                    : MergeMetadataEntries(existing, kvp.Value);
             else
                 metadata[key] = MergeMetadataEntries(new ModMetadata(), kvp.Value);
             changed = true;
         }
         if (changed) SaveMetadata(metadata);
+    }
+
+    private ModMetadata OverlayMetadataEntry(ModMetadata existing, ModMetadata incoming)
+    {
+        var result = MergeMetadataEntries(existing, incoming);
+        if (incoming == null) return result;
+
+        if (!string.IsNullOrWhiteSpace(incoming.Name) && incoming.Name != "Unknown Mod") result.Name = incoming.Name;
+        if (!string.IsNullOrWhiteSpace(incoming.Author) && incoming.Author != "Unknown") result.Author = incoming.Author;
+        if (!string.IsNullOrWhiteSpace(incoming.Version) && incoming.Version != "1.0") result.Version = incoming.Version;
+        if (!string.IsNullOrWhiteSpace(incoming.URL)) result.URL = incoming.URL;
+        if (!string.IsNullOrWhiteSpace(incoming.Category) && incoming.Category != "General") result.Category = incoming.Category;
+        if (!string.IsNullOrWhiteSpace(incoming.Details)) result.Details = incoming.Details;
+
+        if (incoming.NexusModId.HasValue)
+        {
+            result.NexusModId = incoming.NexusModId;
+            result.NexusFileId = incoming.NexusFileId;
+            result.NexusFileVersion = incoming.NexusFileVersion ?? "";
+            result.NexusFileUploaded = incoming.NexusFileUploaded;
+        }
+
+        result.IsEnabled = existing.IsEnabled;
+        result.IsBundle = existing.IsBundle;
+        result.IsLoose = existing.IsLoose;
+        if (existing.LoadOrder != UnassignedLoadOrder) result.LoadOrder = existing.LoadOrder;
+        return result;
     }
 
     private static string? MapRelativeKeyToArchiveEntry(string normalizedKey)

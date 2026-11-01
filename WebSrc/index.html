@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fallout 76 Manager</title>
+    <title>F76 Manager</title>
     <style>.app-booting .top-bar-right { visibility: hidden; }</style>
     <script src="js/user-themes-boot.js"></script>
     <script>
@@ -42,6 +42,8 @@
         })();
     </script>
     <link rel="icon" href="/favicon.ico">
+    <link rel="preload" href="css/fonts/files/inter_v20_UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="css/fonts/files/outfit_v15_QGYvz_MVcBeNP4NJtEtq.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="css/style.css?v=X.X.X">
     <link rel="stylesheet" href="css/fonts/fonts.css?v=X.X.X">
     <script src="js/vendor/lucide.min.js?v=X.X.X" onerror="console.warn('[FALLBACK] Local Lucide failed to load. Icons will be missing.'); window.lucide = window.lucide || { createIcons: function(){} };"></script>
@@ -79,10 +81,22 @@
                     <img id="app-logo" src="assets/Icon-nobg.png" alt="Vault Logo" class="logo">
                     <script>
                         (function () {
-                            var logo = window.__F76_BOOT_LOGO;
-                            if (!logo) return;
                             var el = document.getElementById('app-logo');
                             if (!el) return;
+                            var cached = null;
+                            try { cached = JSON.parse(localStorage.getItem('f76_boot_logo') || 'null'); } catch (e) { }
+                            var sameTheme = cached && cached.theme === document.documentElement.dataset.theme;
+                            if (sameTheme && cached.data && cached.dpr === (window.devicePixelRatio || 1)) {
+                                el.src = cached.data;
+                                el.dataset.sharp = '1';
+                                return;
+                            }
+                            if (!(sameTheme && cached.raw)) {
+                                el.dataset.logoPending = '1';
+                                setTimeout(function () { delete el.dataset.logoPending; }, 2500);
+                            }
+                            var logo = window.__F76_BOOT_LOGO;
+                            if (!logo) return;
                             el.src = logo.indexOf('http') === 0
                                 ? logo
                                 : 'https://f76manager.app/' + logo.replace(/^\//, '');
@@ -108,7 +122,7 @@
 
                 <a href="#bundle" class="nav-item" data-section="bundle">
                     <i data-lucide="archive"></i>
-                    <span class="nav-label">Bundle</span>
+                    <span class="nav-label">BA2 Studio</span>
                 </a>
                 <a href="#tweaks" class="nav-item" data-section="tweaks">
                     <i data-lucide="sliders-horizontal"></i>
@@ -152,8 +166,7 @@
         <main class="main-container">
             <header class="top-bar">
                 <div class="top-bar-left">
-                    <div id="section-title" class="section-title">Dashboard</div>
-                </div>
+                    <div id="section-title" class="section-title">Dashboard</div>                </div>
 
                 <div class="top-bar-right">
                     <button type="button" id="kofi-link" class="kofi-link" title="Ko-fi" aria-label="Ko-fi">
@@ -172,6 +185,42 @@
                     </div>
                 </div>
             </header>
+            <script>
+                (function () {
+                    var id = '';
+                    try { id = sessionStorage.getItem('f76_ui_section') || ''; } catch (e) { }
+                    var labels = null;
+                    try { labels = JSON.parse(localStorage.getItem('f76_boot_nav_labels') || 'null'); } catch (e) { }
+                    var items = document.querySelectorAll('.sidebar-nav .nav-item[data-section]');
+                    var known = false;
+                    for (var i = 0; i < items.length; i++) {
+                        var sec = items[i].getAttribute('data-section');
+                        if (labels && labels[sec]) {
+                            var label = items[i].querySelector('.nav-label');
+                            if (label) label.textContent = labels[sec];
+                        }
+                        if (sec === id) known = true;
+                    }
+                    if (!known) return;
+                    for (var j = 0; j < items.length; j++) {
+                        items[j].classList.toggle('active', items[j].getAttribute('data-section') === id);
+                    }
+                    var titleEl = document.getElementById('section-title');
+                    if (titleEl) {
+                        var bundleHeader = '';
+                        try { bundleHeader = localStorage.getItem('f76_boot_bundle_header') || ''; } catch (e) { }
+                        if (id === 'bundle' && bundleHeader) {
+                            titleEl.textContent = bundleHeader;
+                        } else if (labels && labels[id]) {
+                            titleEl.textContent = labels[id];
+                        } else {
+                            var titles = { config: 'Configs', pipboy: 'Pip-Boy', bundle: 'Bundle · Build · Create' };
+                            titleEl.textContent = titles[id] || (id.charAt(0).toUpperCase() + id.slice(1));
+                        }
+                    }
+                    document.body.dataset.uiSection = id;
+                })();
+            </script>
 
             <div id="content-area" class="content-area">
                 

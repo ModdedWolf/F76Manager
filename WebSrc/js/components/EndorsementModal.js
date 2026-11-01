@@ -20,7 +20,7 @@ export class EndorsementModal {
                     
                     <div class="endorsement-modal-body">
                         <p class="endorsement-modal-desc">
-                            We hope you're enjoying the Fallout 76 Manager! 
+                            We hope you're enjoying the F76 Manager! 
                             If you find this tool helpful, please consider endorsing it on Nexus Mods. 
                             It helps more people find the tool and supports development.
                         </p>

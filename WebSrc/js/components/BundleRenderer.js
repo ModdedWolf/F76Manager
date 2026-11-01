@@ -1,10 +1,28 @@
 import { escapeHtml, escapeAttr } from '../utils/htmlSafe.js';
+import { renderBa2TextView } from './Ba2TextEditor.js';
+
+function previewNoneMessage(error) {
+    if (error === 'unsupported') return window._t('preview_unsupported_format');
+    if (error === 'hkx_behavior') return window._t('preview_hkx_behavior');
+    if (error === 'hkx_character') return window._t('preview_hkx_character');
+    if (error === 'hkx_project') return window._t('preview_hkx_project');
+    if (error === 'hkx_not_clip') return window._t('preview_hkx_not_clip');
+    if (error === 'hkx_no_skeleton') return window._t('preview_hkx_no_skeleton');
+    return window._t('preview_unavailable');
+}
 
 function formatBa2Size(bytes) {
     const n = Number(bytes) || 0;
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTreeFileSize(manager, file, replacement, isAddition) {
+    const overlaySize = replacement ? manager.getOverlaySourceSize(replacement) : undefined;
+    if (overlaySize) return formatBa2Size(overlaySize);
+    if (isAddition && !file.size) return '—';
+    return formatBa2Size(file.size);
 }
 
 function normalizeBa2InternalPath(path) {
@@ -23,7 +41,7 @@ function collectNodeFilePaths(node, folderPath, out = []) {
 }
 
 function annotateTreeFileCounts(node) {
-    let total = node.files.length;
+    let total = node.files.reduce((n, file) => n + (file.added ? 0 : 1), 0);
     for (const key of Object.keys(node.folders)) {
         total += annotateTreeFileCounts(node.folders[key]);
     }
@@ -34,6 +52,7 @@ function annotateTreeFileCounts(node) {
 function countSelectedInNode(node, selectedSet) {
     let count = 0;
     for (const file of node.files) {
+        if (file.added) continue;
         if (selectedSet.has(normalizeBa2InternalPath(file.fullPath))) count++;
     }
     for (const key of Object.keys(node.folders)) {
@@ -74,13 +93,27 @@ function getFileEntryEmptyMessage(manager) {
     return window._t('file_entry_expand_ba2');
 }
 
+function getOverlayBadgeHtml(manager, archivePath) {
+    const key = manager.normalizeArchiveKey(archivePath);
+    const { replaced, added } = manager.getOverlayCounts(key);
+    let html = '';
+    if (replaced > 0) {
+        html += `<div class="staged-partial-badge staged-replaced-badge">${escapeHtml(window._t('bundle_replaced_count', replaced))}</div>`;
+    }
+    if (added > 0) {
+        html += `<div class="staged-partial-badge staged-replaced-badge staged-added-badge">${escapeHtml(window._t('bundle_added_count', added))}</div>`;
+    }
+    return html;
+}
+
 function getStagedPartialBadge(manager, archivePath) {
     const key = manager.normalizeArchiveKey(archivePath);
+    const overlayBadge = getOverlayBadgeHtml(manager, archivePath);
     const total = manager.ba2TotalPaths.get(key);
-    if (!total) return '';
+    if (!total) return overlayBadge;
     const selected = manager.getSelectedCount(key);
-    if (selected >= total) return '';
-    return `<div class="staged-partial-badge">${escapeHtml(window._t('staged_partial_files', selected, total))}</div>`;
+    if (selected >= total) return overlayBadge;
+    return `<div class="staged-partial-badge">${escapeHtml(window._t('staged_partial_files', selected, total))}</div>${overlayBadge}`;
 }
 
 function buildTreeFromEntries(entries) {
@@ -98,7 +131,8 @@ function buildTreeFromEntries(entries) {
         node.files.push({
             name: parts[parts.length - 1],
             size: entry.unpackedSize,
-            fullPath
+            fullPath,
+            added: Boolean(entry.added)
         });
     }
     annotateTreeFileCounts(root);
@@ -155,22 +189,46 @@ function renderTreeNode(node, folderPath, manager, depth = 0, readOnly = false) 
         `;
     }
 
+    const folderOverrides = !readOnly && manager.inspectedBa2Path && manager.selectedFolders.size > 0
+        ? manager.getFolderOverrides()
+        : null;
+
     for (const file of files) {
         if (!pathMatchesFilter(file.fullPath, filter)) continue;
         const normPath = normalizeBa2InternalPath(file.fullPath);
-        const isChecked = selectedSet.has(normPath);
+        const replacement = readOnly ? '' : manager.getReplacement(archiveKey, normPath);
+        const isAddition = Boolean(file.added) || (!!replacement && manager.isOverlayAddition(archiveKey, normPath));
+        const overridingFolder = !replacement && !isAddition && folderOverrides ? folderOverrides.get(normPath) || '' : '';
+        const isChecked = selectedSet.has(normPath) || Boolean(replacement) || isAddition;
         const fileCheckHtml = readOnly ? '' : `
                 <input type="checkbox" class="ba2-tree-check ba2-tree-file-check"
                     data-check-type="file"
                     data-file-path="${escapeAttr(normPath)}"
-                    ${isChecked ? 'checked' : ''}>`;
+                    ${isChecked ? 'checked' : ''}
+                    ${replacement || isAddition ? 'disabled' : ''}>`;
         const isPreviewing = !readOnly && manager.previewPath === normPath;
+        let overlayTitle = '';
+        let overlayBadgeLabel = '';
+        if (isAddition && replacement) {
+            overlayTitle = window._t('bundle_added_from', replacement);
+            overlayBadgeLabel = window._t('bundle_added_badge');
+        } else if (replacement) {
+            overlayTitle = window._t('bundle_replaced_from', replacement);
+            overlayBadgeLabel = window._t('bundle_replaced_badge');
+        } else if (overridingFolder) {
+            overlayTitle = window._t('bundle_overridden_by_folder', overridingFolder);
+            overlayBadgeLabel = window._t('bundle_replaced_badge');
+        }
+        const overlayBadge = overlayTitle
+            ? `<span class="ba2-tree-replaced-badge${isAddition ? ' ba2-tree-added-badge' : ''}" title="${escapeAttr(overlayTitle)}">${escapeHtml(overlayBadgeLabel)}</span>`
+            : '';
         html += `
-            <div class="ba2-tree-row ba2-tree-file${readOnly ? ' ba2-tree-row--readonly' : ''}${isPreviewing ? ' ba2-tree-file--previewing' : ''}" data-preview-path="${escapeAttr(normPath)}" style="padding-left: ${pad}px">
+            <div class="ba2-tree-row ba2-tree-file${readOnly ? ' ba2-tree-row--readonly' : ''}${isPreviewing ? ' ba2-tree-file--previewing' : ''}${overlayTitle ? ' ba2-tree-file--replaced' : ''}${isAddition ? ' ba2-tree-file--added' : ''}" data-preview-path="${escapeAttr(normPath)}" style="padding-left: ${pad}px">
                 ${fileCheckHtml}
                 <i data-lucide="${fileIconName(file.name)}" class="ba2-tree-file-icon"></i>
                 <span class="ba2-tree-file-name">${escapeHtml(file.name)}</span>
-                <span class="ba2-tree-file-size">${escapeHtml(formatBa2Size(file.size))}</span>
+                ${overlayBadge}
+                <span class="ba2-tree-file-size">${escapeHtml(formatTreeFileSize(manager, file, replacement, isAddition))}</span>
             </div>
         `;
     }
@@ -279,17 +337,22 @@ function renderExplorerTreeHtml(manager) {
     return buildBa2ExplorerTreeHtml(manager, { unified: true });
 }
 
+function renderInspectorPathFooter(manager) {
+    const pathDisplay = manager.inspectedFolderPath
+        || (manager.inspectedBa2Path
+            ? (manager.inspectedResolvedPath || manager.resolveArchivePath(manager.inspectedBa2Path))
+            : '');
+    if (!pathDisplay) return '';
+    return `<div class="bundle-path-bar" title="${escapeAttr(pathDisplay)}">${escapeHtml(pathDisplay)}</div>`;
+}
+
 function renderInspectorToolbar(manager) {
     if (manager.inspectedFolderPath) {
-        const pathDisplay = manager.inspectedFolderPath;
-        const pathTooltip = escapeAttr(pathDisplay);
-        const pathText = escapeHtml(pathDisplay);
         const filterValue = escapeAttr(manager.inspectorFilter || '');
         const countLabel = getInspectorCountLabel(manager);
 
         return `
         <div class="bundle-inspector-pathbar">
-            <div class="bundle-path-bar" title="${pathTooltip}">${pathText}</div>
             <div class="search-box bundle-inspector-search-wrap">
                 <i data-lucide="search"></i>
                 <input type="text" id="ba2-inspector-filter" class="bundle-field" placeholder="${escapeHtml(window._t('inspector_search_placeholder'))}" value="${filterValue}">
@@ -308,9 +371,6 @@ function renderInspectorToolbar(manager) {
     `;
     }
 
-    const pathDisplay = manager.resolveArchivePath(manager.inspectedBa2Path);
-    const pathTooltip = escapeAttr(pathDisplay);
-    const pathText = escapeHtml(pathDisplay);
     const stagedSources = manager.getStagedBa2Sources();
     const stagedOptions = stagedSources.map(src => `
         <option value="${escapeAttr(src.inspectPath)}" ${manager.normalizeArchiveKey(src.inspectPath) === manager.normalizeArchiveKey(manager.inspectedBa2Path) ? 'selected' : ''}>${escapeHtml(src.name)}</option>
@@ -328,7 +388,6 @@ function renderInspectorToolbar(manager) {
                     ${stagedOptions}
                 </select>
             ` : ''}
-            <div class="bundle-path-bar" title="${pathTooltip}">${pathText}</div>
             <div class="search-box bundle-inspector-search-wrap">
                 <i data-lucide="search"></i>
                 <input type="text" id="ba2-inspector-filter" class="bundle-field" placeholder="${escapeHtml(window._t('inspector_search_placeholder'))}" value="${filterValue}">
@@ -343,6 +402,7 @@ function renderInspectorToolbar(manager) {
             <div class="bundle-inspector-pathbar-actions">
                 <button type="button" class="bundle-text-btn" id="btn-inspector-select-all">${window._t('inspector_select_all')}</button>
                 <button type="button" class="bundle-text-btn" id="btn-inspector-deselect-all">${window._t('inspector_deselect_all')}</button>
+                <button type="button" class="bundle-text-btn" id="btn-inspector-isolate" ${canExtract ? '' : 'disabled'}>${window._t('bundle_add_to_bundle')}</button>
                 <button type="button" class="bundle-text-btn" id="btn-inspector-extract" ${canExtract ? '' : 'disabled'}>${window._t('bundle_extract_to_folder')}</button>
             </div>
         </div>
@@ -360,13 +420,25 @@ function buildBa2ExplorerTreeHtml(manager, { unified = false } = {}) {
         if (unified) return '';
         return `<div class="ba2-explorer-empty">${escapeHtml(getFileEntryEmptyMessage(manager))}</div>`;
     }
-    if (!manager.ba2Contents || manager.ba2Contents.length === 0) {
+    const archiveKeyForOverlay = !isFolderMode ? manager.getArchiveSelectionKey() : '';
+    const overlayAdditions = (!isFolderMode && archiveKeyForOverlay)
+        ? manager.getOverlayAdditions(archiveKeyForOverlay)
+        : [];
+    if ((!manager.ba2Contents || manager.ba2Contents.length === 0) && overlayAdditions.length === 0) {
         const emptyMsg = isFolderMode ? window._t('inspector_folder_empty') : window._t('no_ba2_selected');
         return `<div class="ba2-explorer-empty">${escapeHtml(emptyMsg)}</div>`;
     }
 
     const filter = manager.inspectorFilter || '';
-    let entries = manager.ba2Contents;
+    let entries = Array.isArray(manager.ba2Contents) ? [...manager.ba2Contents] : [];
+    if (overlayAdditions.length > 0) {
+        const existing = new Set(entries.map(e => normalizeBa2InternalPath(e.path)));
+        for (const { path } of overlayAdditions) {
+            if (existing.has(path)) continue;
+            entries.push({ path, unpackedSize: 0, added: true });
+            existing.add(path);
+        }
+    }
     if (filter) {
         entries = entries.filter(e => pathMatchesFilter(String(e.path || ''), filter));
     }
@@ -562,23 +634,21 @@ function renderPreviewPaneHtml(manager) {
         body = renderMeshPreview(manager, manager.previewResult);
     } else if (manager.previewResult?.kind === 'text') {
         const result = manager.previewResult;
-        body = `
-            <div class="ba2-preview-header">
-                <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
-                <div class="ba2-preview-meta">${escapeHtml(formatBa2Size(result.size))}</div>
-            </div>
-            ${result.truncated ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_truncated'))}</div>` : ''}
-            <pre class="ba2-preview-text">${escapeHtml(result.text || '')}</pre>
-        `;
+        body = renderBa2TextView({
+            idPrefix: 'ba2-text-font',
+            name: previewFileName(manager.previewPath),
+            meta: formatBa2Size(result.size),
+            text: result.text,
+            truncated: result.truncated,
+            showPopout: true
+        });
     } else {
         const result = manager.previewResult;
         const meta = [];
         if (result?.format) meta.push(result.format);
         if (result?.width && result?.height) meta.push(`${result.width}×${result.height}`);
         if (result?.size) meta.push(formatBa2Size(result.size));
-        const message = result?.error === 'unsupported'
-            ? window._t('preview_unsupported_format')
-            : window._t('preview_unavailable');
+        const message = previewNoneMessage(result?.error);
         body = `
             <div class="ba2-preview-header">
                 <div class="ba2-preview-name">${escapeHtml(previewFileName(manager.previewPath))}</div>
@@ -592,10 +662,14 @@ function renderPreviewPaneHtml(manager) {
     const hidden = !manager.previewPath || (isAudioPreview && !manager._audioInfoOpen)
         ? ' ba2-preview-pane--hidden'
         : '';
+    const popoutKind = !manager.previewLoading && ['mesh', 'image'].includes(manager.previewResult?.kind);
+    const popoutBtn = popoutKind
+        ? `<button type="button" class="bundle-text-btn ba2-preview-popout" data-preview-popout>${escapeHtml(window._t('bundle_preview_popout'))}</button>`
+        : '';
     return `
         <aside class="ba2-preview-pane${hidden}">
             ${body}
-            ${extractBtn}
+            ${popoutBtn || extractBtn ? `<div class="ba2-preview-footer">${popoutBtn}${extractBtn}</div>` : ''}
         </aside>
     `;
 }
@@ -688,7 +762,7 @@ function renderAudioDockHtml(manager) {
                         <i data-lucide="skip-back"></i>
                     </button>
                     <button type="button" class="ba2-audio-play" id="ba2-audio-play" ${disabled}
-                        title="${escapeAttr(playLabel)} (Space)" aria-label="${escapeAttr(playLabel)}">
+                        title="${escapeAttr(window._t('preview_shortcut_space', playLabel))}" aria-label="${escapeAttr(playLabel)}">
                         <span id="ba2-audio-icon-play"><i data-lucide="play"></i></span>
                         <span id="ba2-audio-icon-pause" hidden><i data-lucide="pause"></i></span>
                     </button>
@@ -791,7 +865,9 @@ function renderHexPreview(manager, result) {
             ? window._t('preview_audio_decode_failed')
             : result.error === 'audio_codec_unsupported'
                 ? window._t('preview_audio_codec_unsupported')
-                : window._t('preview_hex_note', formatBa2Size(shown), formatBa2Size(result.size));
+                : result.error === 'hkx_unsupported'
+                    ? window._t('preview_hkx_unsupported')
+                    : window._t('preview_hex_note', formatBa2Size(shown), formatBa2Size(result.size));
     return `
         ${previewHeader(manager, formatBa2Size(result.size))}
         <div class="ba2-preview-note">${escapeHtml(note)}</div>
@@ -833,16 +909,34 @@ function textureReason(shape) {
 
 function renderMeshPreview(manager, result) {
     const mesh = result.mesh || {};
-    const shapes = Array.isArray(mesh.shapes) ? mesh.shapes : [];
+    const allShapes = Array.isArray(mesh.shapes) ? mesh.shapes : [];
+    const showModel = Boolean(manager._meshModelVisible) && allShapes.length > 0;
+    const shapes = showModel ? allShapes : [];
     const boneCount = mesh.bones && Array.isArray(mesh.bones.names) ? mesh.bones.names.length : 0;
+    const anim = mesh.animation || null;
+    const hasAnim = anim && Number(anim.frameCount) > 1 && Number(anim.duration) > 0;
+    const isHkx = Boolean(anim) && boneCount > 0;
     const skeleton = boneCount > 0 && shapes.length === 0;
     const materials = [...new Set(shapes.map(shape => shape.material).filter(Boolean))];
     const meta = skeleton
-        ? window._t('preview_skeleton', boneCount)
+        ? (hasAnim
+            ? window._t('preview_animation', boneCount, formatAudioDuration(anim.duration))
+            : window._t('preview_skeleton', boneCount))
         : window._t('preview_mesh_stats', shapes.length, mesh.vertexCount || 0, mesh.triangleCount || 0);
     const skipped = mesh.skipped
         ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_shapes_skipped', mesh.skipped))}</div>`
         : '';
+    const trimmed = hasAnim && anim.trimmed
+        ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_hkx_trimmed'))}</div>`
+        : '';
+    const modelStatus = mesh.modelStatus || '';
+    const modelNote = modelStatus === 'not_found'
+        ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_hkx_model_not_found'))}</div>`
+        : modelStatus === 'no_match'
+            ? `<div class="ba2-preview-note">${escapeHtml(window._t('preview_hkx_model_no_match'))}</div>`
+            : (showModel && mesh.modelPath
+                ? `<div class="ba2-preview-note" title="${escapeAttr(mesh.modelPath)}">${escapeHtml(mesh.modelPath.split('/').pop())}</div>`
+                : '');
     const materialNote = materials.length
         ? `<div class="ba2-preview-note" title="${escapeAttr(materials.join('\n'))}">${escapeHtml(materials[0])}${materials.length > 1 ? ` +${materials.length - 1}` : ''}</div>`
         : '';
@@ -855,16 +949,52 @@ function renderMeshPreview(manager, result) {
     const wire = skeleton
         ? ''
         : `<button type="button" class="bundle-text-btn" id="btn-mesh-wire">${escapeHtml(window._t('preview_wireframe'))}</button>`;
+    const modelLoading = Boolean(manager._meshModelLoading);
+    const modelBtn = isHkx
+        ? `<button type="button" class="bundle-text-btn${showModel ? ' ba2-preview-mesh-tool--on' : ''}" id="btn-mesh-model" ${modelLoading ? 'disabled' : ''}>${escapeHtml(
+            modelLoading
+                ? window._t('preview_hkx_model_loading')
+                : (showModel ? window._t('preview_hkx_hide_model') : window._t('preview_hkx_show_model'))
+        )}</button>`
+        : '';
+    const transport = hasAnim ? renderMeshAnimTransport(anim) : '';
     return `
         ${previewHeader(manager, meta)}
         ${materialNote}
+        ${modelNote}
         ${reasonHtml}
         ${skipped}
+        ${trimmed}
         <div class="ba2-preview-stage ba2-preview-stage--mesh" id="ba2-mesh-stage"></div>
+        ${transport}
         <div class="ba2-preview-mesh-tools">
+            ${modelBtn}
             ${wire}
             <button type="button" class="bundle-text-btn" id="btn-mesh-reset">${escapeHtml(window._t('preview_reset_view'))}</button>
             <span class="ba2-preview-mesh-hint">${escapeHtml(window._t('preview_mesh_controls'))}</span>
+        </div>
+    `;
+}
+
+function renderMeshAnimTransport(anim) {
+    const duration = Number(anim.duration) || 0;
+    const totalLabel = formatAudioDuration(duration);
+    const playLabel = window._t('preview_audio_play');
+    return `
+        <div class="ba2-mesh-anim" id="ba2-mesh-anim">
+            <button type="button" class="ba2-audio-play" id="ba2-mesh-anim-play"
+                title="${escapeAttr(window._t('preview_shortcut_space', playLabel))}" aria-label="${escapeAttr(playLabel)}">
+                <span id="ba2-mesh-anim-icon-play" hidden><i data-lucide="play"></i></span>
+                <span id="ba2-mesh-anim-icon-pause"><i data-lucide="pause"></i></span>
+            </button>
+            <input type="range" class="ba2-audio-slider ba2-mesh-anim-seek" id="ba2-mesh-anim-seek"
+                min="0" max="1000" value="0" step="1" style="--value: 0%"
+                aria-label="${escapeAttr(window._t('preview_audio_play'))}">
+            <span class="ba2-audio-time" id="ba2-mesh-anim-time">0:00 / ${escapeHtml(totalLabel)}</span>
+            <button type="button" class="ba2-audio-icon-btn ba2-audio-icon-btn--on" id="ba2-mesh-anim-loop"
+                title="${escapeAttr(window._t('preview_audio_loop'))}" aria-label="${escapeAttr(window._t('preview_audio_loop'))}" aria-pressed="true">
+                <i data-lucide="repeat"></i>
+            </button>
         </div>
     `;
 }
@@ -920,6 +1050,10 @@ function renderFolderChildrenHtml(manager, folderPath) {
 export const BundleRenderer = {
     renderInspectorContent,
     renderInspectorToolbar,
+    renderInspectorPathFooter,
+    renderMeshPreview,
+    formatBa2Size,
+    previewNoneMessage,
     renderExplorerTreeHtml,
     getInspectorCountLabel,
     renderFolderChildrenHtml,
@@ -941,7 +1075,7 @@ export const BundleRenderer = {
                         <div class="toolbar-left" style="display: flex; align-items: center; gap: 16px;">
                             <div class="header-with-icon" style="display: flex; align-items: center; gap: 12px;">
                                 <i data-lucide="archive" style="width: 24px; height: 24px; color: var(--primary-green);"></i>
-                                <h2 style="margin: 0; font-size: 1.25rem; font-weight: 700;">${window._t('mod_bundles')}</h2>
+                                <h2 style="margin: 0; font-size: 1.25rem; font-weight: 700;">${window._t('bundle_creations')}</h2>
                             </div>
                         </div>
                         <div class="tool-buttons">
@@ -994,7 +1128,7 @@ export const BundleRenderer = {
                     <div class="toolbar-left" style="display: flex; align-items: center; gap: 16px;">
                         <div class="header-with-icon" style="display: flex; align-items: center; gap: 12px;">
                             <i data-lucide="archive" style="width: 24px; height: 24px; color: var(--primary-green);"></i>
-                            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 700;">${window._t('mod_bundles')}</h2>
+                            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 700;">${window._t('bundle_creations')}</h2>
                             <span class="badge" style="background: rgba(255,255,255,0.1);">${bundles.length}</span>
                         </div>
                     </div>
@@ -1047,9 +1181,12 @@ export const BundleRenderer = {
         }
 
         const formatLabel = window._t('bundle_format_auto');
+        const editing = manager.editingBundle;
         const canCreate = manager.canCreateBundle();
         const canSelectArchive = manager.canUseArchiveSelection();
         const canExtract = manager.canExtractSelection();
+        const createInfoLabel = escapeAttr(window._t('create_ba2_info_label'));
+        const createInfoBody = escapeHtml(window._t('create_ba2_info'));
 
         return `
             <div class="bundle-wizard workspace-view animate-fade">
@@ -1060,26 +1197,32 @@ export const BundleRenderer = {
                                 <i data-lucide="arrow-left"></i>
                             </button>
                             <div class="header-with-icon">
-                                <h2 class="bundle-wizard-title">${window._t('bundling_workspace')}</h2>
+                                <h2 class="bundle-wizard-title">${editing ? escapeHtml(window._t('editing_bundle_title', editing.name)) : window._t('bundling_workspace')}</h2>
                             </div>
                         </div>
                         <div class="tool-buttons mods-toolbar-actions">
                             <button type="button" class="btn-secondary btn-deploy-primary btn-start-bundling" ${canCreate ? '' : 'disabled'}>
-                                <i data-lucide="zap"></i>
-                                <span>${window._t('create_bundle')}</span>
+                                <i data-lucide="${editing ? 'save' : 'zap'}"></i>
+                                <span>${window._t(editing ? 'save_bundle' : 'create_bundle')}</span>
                             </button>
+                            <div class="bundle-create-info-wrap">
+                                <button type="button" class="btn-secondary bundle-create-info-btn" id="btn-create-ba2-info" aria-expanded="false" aria-controls="create-ba2-info-popover" aria-describedby="create-ba2-info-popover" aria-label="${createInfoLabel}">
+                                    <i data-lucide="info"></i>
+                                </button>
+                                <div class="bundle-create-info-popover" id="create-ba2-info-popover" role="tooltip" hidden>${createInfoBody}</div>
+                            </div>
                             <div class="mods-actions-menu-wrap">
                                 <button type="button" class="btn-secondary mods-actions-trigger" id="btn-bundle-actions" aria-haspopup="true" aria-expanded="false" title="${window._t('actions')}">
                                     <i data-lucide="more-horizontal"></i>
                                 </button>
                                 <div class="mods-actions-dropdown" id="bundle-actions-dropdown" hidden>
-                                    <button type="button" class="mods-actions-item" id="btn-add-internal">
-                                        <i data-lucide="list-plus"></i>
-                                        <span>${window._t('add_mod_from_list')}</span>
-                                    </button>
                                     <button type="button" class="mods-actions-item" id="btn-add-external">
                                         <i data-lucide="plus"></i>
                                         <span>${window._t('add_external_ba2')}</span>
+                                    </button>
+                                    <button type="button" class="mods-actions-item" id="btn-add-internal">
+                                        <i data-lucide="list-plus"></i>
+                                        <span>${window._t('add_mod_from_list')}</span>
                                     </button>
                                     <button type="button" class="mods-actions-item" id="btn-add-folder">
                                         <i data-lucide="folder-plus"></i>
@@ -1093,6 +1236,10 @@ export const BundleRenderer = {
                                     <button type="button" class="mods-actions-item" id="btn-menu-deselect-all" ${canSelectArchive ? '' : 'disabled'}>
                                         <i data-lucide="list-minus"></i>
                                         <span>${window._t('inspector_deselect_all')}</span>
+                                    </button>
+                                    <button type="button" class="mods-actions-item" id="btn-menu-isolate" ${canExtract ? '' : 'disabled'}>
+                                        <i data-lucide="package-plus"></i>
+                                        <span>${window._t('bundle_add_to_bundle')}</span>
                                     </button>
                                     <button type="button" class="mods-actions-item" id="btn-menu-extract" ${canExtract ? '' : 'disabled'}>
                                         <i data-lucide="folder-open"></i>
@@ -1120,8 +1267,8 @@ export const BundleRenderer = {
                             <div class="bundle-field-group bundle-field-group--grow">
                                 <span class="bundle-field-label">${window._t('output_name')}</span>
                                 <div class="bundle-input-clear-wrap">
-                                    <input type="text" id="bundle-name-input" placeholder="MyAmazingBundle" class="bundle-field" value="${escapeAttr(manager.bundleName)}" title="${escapeAttr(window._t('created_in_bundles_dir'))}">
-                                    <button type="button" class="search-clear" id="bundle-name-clear" title="${escapeAttr(window._t('clear_text'))}" aria-label="${escapeAttr(window._t('clear_text'))}" ${manager.bundleName ? '' : 'hidden'}>
+                                    <input type="text" id="bundle-name-input" placeholder="MyAmazingBundle" class="bundle-field" value="${escapeAttr(manager.bundleName)}" title="${escapeAttr(window._t(editing ? 'bundle_edit_name_locked' : 'created_in_bundles_dir'))}" ${editing ? 'disabled' : ''}>
+                                    <button type="button" class="search-clear" id="bundle-name-clear" title="${escapeAttr(window._t('clear_text'))}" aria-label="${escapeAttr(window._t('clear_text'))}" ${manager.bundleName && !editing ? '' : 'hidden'}>
                                         <i data-lucide="x"></i>
                                     </button>
                                 </div>
@@ -1166,6 +1313,7 @@ export const BundleRenderer = {
                                     ${renderInspectorContent(manager)}
                                 </div>
                             </div>
+                            <div id="file-entry-path-footer" class="file-entry-path-footer">${renderInspectorPathFooter(manager)}</div>
                         </div>
                     </div>
                 </div>
@@ -1175,7 +1323,7 @@ export const BundleRenderer = {
 
     renderInternalPicker(manager, data) {
         const availableMods = (data?.mods ?? []).filter(m => m.type === 'ba2' && !m.isBundle);
-        const selectedCount = manager.selectedMods.size;
+        const selectedCount = manager.getStagedModCount();
 
         return `
             <div class="bundle-wizard workspace-view animate-fade" style="padding: 24px; display: flex; flex-direction: column; gap: 24px; height: 100%;">
@@ -1201,7 +1349,7 @@ export const BundleRenderer = {
                                 <p>${window._t('ensure_internal_mods')}</p>
                             </div>
                         ` : availableMods.map(m => {
-                            const isSelected = manager.selectedMods.has(m.originalName);
+                            const isSelected = manager.isModStaged(m.originalName);
                             return `
                                 <div class="picker-item ${isSelected ? 'selected' : ''}" data-name="${m.originalName}" style="padding: 16px; background: rgba(255,255,255,0.03); border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); cursor: pointer; display: flex; align-items: center; gap: 16px;">
                                     <div class="picker-checkbox" style="width: 20px; height: 20px; border-radius: 4px; border: 2px solid ${isSelected ? 'var(--primary-green)' : 'rgba(255,255,255,0.2)'}; background: ${isSelected ? 'var(--primary-green)' : 'transparent'}; display: flex; align-items: center; justify-content: center;">

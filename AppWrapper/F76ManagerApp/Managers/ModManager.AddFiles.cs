@@ -33,6 +33,9 @@ public partial class ModManager
         if (VirtualModMode) EnsureActiveDataFolders();
 
         var metadata = LoadMetadata();
+        if (IsBundleFilesTarget(metadata, norm))
+            return AddFilesToBundle(norm, sources, progressReporter);
+
         if (!TryResolveModFilesTarget(metadata, norm, out var target, out string resolveError))
             return Fail(resolveError);
 
@@ -70,54 +73,9 @@ public partial class ModManager
 
         try
         {
-            var incoming = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var emptyDirs = new List<string>();
-            for (int i = 0; i < sources.Count; i++)
-            {
-                string src = sources[i];
-                string display = Path.GetFileName(src.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                string sub = Path.Combine(incomingRoot, i.ToString());
-                Directory.CreateDirectory(sub);
-
-                if (Directory.Exists(src))
-                {
-                    CopyDirectory(src, Path.Combine(sub, display));
-                }
-                else if (File.Exists(src))
-                {
-                    string ext = Path.GetExtension(src).ToLowerInvariant();
-                    if (ArchiveContainerExtensions.Contains(ext))
-                    {
-                        if (!TryExtractArchiveToDirectory(src, ext, sub, out string extractError))
-                            return Fail(extractError);
-                    }
-                    else if (ext == ".ba2")
-                    {
-                        BA2Utility.Extract(src, sub, _logger);
-                    }
-                    else
-                    {
-                        if (ext != ".dll" && !IsImportJunkPath(display))
-                            incoming[NormalizeStaticRel(display)] = src;
-                        progress.CompleteOne("processing", display);
-                        continue;
-                    }
-                }
-                else
-                {
-                    return Fail($"Not found: {src}");
-                }
-
-                var normalized = CollectNormalizedExtractedFiles(sub, out var dirs);
-                foreach (var (abs, rel) in normalized)
-                {
-                    string ext = Path.GetExtension(rel).ToLowerInvariant();
-                    if (ext is ".dll" or ".ba2") continue;
-                    incoming[NormalizeStaticRel(rel)] = abs;
-                }
-                emptyDirs.AddRange(dirs);
-                progress.CompleteOne("processing", display);
-            }
+            var incoming = CollectIncomingFiles(sources, incomingRoot, progress, emptyDirs, out string collectError);
+            if (incoming == null) return Fail(collectError);
 
             if (incoming.Count == 0 && emptyDirs.Count == 0)
                 return Fail("No files were found to add.");
@@ -246,6 +204,68 @@ public partial class ModManager
                 _logger($"[ADDFILES] Temp cleanup failed: {cleanupEx.Message}");
             }
         }
+    }
+
+    private Dictionary<string, string>? CollectIncomingFiles(
+        IReadOnlyList<string> sources,
+        string incomingRoot,
+        ImportProgressContext progress,
+        List<string> emptyDirs,
+        out string error)
+    {
+        error = "";
+        var incoming = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < sources.Count; i++)
+        {
+            string src = sources[i];
+            string display = Path.GetFileName(src.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            string sub = Path.Combine(incomingRoot, i.ToString());
+            Directory.CreateDirectory(sub);
+
+            if (Directory.Exists(src))
+            {
+                CopyDirectory(src, Path.Combine(sub, display));
+            }
+            else if (File.Exists(src))
+            {
+                string ext = Path.GetExtension(src).ToLowerInvariant();
+                if (ArchiveContainerExtensions.Contains(ext))
+                {
+                    if (!TryExtractArchiveToDirectory(src, ext, sub, out string extractError))
+                    {
+                        error = extractError;
+                        return null;
+                    }
+                }
+                else if (ext == ".ba2")
+                {
+                    BA2Utility.Extract(src, sub, _logger);
+                }
+                else
+                {
+                    if (ext != ".dll" && !IsImportJunkPath(display))
+                        incoming[NormalizeStaticRel(display)] = src;
+                    progress.CompleteOne("processing", display);
+                    continue;
+                }
+            }
+            else
+            {
+                error = $"Not found: {src}";
+                return null;
+            }
+
+            var normalized = CollectNormalizedExtractedFiles(sub, out var dirs);
+            foreach (var (abs, rel) in normalized)
+            {
+                string ext = Path.GetExtension(rel).ToLowerInvariant();
+                if (ext is ".dll" or ".ba2") continue;
+                incoming[NormalizeStaticRel(rel)] = abs;
+            }
+            emptyDirs.AddRange(dirs);
+            progress.CompleteOne("processing", display);
+        }
+        return incoming;
     }
 
     private void RollbackAddFiles(
@@ -422,8 +442,18 @@ public partial class ModManager
     {
         var entries = new List<(string Path, uint UnpackedSize)>();
         var metadata = LoadMetadata();
-        if (!TryResolveModFilesTarget(metadata, NormalizeMetadataKey(modName ?? ""), out var target, out error))
+        string norm = NormalizeMetadataKey(modName ?? "");
+        ModFilesTarget target;
+        if (IsBundleFilesTarget(metadata, norm))
+        {
+            var bundle = PrepareBundleEdit(norm, out error);
+            if (bundle == null) return entries;
+            target = new ModFilesTarget { OwnedBa2 = ResolveBundleArchives(bundle) };
+        }
+        else if (!TryResolveModFilesTarget(metadata, norm, out target, out error))
+        {
             return entries;
+        }
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var archiveErrors = new List<string>();

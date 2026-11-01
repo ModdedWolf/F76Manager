@@ -8,9 +8,10 @@ public static class ThemePackageValidator
 {
     public const int FormatVersion = 2;
     public const int MinFormatVersion = 1;
-    public const int MaxZipBytes = 2200 * 1024;
+    public const int MaxZipBytes = 18700 * 1024;
     public const int MaxManifestBytes = 32 * 1024;
     public const int MaxLogoBytes = 2 * 1024 * 1024;
+    public const int MaxBannerBytes = 16 * 1024 * 1024;
     public const int MaxLogoDimension = 512;
 
     public static readonly IReadOnlyList<string> TokenKeys = new[]
@@ -159,8 +160,9 @@ public static class ThemePackageValidator
             DeriveMissingTokens(tokens);
 
             var logoLayout = NormalizeLogoLayout(root);
+            var bannerLayout = NormalizeBannerLayout(root);
 
-            manifest = new ValidatedThemeManifest(id, displayName.Trim(), tokens, logoLayout);
+            manifest = new ValidatedThemeManifest(id, displayName.Trim(), tokens, logoLayout, bannerLayout);
             return true;
         }
         catch (Exception ex)
@@ -315,6 +317,24 @@ public static class ThemePackageValidator
         return layout;
     }
 
+    public static Dictionary<string, object> NormalizeBannerLayout(JsonElement root)
+    {
+        var layout = new Dictionary<string, object> { ["x"] = 50.0, ["y"] = 35.0, ["zoom"] = 1.0 };
+        if (!root.TryGetProperty("bannerLayout", out var el) || el.ValueKind != JsonValueKind.Object)
+            return layout;
+
+        void N(string key, double lo, double hi)
+        {
+            if (!el.TryGetProperty(key, out var p)) return;
+            if (p.TryGetDouble(out var d) && double.IsFinite(d)) layout[key] = Math.Round(Math.Clamp(d, lo, hi), 2);
+        }
+
+        N("x", 0, 100);
+        N("y", 0, 100);
+        N("zoom", 1, 4);
+        return layout;
+    }
+
     public static string BuildThemeCssBlock(string themeId, IReadOnlyDictionary<string, string> tokens, IReadOnlyDictionary<string, object> logoLayout)
     {
         var lines = new List<string> { $":root[data-theme=\"{themeId}\"] {{" };
@@ -396,4 +416,5 @@ public sealed record ValidatedThemeManifest(
     string Id,
     string DisplayName,
     IReadOnlyDictionary<string, string> Tokens,
-    IReadOnlyDictionary<string, object> LogoLayout);
+    IReadOnlyDictionary<string, object> LogoLayout,
+    IReadOnlyDictionary<string, object> BannerLayout);

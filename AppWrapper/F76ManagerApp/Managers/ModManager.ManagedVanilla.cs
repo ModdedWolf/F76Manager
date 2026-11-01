@@ -141,8 +141,63 @@ public partial class ModManager
         return manifest.Files.Count > 0 || manifest.IniKeys.Count > 0;
     }
 
+    private int SyncRuntimeConfigEditsToStaging()
+    {
+        string dataRoot = AppPaths.DataPath;
+        if (string.IsNullOrWhiteSpace(dataRoot) || !Directory.Exists(dataRoot))
+            return 0;
+
+        string dataRootFull = Path.GetFullPath(dataRoot);
+        var manifest = LoadManagedArtifacts();
+        int synced = 0;
+
+        foreach (var file in manifest.Files)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(file.Path) || !File.Exists(file.Path))
+                    continue;
+
+                string liveFull = Path.GetFullPath(file.Path);
+                if (!liveFull.StartsWith(dataRootFull, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(liveFull)))
+                    continue;
+
+                string relative = Path.GetRelativePath(dataRootFull, liveFull).Replace("\\", "/");
+                if (string.IsNullOrWhiteSpace(relative) || relative.StartsWith("..", StringComparison.Ordinal))
+                    continue;
+
+                string stagingPath = GetManagedRuntimeSourcePath(relative);
+                if (string.IsNullOrWhiteSpace(stagingPath))
+                    continue;
+
+                if (!NeedsRuntimeCopy(liveFull, stagingPath))
+                    continue;
+
+                string? stagingDir = Path.GetDirectoryName(stagingPath);
+                if (!string.IsNullOrEmpty(stagingDir) && !Directory.Exists(stagingDir))
+                    Directory.CreateDirectory(stagingDir);
+
+                File.Copy(liveFull, stagingPath, true);
+                synced++;
+                _logger($"[MANAGED] Synced runtime config edit back to staging: {relative}");
+            }
+            catch (Exception ex)
+            {
+                _logger($"[MANAGED] Failed syncing runtime config edit '{file.Path}': {ex.Message}");
+            }
+        }
+
+        return synced;
+    }
+
     public int CleanupManagedArtifacts()
     {
+        int syncedConfigs = SyncRuntimeConfigEditsToStaging();
+        if (syncedConfigs > 0)
+            _logger($"[MANAGED] Synced {syncedConfigs} runtime config edit(s) back to staging before cleanup.");
+
         var manifest = LoadManagedArtifacts();
         int processed = 0;
 

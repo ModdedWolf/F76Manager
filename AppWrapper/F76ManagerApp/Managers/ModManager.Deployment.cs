@@ -293,8 +293,8 @@ public partial class ModManager
 
             if (VirtualModMode)
             {
-                _logger("[DEPLOY] Virtual Mod Mode enabled: staged mod state saved. Runtime apply happens at launch.");
-                _statusReporter("info", "Virtual Mod Mode: staged mod state saved. Mods will be applied at launch and cleaned after exit.");
+                _logger("[DEPLOY] Virtual Mod Mode enabled: staged mod state saved. Runtime apply happens when launching from F76 Manager.");
+                _statusReporter("info", "Virtual Mod Mode: staged mod state saved. Mods are applied only when you launch the game from F76 Manager, then cleaned after exit.");
                 return;
             }
 
@@ -328,6 +328,8 @@ public partial class ModManager
             var archiveMods = new List<string>();
             var pluginMods = new List<string>();
             var processedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool metadataDirty = false;
+            int placedConfigs = 0;
 
             foreach (string modName in currentOrder)
             {
@@ -361,9 +363,9 @@ public partial class ModManager
                     }
                 }
 
-                foreach (string relativePath in filesResult)
+                for (int i = 0; i < filesResult.Count; i++)
                 {
-                    string normalizedPath = relativePath.Replace("\\", "/");
+                    string normalizedPath = filesResult[i].Replace("\\", "/");
                     string injectorName = Path.GetFileName(normalizedPath);
                     if (IsGameRootInjectorName(injectorName))
                         normalizedPath = $"GameRoot/{injectorName}";
@@ -379,22 +381,43 @@ public partial class ModManager
 
                     if (!File.Exists(sourcePath))
                     {
-                        _logger($"[MANAGED] Source file missing, skipping: {sourcePath}");
-                        processedFiles.Add(normalizedPath);
+                        if (ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(normalizedPath)) &&
+                            TryResolveMissingStagedConfig(normalizedPath, out string foundRel, out string foundAbs))
+                        {
+                            _logger($"[MANAGED] Resolved missing config '{normalizedPath}' -> '{foundRel}'");
+                            if (metadata.TryGetValue(key, out var meta) && meta?.Files != null)
+                            {
+                                for (int fi = 0; fi < meta.Files.Count; fi++)
+                                {
+                                    if (string.Equals(meta.Files[fi].Replace("\\", "/"), normalizedPath, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        meta.Files[fi] = foundRel;
+                                        metadataDirty = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            normalizedPath = foundRel;
+                            sourcePath = foundAbs;
+                            destinationPath = GetManagedRuntimeDestinationPath(normalizedPath);
+                            if (string.IsNullOrEmpty(destinationPath))
+                            {
+                                processedFiles.Add(normalizedPath);
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            _logger($"[MANAGED] Source file missing, skipping: {sourcePath}");
+                            processedFiles.Add(normalizedPath);
+                            continue;
+                        }
+                    }
+
+                    if (!PlaceManagedRuntimeFile(sourcePath, destinationPath, normalizedPath, ref placedConfigs))
                         continue;
-                    }
 
-                    string? destinationDir = Path.GetDirectoryName(destinationPath);
-                    if (!string.IsNullOrEmpty(destinationDir) && !Directory.Exists(destinationDir))
-                    {
-                        Directory.CreateDirectory(destinationDir);
-                    }
-
-                    if (NeedsRuntimeCopy(sourcePath, destinationPath))
-                    {
-                        TrackManagedFileArtifact(destinationPath);
-                        File.Copy(sourcePath, destinationPath, true);
-                    }
+                    processedFiles.Add(normalizedPath);
 
                     string ext = Path.GetExtension(normalizedPath).ToLowerInvariant();
                     if (ext == ".ba2")
@@ -405,21 +428,135 @@ public partial class ModManager
                     {
                         pluginMods.Add(Path.GetFileName(normalizedPath));
                     }
-
-                    processedFiles.Add(normalizedPath);
                 }
             }
+
+            placedConfigs += PlaceRemainingStagedLooseConfigs(metadata, processedFiles);
+
+            if (metadataDirty)
+                SaveMetadata(metadata);
 
             SyncArchiveListToCustomIni(archiveMods, skipVirtualModeGuard: true);
             UpdatePluginsTxt(pluginMods);
 
-            _logger($"[MANAGED] Runtime state prepared. Archives={archiveMods.Count}, Plugins={pluginMods.Count}");
+            _logger($"[MANAGED] Runtime state prepared. Archives={archiveMods.Count}, Plugins={pluginMods.Count}, Configs={placedConfigs}");
         }
         catch (Exception ex)
         {
             _logger($"[ERROR] PrepareManagedRuntimeState failed: {ex.Message}");
             throw;
         }
+    }
+
+    private bool PlaceManagedRuntimeFile(string sourcePath, string destinationPath, string normalizedPath, ref int placedConfigs)
+    {
+        try
+        {
+            string? destinationDir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(destinationDir) && !Directory.Exists(destinationDir))
+                Directory.CreateDirectory(destinationDir);
+
+            bool isConfig = ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(normalizedPath));
+            if (NeedsRuntimeCopy(sourcePath, destinationPath))
+            {
+                TrackManagedFileArtifact(destinationPath);
+                File.Copy(sourcePath, destinationPath, true);
+                if (isConfig)
+                {
+                    placedConfigs++;
+                    _logger($"[MANAGED] Placed config: {normalizedPath}");
+                }
+            }
+            else if (isConfig)
+            {
+                TrackManagedFileArtifact(destinationPath);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger($"[MANAGED] Failed to place '{normalizedPath}': {ex.Message}");
+            return false;
+        }
+    }
+
+    private int PlaceRemainingStagedLooseConfigs(
+        Dictionary<string, ModMetadata> metadata,
+        HashSet<string> processedFiles)
+    {
+        int placed = 0;
+        string stagingData = AppPaths.ManagedStagingDataPath;
+        if (string.IsNullOrWhiteSpace(stagingData) || !Directory.Exists(stagingData))
+            return 0;
+
+        foreach (string rel in EnumerateLooseConfigListKeys(stagingData))
+        {
+            string key = NormalizeMetadataKey(rel);
+            if (string.IsNullOrWhiteSpace(key) || processedFiles.Contains(key))
+                continue;
+            if (IsLooseConfigMarkedDisabled(metadata, key))
+                continue;
+
+            string sourcePath = GetManagedRuntimeSourcePath(key);
+            string destinationPath = GetManagedRuntimeDestinationPath(key);
+            if (string.IsNullOrEmpty(destinationPath) || !File.Exists(sourcePath))
+                continue;
+
+            if (PlaceManagedRuntimeFile(sourcePath, destinationPath, key, ref placed))
+                processedFiles.Add(key);
+        }
+
+        return placed;
+    }
+
+    private static bool IsLooseConfigMarkedDisabled(Dictionary<string, ModMetadata> metadata, string key)
+    {
+        if (metadata.TryGetValue(key, out var meta) && meta != null && !meta.IsEnabled)
+            return true;
+
+        string disabledKey = key.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase)
+            ? key
+            : $"Disabled/{key}";
+        if (metadata.TryGetValue(disabledKey, out var disabledMeta) && disabledMeta != null && !disabledMeta.IsEnabled)
+            return true;
+
+        return false;
+    }
+
+    private bool TryResolveMissingStagedConfig(string normalizedPath, out string foundRel, out string foundAbs)
+    {
+        foundRel = "";
+        foundAbs = "";
+        string stagingData = AppPaths.ManagedStagingDataPath;
+        if (string.IsNullOrWhiteSpace(stagingData) || !Directory.Exists(stagingData))
+            return false;
+
+        string fileName = Path.GetFileName(normalizedPath);
+        if (string.IsNullOrWhiteSpace(fileName))
+            return false;
+
+        List<string> matches;
+        try
+        {
+            matches = Directory.EnumerateFiles(stagingData, fileName, SearchOption.AllDirectories)
+                .ToList();
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (matches.Count != 1)
+            return false;
+
+        foundAbs = matches[0];
+        foundRel = Path.GetRelativePath(stagingData, foundAbs).Replace("\\", "/");
+        if (string.IsNullOrWhiteSpace(foundRel) ||
+            !ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(foundRel)))
+            return false;
+
+        return true;
     }
 
     private string GetManagedRuntimeSourcePath(string normalizedPath)
@@ -766,8 +903,13 @@ public partial class ModManager
         {
             string name = archives[i];
             if (!name.EndsWith(" - Textures.ba2", StringComparison.OrdinalIgnoreCase)) continue;
-            string main = name.Substring(0, name.Length - " - Textures.ba2".Length) + ".ba2";
-            if (seen.Contains(main)) continue;
+            string stem = name.Substring(0, name.Length - " - Textures.ba2".Length);
+            string[] mainCandidates = { stem + ".ba2", stem + " - Main.ba2" };
+            if (mainCandidates.Any(seen.Contains)) continue;
+            // Textures-only mods have no main archive at all; only drop when the main one was disabled.
+            bool mainIsDisabled = !string.IsNullOrWhiteSpace(AppPaths.DisabledModsPath) &&
+                mainCandidates.Any(m => File.Exists(Path.Combine(AppPaths.DisabledModsPath, m)));
+            if (!mainIsDisabled) continue;
             seen.Remove(name);
             archives.RemoveAt(i);
         }

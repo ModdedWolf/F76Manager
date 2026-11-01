@@ -244,21 +244,6 @@ export class Settings {
                     ? renderKeybindsPanel()
                     : renderAdvancedPanel();
 
-        const contentTitles = {
-            paths: t('install_paths'),
-            preferences: t('manager_preferences'),
-            keybinds: t('shortcuts_hint_title'),
-            advanced: t('advanced_maintenance')
-        };
-        const contentDescs = {
-            paths: t('settings_paths_desc'),
-            preferences: t('manager_settings_desc'),
-            keybinds: t('shortcuts_settings_desc'),
-            advanced: t('settings_advanced_desc')
-        };
-        const contentTitle = contentTitles[this.activeTab] || '';
-        const contentDesc = contentDescs[this.activeTab] || '';
-
         return `
             <div class="settings-page animate-fade">
                 <div class="settings-header-bar">
@@ -335,30 +320,26 @@ export class Settings {
                 </div>
 
                 <div class="settings-card-wide">
-                    <div class="settings-inner">
-                        <nav class="settings-sidebar">
-                            <button class="settings-tab-btn ${this.activeTab === 'preferences' ? 'active' : ''}" data-settings-tab="preferences">
+                    <div class="settings-inner settings-inner--tabs">
+                        <nav class="page-tabs">
+                            <button class="page-tab ${this.activeTab === 'preferences' ? 'active' : ''}" data-settings-tab="preferences">
                                 <i data-lucide="sliders-horizontal"></i>
                                 <span>${t('manager_preferences')}</span>
                             </button>
-                            <button class="settings-tab-btn ${this.activeTab === 'paths' ? 'active' : ''}" data-settings-tab="paths">
+                            <button class="page-tab ${this.activeTab === 'paths' ? 'active' : ''}" data-settings-tab="paths">
                                 <i data-lucide="map-pin"></i>
                                 <span>${t('install_paths')}</span>
                             </button>
-                            <button class="settings-tab-btn ${this.activeTab === 'keybinds' ? 'active' : ''}" data-settings-tab="keybinds">
+                            <button class="page-tab ${this.activeTab === 'keybinds' ? 'active' : ''}" data-settings-tab="keybinds">
                                 <i data-lucide="keyboard"></i>
                                 <span>${t('shortcuts_hint_title')}</span>
                             </button>
-                            <button class="settings-tab-btn ${this.activeTab === 'advanced' ? 'active' : ''}" data-settings-tab="advanced">
+                            <button class="page-tab ${this.activeTab === 'advanced' ? 'active' : ''}" data-settings-tab="advanced">
                                 <i data-lucide="settings"></i>
                                 <span>${t('advanced_maintenance')}</span>
                             </button>
                         </nav>
                         <div class="settings-inner-content${this.activeTab === 'advanced' ? ' settings-tab-advanced' : ''}">
-                            <header class="settings-content-header">
-                                <h2 class="settings-content-title">${contentTitle}</h2>
-                                <p class="settings-content-desc text-muted">${contentDesc}</p>
-                            </header>
                             <div class="settings-panel-card">
                                 ${activePanel}
                             </div>

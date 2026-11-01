@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Atom">
+  <!-- Larger nucleus -->
+  <circle cx="32" cy="32" r="11" fill="#2ecc71" stroke="#000" stroke-width="2"/>
+  <!-- Black outline base, larger ellipses -->
+  <ellipse cx="32" cy="32" rx="29.2" ry="15" fill="none" stroke="#000" stroke-width="6" stroke-linecap="round"/>
+  <ellipse cx="32" cy="32" rx="29.2" ry="15" transform="rotate(60 32 32)" fill="none" stroke="#000" stroke-width="6" stroke-linecap="round"/>
+  <ellipse cx="32" cy="32" rx="29.2" ry="15" transform="rotate(-60 32 32)" fill="none" stroke="#000" stroke-width="6" stroke-linecap="round"/>
+  <!-- Yellow strokes on top, matching size -->
+  <ellipse cx="32" cy="32" rx="29.2" ry="15" fill="none" stroke="#ffe082" stroke-width="4" stroke-linecap="round"/>
+  <ellipse cx="32" cy="32" rx="29.2" ry="15" transform="rotate(60 32 32)" fill="none" stroke="#ffe082" stroke-width="4" stroke-linecap="round"/>
+  <ellipse cx="32" cy="32" rx="29.2" ry="15" transform="rotate(-60 32 32)" fill="none" stroke="#ffe082" stroke-width="4" stroke-linecap="round"/>
+</svg>

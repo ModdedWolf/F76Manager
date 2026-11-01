@@ -1,6 +1,6 @@
 {
-  "version": "1.1.1",
-  "notes": "- JSON files with comments keep those comments when you edit them and when a mod update merges them.\r\n- Comments show up in the tree editor as muted notes.\r\n- Settings \u2192 Advanced has a Backup All option.\r\n- Deleting a config no longer pops the Windows crash dialog.",
-  "url": "https://github.com/ModdedWolf/F76Manager/releases/download/v1.1.1/F76Manager_Nexus.zip",
-  "exeHash": "358e9f85e7497a15f6a8f2f3799ef74e2fac9ed146104767aec36336a4ce137d"
+  "version": "1.1.2",
+  "notes": "- Switch between Steam Live and PTS. Each one keeps its own mods, configs, and INI settings.\r\n- Copy mods or config files between Steam Live, PTS, and Xbox\r\n- New mods show up at the top of the Mods list\r\n- Drag in a preset pack, or import and export one. Presets can be renamed\r\n- Importing a mod can skip config files inside the archive so your INI, JSON, and TXT files stay as they are\r\n- If a mod replaces a game file, the original is backed up.\r\n- Theme Creator can set a dashboard banner, and you can drag and zoom the logo and banner.\r\n- BA2 Studio can build, edit, and share a BA2. You can preview textures, meshes, sounds, and animations, and pop the preview out into its own window.\r\n- Creations stay on the Creations tab when you switch platform. Add to Mod List puts that creation in the preset you have open, at the top of that platform\u0027s mod list.",
+  "url": "https://github.com/ModdedWolf/F76Manager/releases/download/v1.1.2/F76Manager_Nexus.zip",
+  "exeHash": "d3c98da70489cc25abe5cd9462f74dc5de2ab79dbfd0c9f2ed35e3b29dab042b"
 }

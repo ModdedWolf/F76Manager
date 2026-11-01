@@ -327,6 +327,37 @@ function watchDpr() {
     dprQuery.addEventListener('change', onDprChange);
 }
 
+const BOOT_LOGO_KEY = 'f76_boot_logo';
+const PREVIEW_THEME_ID = '__draft';
+
+// index.html paints this cached render before the bundle loads, so it must match
+// what setSharpLogo would produce for the same theme and DPR.
+async function persistBootLogo(img, display, sharp) {
+    try {
+        const theme = document.documentElement.dataset.theme || '';
+        if (!theme || theme === PREVIEW_THEME_ID) return;
+        if (img.closest('.sidebar.collapsed')) return;
+        if (!sharp || !display.startsWith('blob:')) {
+            localStorage.setItem(BOOT_LOGO_KEY, JSON.stringify({ theme, raw: true }));
+            return;
+        }
+        const blob = await (await fetch(display)).blob();
+        const data = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+        });
+        if (img.getAttribute('src') !== display) return;
+        localStorage.setItem(BOOT_LOGO_KEY, JSON.stringify({
+            theme,
+            dpr: window.devicePixelRatio || 1,
+            data,
+        }));
+    } catch {
+    }
+}
+
 export async function setSharpLogo(img, url) {
     if (!img || !url) return;
     if (!dprQuery) watchDpr();
@@ -341,6 +372,8 @@ export async function setSharpLogo(img, url) {
         if (img.getAttribute('src') !== display) img.src = display;
         if (sharp) img.dataset.sharp = '1';
         else delete img.dataset.sharp;
+        delete img.dataset.logoPending;
+        if (img.id === 'app-logo') persistBootLogo(img, display, sharp);
     };
 
     if (isAnimatedCandidate(url)) {

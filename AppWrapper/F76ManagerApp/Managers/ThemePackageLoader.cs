@@ -9,6 +9,8 @@ public sealed class LoadedUserTheme
     public string Id { get; init; } = "";
     public string DisplayName { get; init; } = "";
     public string LogoVirtualPath { get; init; } = "";
+    public string BannerVirtualPath { get; init; } = "";
+    public IReadOnlyDictionary<string, object> BannerLayout { get; init; } = new Dictionary<string, object>();
     public string CssBlock { get; init; } = "";
     public string SourceFile { get; init; } = "";
 }
@@ -192,7 +194,7 @@ public sealed class ThemePackageLoader
 
         using var zip = ZipFile.OpenRead(packagePath);
         var entries = zip.Entries.Where(e => !string.IsNullOrEmpty(e.Name)).ToList();
-        if (entries.Count == 0 || entries.Count > 2)
+        if (entries.Count == 0 || entries.Count > 3)
         {
             error = "Invalid entry count.";
             return false;
@@ -200,6 +202,7 @@ public sealed class ThemePackageLoader
 
         ZipArchiveEntry? manifestEntry = null;
         ZipArchiveEntry? logoEntry = null;
+        ZipArchiveEntry? bannerEntry = null;
 
         foreach (var e in entries)
         {
@@ -209,6 +212,8 @@ public sealed class ThemePackageLoader
                 manifestEntry = e;
             else if (name.StartsWith("logo.", StringComparison.OrdinalIgnoreCase))
                 logoEntry = e;
+            else if (name.StartsWith("banner.", StringComparison.OrdinalIgnoreCase))
+                bannerEntry = e;
             else
             {
                 error = $"Unexpected entry: {name}";
@@ -260,6 +265,27 @@ public sealed class ThemePackageLoader
         if (!ThemePackageValidator.TryValidateLogoImage(logoBytes, out var ext, out error))
             return false;
 
+        byte[] bannerBytes = Array.Empty<byte>();
+        string bannerExt = "";
+        if (bannerEntry != null)
+        {
+            using (var bs = bannerEntry.Open())
+            using (var buf = new MemoryStream())
+            {
+                bs.CopyTo(buf);
+                bannerBytes = buf.ToArray();
+            }
+
+            if (bannerBytes.Length > ThemePackageValidator.MaxBannerBytes)
+            {
+                error = "Banner too large.";
+                return false;
+            }
+
+            if (!ThemePackageValidator.TryValidateLogoImage(bannerBytes, out bannerExt, out error))
+                return false;
+        }
+
         var cacheDir = Path.Combine(AppPaths.ThemesCacheFolder, manifest!.Id);
         var logoDest = Path.Combine(cacheDir, $"logo{ext}");
         try
@@ -293,6 +319,46 @@ public sealed class ThemePackageLoader
                     try { File.Delete(stale); } catch { }
                 }
             }
+
+            if (bannerBytes.Length > 0)
+            {
+                var bannerDest = Path.Combine(cacheDir, $"banner{bannerExt}");
+                bool bannerNeedsWrite = true;
+                if (File.Exists(bannerDest))
+                {
+                    try
+                    {
+                        var existingBanner = File.ReadAllBytes(bannerDest);
+                        if (existingBanner.AsSpan().SequenceEqual(bannerBytes))
+                            bannerNeedsWrite = false;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (bannerNeedsWrite)
+                {
+                    var bannerTmp = bannerDest + ".tmp";
+                    File.WriteAllBytes(bannerTmp, bannerBytes);
+                    File.Move(bannerTmp, bannerDest, overwrite: true);
+                }
+
+                foreach (var stale in Directory.EnumerateFiles(cacheDir, "banner.*"))
+                {
+                    if (string.Equals(stale, bannerDest, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (stale.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) continue;
+                    try { File.Delete(stale); } catch { }
+                }
+            }
+            else
+            {
+                foreach (var stale in Directory.EnumerateFiles(cacheDir, "banner.*"))
+                {
+                    if (stale.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) continue;
+                    try { File.Delete(stale); } catch { }
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -310,6 +376,8 @@ public sealed class ThemePackageLoader
             Id = manifest.Id,
             DisplayName = manifest.DisplayName,
             LogoVirtualPath = $"user-theme-logo/{manifest.Id}?r={revision}",
+            BannerVirtualPath = bannerBytes.Length > 0 ? $"user-theme-banner/{manifest.Id}?r={revision}" : "",
+            BannerLayout = manifest.BannerLayout,
             CssBlock = css,
             SourceFile = packagePath,
         };
@@ -381,6 +449,22 @@ public sealed class ThemePackageLoader
         foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".webp", ".gif" })
         {
             var p = Path.Combine(AppPaths.ThemesCacheFolder, id, $"logo{ext}");
+            if (File.Exists(p)) return p;
+        }
+        return null;
+    }
+
+    public string? ResolveBannerPhysicalPath(string virtualPath)
+    {
+        const string prefix = "user-theme-banner/";
+        if (!virtualPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return null;
+        var id = virtualPath[prefix.Length..].Split('?')[0].Trim('/');
+        if (!ThemePackageValidator.IsValidThemeId(id)) return null;
+
+        foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".webp", ".gif" })
+        {
+            var p = Path.Combine(AppPaths.ThemesCacheFolder, id, $"banner{ext}");
             if (File.Exists(p)) return p;
         }
         return null;

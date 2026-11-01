@@ -55,6 +55,9 @@ public partial class Form1
         var css = _themePackageLoader.Themes.ToDictionary(t => t.Id, t => t.CssBlock);
         var idsJson = JsonSerializer.Serialize(ids);
         var cssJson = JsonSerializer.Serialize(css);
+        var bannersJson = JsonSerializer.Serialize(_themePackageLoader.Themes
+            .Where(t => !string.IsNullOrEmpty(t.BannerVirtualPath))
+            .ToDictionary(t => t.Id, t => new { banner = t.BannerVirtualPath, bannerLayout = t.BannerLayout }));
         var themeId = NormalizeUiTheme(uiTheme);
         var logoPath = ResolveBootLogoPath(themeId);
         var builtinIdsJson = JsonSerializer.Serialize(ThemeBootLogos.BuiltInIds);
@@ -70,6 +73,7 @@ public partial class Form1
             $"window.__F76_BUILTIN_THEME_IDS={builtinIdsJson};" +
             $"window.__F76_USER_THEME_IDS={idsJson};" +
             $"window.__F76_USER_THEME_CSS={cssJson};" +
+            $"window.__F76_USER_THEME_BANNERS={bannersJson};" +
             $"window.__F76_BOOT_UI_ANIMATIONS={animJson};" +
             $"window.__F76_BOOT_LANGUAGE={langJson};";
     }
@@ -189,6 +193,8 @@ public partial class Form1
                     id = t.Id,
                     displayName = t.DisplayName,
                     logo = t.LogoVirtualPath,
+                    banner = t.BannerVirtualPath,
+                    bannerLayout = t.BannerLayout,
                     css = t.CssBlock,
                 }).ToArray(),
             };
@@ -486,6 +492,12 @@ public partial class Form1
                 if (string.Equals(modNorm, eNorm, StringComparison.OrdinalIgnoreCase)) return true;
                 if (IsStringModFileName(modFile) && string.Equals(modFile, eFile, StringComparison.OrdinalIgnoreCase))
                     return true;
+
+                bool modBundle = modNorm.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase);
+                bool eBundle = eNorm.StartsWith("Bundles/", StringComparison.OrdinalIgnoreCase);
+                if ((modBundle || eBundle) && string.Equals(modFile, eFile, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
                 string modLoose = modNorm.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase)
                     ? modNorm.Substring("Loose/".Length) : modNorm;
                 string eLoose = eNorm.StartsWith("Loose/", StringComparison.OrdinalIgnoreCase)
@@ -711,7 +723,8 @@ public partial class Form1
                 latestVersion = cache.LatestVersion,
                 latestFileName = cache.LatestFileName,
                 latestUploaded = cache.LatestUploaded,
-                files = d.files
+                files = d.files,
+                bundlePartners = mod.GetType().GetProperty("bundlePartners")?.GetValue(mod)
             };
         }
         catch
@@ -1637,7 +1650,7 @@ public partial class Form1
                 {
                     SendStatusMessage(
                         "info",
-                        "Free Nexus account: opening Mod Manager Download in your browser. Confirm once — Fallout 76 Manager will import automatically.",
+                        "Free Nexus account: opening Mod Manager Download in your browser. Confirm once — F76 Manager will import automatically.",
                         "nexus_download_free_user");
                 }
                 else if (type == "nexus_download_forbidden")

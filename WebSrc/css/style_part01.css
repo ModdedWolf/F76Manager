@@ -160,6 +160,12 @@ h3,
     z-index: 100;
     position: relative;
     backdrop-filter: blur(10px);
+    user-select: none;
+}
+
+.sidebar a,
+.sidebar img {
+    -webkit-user-drag: none;
 }
 
 .sidebar.collapsed {
@@ -206,6 +212,10 @@ h3,
 .logo[data-sharp="1"] {
     object-fit: fill;
     object-position: 0 0;
+}
+
+.logo[data-logo-pending] {
+    visibility: hidden;
 }
 
 .sidebar.collapsed .logo-container {
@@ -358,6 +368,13 @@ h3,
     flex-shrink: 0;
 }
 
+/* Reserve Lucide's 24px SVG box so labels don't shift when icons render. */
+.nav-item > i[data-lucide] {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+}
+
 .nav-label {
     white-space: nowrap;
     font-size: 0.95rem;
@@ -471,7 +488,6 @@ h3,
     height: var(--topbar-height);
     padding: 16px 0;
 }
-
 .top-bar-right {
     flex: 1 1 0;
     min-width: 0;

@@ -170,9 +170,9 @@ export class TweaksManager {
                 </div>
 
                 <div class="tweaks-layout">
-                    <div class="tweaks-sidebar">
+                    <div class="page-tabs">
                         ${this.categories.map(cat => `
-                            <button class="tweaks-sidebar-item ${this.activeCategoryId === cat.id ? 'active' : ''}" data-category-id="${cat.id}">
+                            <button class="page-tab ${this.activeCategoryId === cat.id ? 'active' : ''}" data-category-id="${cat.id}">
                                 <i data-lucide="${cat.icon}"></i>
                                 <span>${window._t(cat.labelKey)}</span>
                             </button>
@@ -191,10 +191,6 @@ export class TweaksManager {
 
         return `
             <div class="tweak-category">
-                <div class="category-header">
-                    <i data-lucide="${category.icon}"></i>
-                    <h3>${window._t(category.labelKey)}</h3>
-                </div>
                 <div class="tweak-list">
                     ${category.tweaks.map(tweak => this.renderTweak(tweak)).join('')}
                 </div>
@@ -316,7 +312,7 @@ export class TweaksManager {
             });
         });
 
-        const sidebarItems = document.querySelectorAll('.tweaks-sidebar-item');
+        const sidebarItems = document.querySelectorAll('.page-tab[data-category-id]');
         const contentEl = document.getElementById('tweaks-content');
         if (sidebarItems && contentEl) {
             sidebarItems.forEach(btn => {

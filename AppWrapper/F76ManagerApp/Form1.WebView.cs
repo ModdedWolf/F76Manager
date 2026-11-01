@@ -99,9 +99,11 @@ public partial class Form1
 
         if (attempt.Name == "default" && options == null && _prewarmedWebViewEnvironment != null)
         {
+            var prewarm = _prewarmedWebViewEnvironment;
+            _prewarmedWebViewEnvironment = null;
             try
             {
-                return await _prewarmedWebViewEnvironment.ConfigureAwait(true);
+                return await prewarm.ConfigureAwait(true);
             }
             catch (Exception ex)
             {
@@ -112,10 +114,60 @@ public partial class Form1
         return await CoreWebView2Environment.CreateAsync(null, attempt.UserDataFolder, options);
     }
 
+    private void TearDownWebView()
+    {
+        try
+        {
+            if (webView != null)
+            {
+                try { this.Controls.Remove(webView); } catch { }
+                try { webView.Dispose(); } catch { }
+            }
+        }
+        catch { }
+        finally
+        {
+            webView = null;
+            _webViewHandlersAttached = false;
+            _findAcceleratorHooked = false;
+        }
+    }
+
+    private void ShowStartupError(string text, string caption)
+    {
+        void ShowDialog()
+        {
+            try
+            {
+                if (!Visible) base.Show();
+                if (WindowState == FormWindowState.Minimized)
+                    WindowState = FormWindowState.Normal;
+                Activate();
+                MessageBox.Show(this, text, caption, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch
+            {
+                try { MessageBox.Show(text, caption, MessageBoxButtons.OK, MessageBoxIcon.Error); } catch { }
+            }
+        }
+
+        try
+        {
+            if (InvokeRequired)
+                Invoke(ShowDialog);
+            else
+                ShowDialog();
+        }
+        catch { }
+    }
+
+    private static string FormatWebViewInitFailure(Exception ex) =>
+        $"{ex.GetType().Name} HResult=0x{ex.HResult:X8} {ex.Message}";
+
     private async Task InitializeWebViewWithAttempt(WebViewAttempt attempt)
     {
         PrepareWebViewShell();
-        this.Text = "Fallout 76 Manager";
+        this.Text = "F76 Manager";
 
         var env = await CreateWebViewEnvironmentAsync(attempt);
         StartupTrace.Mark($"WebView2: environment ready ({attempt.Name})");
@@ -208,6 +260,7 @@ public partial class Form1
 
         webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+        webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
         TryHookFindKeys();
 
         webView.CoreWebView2.SourceChanged += (s, e) =>
@@ -249,6 +302,20 @@ public partial class Form1
                 LogActivity("[WEBVIEW] ProcessFailed (exception while logging).");
             }
 
+            if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.GpuProcessExited)
+            {
+                try { LogActivity("[WEBVIEW] GPU process exited (WebView2 will restart it)."); } catch { }
+                return;
+            }
+
+            if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited
+                || (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited
+                    && IsMainFrameAffectedByProcessFailure(e)))
+            {
+                TryReloadAfterRendererCrash();
+                return;
+            }
+
             if (!_webViewRecoveryAttempted && e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
             {
                 _webViewRecoveryAttempted = true;
@@ -257,8 +324,7 @@ public partial class Form1
                 {
                     this.Invoke(() =>
                     {
-                        try { if (webView != null) { this.Controls.Remove(webView); webView.Dispose(); } } catch { }
-                        _webViewHandlersAttached = false;
+                        TearDownWebView();
                         _ = InitializeWebViewFromAttemptList(startIndex: 1);
                     });
                 }
@@ -268,30 +334,16 @@ public partial class Form1
 
             if (_webViewRecoveryAttempted && e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
             {
-                try
-                {
-                    this.Invoke(() =>
-                    {
-                        try
-                        {
-                            MessageBox.Show(
-                                "WebView2 failed to start (browser process exited).\r\n\r\n" +
-                                "Fixes to try:\r\n" +
-                                "1) Install/repair Microsoft Edge WebView2 Runtime\r\n" +
-                                "2) Update GPU drivers (or try a different GPU)\r\n" +
-                                "3) Delete the app's WebView2 cache folder and relaunch\r\n\r\n" +
-                                $"Cache folders:\r\n- {Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Cache_v2")}\r\n" +
-                                $"- {Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Cache_v2_recover")}\r\n\r\n" +
-                                "A detailed log was written to Release/Logs/activity.log.",
-                                "WebView2 Startup Failure",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Error
-                            );
-                        }
-                        catch { }
-                    });
-                }
-                catch { }
+                ShowStartupError(
+                    "WebView2 failed to start (browser process exited).\r\n\r\n" +
+                    "Fixes to try:\r\n" +
+                    "1) Install/repair Microsoft Edge WebView2 Runtime\r\n" +
+                    "2) Update GPU drivers (or try a different GPU)\r\n" +
+                    "3) Delete the app's WebView2 cache folder and relaunch\r\n\r\n" +
+                    $"Cache folders:\r\n- {Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Cache_v2")}\r\n" +
+                    $"- {Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Cache_v2_recover")}\r\n\r\n" +
+                    "A detailed log was written to Release/Logs/activity.log.",
+                    "WebView2 Startup Failure");
             }
         };
 
@@ -313,9 +365,58 @@ public partial class Form1
         if (IsRunningAsAdmin()) ApplyDeepUIPI();
     }
 
+    private static bool IsMainFrameAffectedByProcessFailure(CoreWebView2ProcessFailedEventArgs e)
+    {
+        try
+        {
+            var frames = e.FrameInfosForFailedProcess;
+            if (frames == null || frames.Count == 0) return true;
+            foreach (var frame in frames)
+            {
+                if (frame == null) continue;
+                if (string.IsNullOrEmpty(frame.Name)) return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private void TryReloadAfterRendererCrash()
+    {
+        const int maxReloads = 3;
+        if (_webViewRendererReloadCount >= maxReloads)
+        {
+            try { LogActivity($"[WEBVIEW] Renderer crash recovery exhausted ({maxReloads} reloads)."); } catch { }
+            return;
+        }
+
+        _webViewRendererReloadCount++;
+        int attempt = _webViewRendererReloadCount;
+        try { LogActivity($"[WEBVIEW] Renderer process exited; reloading ({attempt}/{maxReloads})."); } catch { }
+
+        void Reload()
+        {
+            try { webView?.CoreWebView2?.Reload(); }
+            catch (Exception ex)
+            {
+                try { LogActivity($"[WEBVIEW] Renderer reload failed: {ex.Message}"); } catch { }
+            }
+        }
+
+        try
+        {
+            if (InvokeRequired)
+                BeginInvoke(Reload);
+            else
+                Reload();
+        }
+        catch { }
+    }
+
     private async Task InitializeWebViewFromAttemptList(int startIndex = 0)
     {
         var attempts = BuildWebViewAttempts();
+        bool defaultRetried = false;
         for (int i = startIndex; i < attempts.Count; i++)
         {
             var attempt = attempts[i];
@@ -327,42 +428,35 @@ public partial class Form1
             }
             catch (Exception ex)
             {
-                try { LogActivity($"[WEBVIEW] Attempt {attempt.Name} failed to initialize: {ex.GetType().Name} {ex.Message}"); } catch { }
+                try { LogActivity($"[WEBVIEW] Attempt {attempt.Name} failed to initialize: {FormatWebViewInitFailure(ex)}"); } catch { }
                 try
                 {
-                    this.Invoke(() =>
-                    {
-                        try { if (webView != null) { this.Controls.Remove(webView); webView.Dispose(); } } catch { }
-                        _webViewHandlersAttached = false;
-                    });
+                    if (InvokeRequired)
+                        Invoke(TearDownWebView);
+                    else
+                        TearDownWebView();
                 }
                 catch { }
+
+                if (attempt.Name == "default" && !defaultRetried)
+                {
+                    defaultRetried = true;
+                    try { LogActivity("[WEBVIEW] Retrying default profile after short delay."); } catch { }
+                    await Task.Delay(750).ConfigureAwait(true);
+                    i--;
+                }
             }
         }
 
-        try
-        {
-            this.Invoke(() =>
-            {
-                try
-                {
-                    MessageBox.Show(
-                        "WebView2 failed to start after multiple launch attempts.\r\n\r\n" +
-                        "This is usually caused by a broken WebView2 Runtime install, GPU/driver issues, or security/injection software.\r\n\r\n" +
-                        "Fixes to try:\r\n" +
-                        "1) Repair/reinstall Microsoft Edge WebView2 Runtime\r\n" +
-                        "2) Update GPU drivers\r\n" +
-                        "3) Temporarily disable overlays / antivirus web protection\r\n\r\n" +
-                        "A detailed log was written to Release/Logs/activity.log.",
-                        "WebView2 Startup Failure",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error
-                    );
-                }
-                catch { }
-            });
-        }
-        catch { }
+        ShowStartupError(
+            "WebView2 failed to start after multiple launch attempts.\r\n\r\n" +
+            "This is usually caused by a broken WebView2 Runtime install, GPU/driver issues, or security/injection software.\r\n\r\n" +
+            "Fixes to try:\r\n" +
+            "1) Repair/reinstall Microsoft Edge WebView2 Runtime\r\n" +
+            "2) Update GPU drivers\r\n" +
+            "3) Temporarily disable overlays / antivirus web protection\r\n\r\n" +
+            "A detailed log was written to Release/Logs/activity.log.",
+            "WebView2 Startup Failure");
     }
 
     private async void InitializeWebView()
@@ -370,11 +464,12 @@ public partial class Form1
         try 
         {
             _webViewRecoveryAttempted = false;
+            _webViewRendererReloadCount = 0;
             await InitializeWebViewFromAttemptList(startIndex: 0);
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"WebView2 Error: {ex.Message}", "Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowStartupError($"WebView2 Error: {ex.Message}", "Fatal Error");
         }
     }
 
@@ -522,9 +617,11 @@ public partial class Form1
             shouldLog =
                 p.Equals("index.html", StringComparison.OrdinalIgnoreCase) ||
                 p.Equals("logs-popout.html", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("bundle-preview-popout.html", StringComparison.OrdinalIgnoreCase) ||
                 p.Equals("theme-creator.html", StringComparison.OrdinalIgnoreCase) ||
                 p.Equals("js/app.bundle.js", StringComparison.OrdinalIgnoreCase) ||
                 p.Equals("js/logs-popout.bundle.js", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals("js/bundle-preview-popout.bundle.js", StringComparison.OrdinalIgnoreCase) ||
                 p.Equals("js/theme-creator.bundle.js", StringComparison.OrdinalIgnoreCase) ||
                 p.Equals("css/style.css", StringComparison.OrdinalIgnoreCase);
         }
@@ -566,6 +663,20 @@ public partial class Form1
             {
                 e.Response = core.Environment.CreateWebResourceResponse(
                     logoMs, 200, "OK", VirtualHostResponseHeaders(GetContentType(logoPath)));
+                return;
+            }
+            e.Response = core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
+            return;
+        }
+
+        if (path.StartsWith("user-theme-banner/", StringComparison.OrdinalIgnoreCase))
+        {
+            var bannerPath = _themePackageLoader.ResolveBannerPhysicalPath(path);
+            if (bannerPath != null && File.Exists(bannerPath)
+                && TryOpenFileAsMemoryStream(bannerPath, out var bannerMs) && bannerMs != null)
+            {
+                e.Response = core.Environment.CreateWebResourceResponse(
+                    bannerMs, 200, "OK", VirtualHostResponseHeaders(GetContentType(bannerPath)));
                 return;
             }
             e.Response = core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");

@@ -102,6 +102,8 @@ async function boot() {
             } else {
                 creator._setStatus('error', data.error || window._t('theme_creator_save_failed'));
             }
+        } else if (data.type === 'HERO_BANNER_SIZE') {
+            creator.setHeroBannerSize(data.width, data.height);
         } else if (data.type === 'THEME_CREATOR_LOAD') {
             const id = (data.editThemeId || '').trim();
             if (!id) return;

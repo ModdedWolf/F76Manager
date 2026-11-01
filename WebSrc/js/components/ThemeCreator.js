@@ -10,6 +10,10 @@ import {
     getLogoUrlForTheme,
     getThemeOptionsForSettings,
     getBuiltInLogoOptions,
+    DEFAULT_BANNER_LAYOUT,
+    normalizeBannerLayout,
+    heroBannerStyle,
+    getBannerForTheme,
 } from '../utils/themeManager.js';
 import { appConfirm } from '../utils/appConfirm.js';
 import { setSharpLogo } from '../utils/logoSharpen.js';
@@ -17,6 +21,8 @@ import { setSharpLogo } from '../utils/logoSharpen.js';
 const DRAFT_ID = '__draft';
 const MAX_LOGO_DIM = 512;
 const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+const MAX_BANNER_DIM = 1920;
+const MAX_BANNER_BYTES = 16 * 1024 * 1024;
 
 const COLOR_TOKENS = [
     { key: 'bg-dark', labelKey: 'theme_token_bg_dark', derived: false },
@@ -292,18 +298,17 @@ function isAnimatedFriendlyMime(file) {
         || name.endsWith('.gif') || name.endsWith('.webp');
 }
 
-async function resizeLogoFile(file) {
-    if (file.size > MAX_LOGO_BYTES) {
-        throw new Error(t('theme_creator_logo_too_large'));
-    }
-
+async function processThemeImageFile(file, { maxDim, maxBytes, tooLargeMessage }) {
     if (isAnimatedFriendlyMime(file)) {
+        if (file.size > maxBytes) {
+            throw new Error(tooLargeMessage);
+        }
         const dataUrl = await readFileAsDataUrl(file);
         return { dataUrl, mime: file.type || 'image/gif' };
     }
 
     const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, MAX_LOGO_DIM / Math.max(bitmap.width, bitmap.height));
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
     const w = Math.max(1, Math.round(bitmap.width * scale));
     const h = Math.max(1, Math.round(bitmap.height * scale));
     const canvas = document.createElement('canvas');
@@ -315,13 +320,29 @@ async function resizeLogoFile(file) {
 
     const toBlob = (type, quality) => new Promise((resolve) => canvas.toBlob(resolve, type, quality));
     let blob = await toBlob('image/png');
-    if (blob && blob.size > MAX_LOGO_BYTES) blob = await toBlob('image/jpeg', 0.88);
-    if (blob && blob.size > MAX_LOGO_BYTES) blob = await toBlob('image/jpeg', 0.72);
-    if (!blob || blob.size > MAX_LOGO_BYTES) {
-        throw new Error(t('theme_creator_logo_too_large'));
+    if (blob && blob.size > maxBytes) blob = await toBlob('image/jpeg', 0.88);
+    if (blob && blob.size > maxBytes) blob = await toBlob('image/jpeg', 0.72);
+    if (!blob || blob.size > maxBytes) {
+        throw new Error(tooLargeMessage);
     }
     const dataUrl = await readFileAsDataUrl(blob);
     return { dataUrl, mime: blob.type };
+}
+
+async function resizeLogoFile(file) {
+    return processThemeImageFile(file, {
+        maxDim: MAX_LOGO_DIM,
+        maxBytes: MAX_LOGO_BYTES,
+        tooLargeMessage: t('theme_creator_logo_too_large'),
+    });
+}
+
+async function processBannerFile(file) {
+    return processThemeImageFile(file, {
+        maxDim: MAX_BANNER_DIM,
+        maxBytes: MAX_BANNER_BYTES,
+        tooLargeMessage: tOr('theme_creator_banner_too_large', 'Banner image is too large (max 16 MB).'),
+    });
 }
 
 export class ThemeCreator {
@@ -336,6 +357,11 @@ export class ThemeCreator {
         this.tokens = {};
         this.logoLayout = { ...DEFAULT_LOGO_LAYOUT };
         this.logoDataUrl = '';
+        this.bannerDataUrl = '';
+        this.bannerLayout = { ...DEFAULT_BANNER_LAYOUT };
+        this.heroSize = null;
+        this._bannerRO = null;
+        this._lastSentBannerUrl = undefined;
         this._pendingLogoFetch = '';
         this.displayName = '';
         this.themeId = '';
@@ -387,6 +413,10 @@ export class ThemeCreator {
 
         this.logoLayout = normalizeLogoLayout(data.logoLayout || DEFAULT_LOGO_LAYOUT);
         this.logoDataUrl = data.logoDataUrl || '';
+        this.bannerDataUrl = data.bannerDataUrl || '';
+        this.bannerLayout = normalizeBannerLayout(data.bannerLayout);
+        this._bannerSeedToken = (this._bannerSeedToken || 0) + 1;
+        this._lastSentBannerUrl = undefined;
         this._pendingLogoFetch = this.logoDataUrl ? '' : getLogoUrlForTheme(data.id);
         this.dirty = false;
         this._status = { type: '', text: '' };
@@ -417,7 +447,11 @@ export class ThemeCreator {
             : { ...DEFAULT_LOGO_LAYOUT };
 
         this.logoDataUrl = '';
+        this.bannerDataUrl = '';
+        this.bannerLayout = { ...DEFAULT_BANNER_LAYOUT };
+        this._lastSentBannerUrl = undefined;
         this._pendingLogoFetch = getLogoUrlForTheme(this.startFrom);
+        this._loadBannerFromTheme(this.startFrom);
 
         if (!keepIdentity) {
             this.displayName = '';
@@ -428,6 +462,27 @@ export class ThemeCreator {
             this.dirty = false;
             this.editMode = false;
         }
+    }
+
+    async _loadBannerFromTheme(themeId) {
+        const source = getBannerForTheme(themeId);
+        this._bannerSeedToken = (this._bannerSeedToken || 0) + 1;
+        const token = this._bannerSeedToken;
+        if (!source) return;
+        this.bannerLayout = { ...source.layout };
+        try {
+            const res = await fetch(source.url);
+            if (!res.ok) return;
+            const dataUrl = await readFileAsDataUrl(await res.blob());
+            if (token !== this._bannerSeedToken || this.bannerDataUrl) return;
+            this.bannerDataUrl = dataUrl;
+            if (this.activeTab === 'banner') {
+                this._render();
+                this._bind();
+                if (window.lucide) window.lucide.createIcons();
+            }
+            this._pushPreview();
+        } catch {  }
     }
 
     _recomputeDerived() {
@@ -453,18 +508,26 @@ export class ThemeCreator {
         const css = this._buildCss();
         const logo = this._currentLogoUrl();
         const layout = normalizeLogoLayout(this.logoLayout);
+        const bannerLayout = normalizeBannerLayout(this.bannerLayout);
         if (isThemePreviewActive()) {
-            updateThemePreview(css, logo, layout);
+            updateThemePreview(css, logo, layout, this.bannerDataUrl || '', bannerLayout);
         } else {
-            beginThemePreview(css, logo, layout);
+            beginThemePreview(css, logo, layout, this.bannerDataUrl || '', bannerLayout);
         }
         try {
-            window.chrome?.webview?.postMessage({
+            const payload = {
                 type: 'THEME_PREVIEW_UPDATE',
                 css,
                 logoUrl: logo,
                 layout,
-            });
+                bannerLayout,
+            };
+            const banner = this.bannerDataUrl || '';
+            if (banner !== this._lastSentBannerUrl) {
+                payload.bannerUrl = banner;
+                this._lastSentBannerUrl = banner;
+            }
+            window.chrome?.webview?.postMessage(payload);
         } catch {  }
         this._updateReplicaLogos();
     }
@@ -472,6 +535,7 @@ export class ThemeCreator {
     _contentTitle() {
         if (this.activeTab === 'colors') return t('theme_creator_tab_colors');
         if (this.activeTab === 'logo') return t('theme_creator_tab_logo');
+        if (this.activeTab === 'banner') return tOr('theme_creator_tab_banner', 'Banner');
         return t('theme_creator_tab_general');
     }
 
@@ -591,6 +655,100 @@ export class ThemeCreator {
             </div>
             <div class="theme-creator-colors-grid">${rows}</div>
         `;
+    }
+
+    _renderBanner() {
+        const bannerSrc = escapeAttr(this.bannerDataUrl || 'assets/dashboard_hero.jpg');
+        const B = normalizeBannerLayout(this.bannerLayout);
+        return `
+            <div class="theme-creator-banner-section">
+                <div class="theme-creator-banner-actions">
+                    <button type="button" class="btn-secondary" id="theme-creator-pick-banner">
+                        <i data-lucide="image-plus"></i>
+                        <span>${escapeHtml(tOr('theme_creator_pick_banner', 'Choose image or GIF'))}</span>
+                    </button>
+                    <input type="file" id="theme-creator-banner-file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" hidden>
+                    <button type="button" class="btn-secondary" id="theme-creator-default-banner" ${this.bannerDataUrl ? '' : 'disabled'}>
+                        <i data-lucide="rotate-ccw"></i>
+                        <span>${escapeHtml(tOr('theme_creator_banner_default', 'Use default banner'))}</span>
+                    </button>
+                    <p class="tweak-desc">${escapeHtml(tOr('theme_creator_banner_hint', 'Shown on the Dashboard behind the welcome text. PNG, JPEG, WebP, or GIF (animated OK, max 16 MB).'))}</p>
+                </div>
+                <div class="theme-creator-banner-frame" id="theme-creator-banner-frame">
+                <div class="hero-banner theme-creator-banner-preview" id="theme-creator-banner-preview" title="${escapeAttr(tOr('theme_creator_banner_drag_hint', 'Drag to move the image, scroll to zoom.'))}"${this.heroSize ? ` style="height: ${this.heroSize.height}px;"` : ''}>
+                    <img src="${bannerSrc}" alt="" class="hero-img" draggable="false" style="${escapeAttr(heroBannerStyle(B))}">
+                    <div class="hero-overlay">
+                        <h1>${escapeHtml(t('welcome_back_hero', 'Overseer'))}</h1>
+                        <p>${escapeHtml(t('hero_desc'))}</p>
+                    </div>
+                </div>
+                </div>
+                <p class="tweak-desc">${escapeHtml(tOr('theme_creator_banner_drag_hint', 'Drag to move the image, scroll to zoom.'))}</p>
+
+                <div class="theme-creator-sliders theme-creator-banner-sliders">
+                    <div class="tweak-item" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+                        <div class="tweak-label">${escapeHtml(tOr('theme_creator_banner_pos_x', 'Horizontal position'))} <em id="tc-bx-val">${Math.round(B.x)}%</em></div>
+                        <input type="range" class="tweak-range" id="tc-banner-x" min="0" max="100" step="1" value="${Math.round(B.x)}">
+                    </div>
+                    <div class="tweak-item" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+                        <div class="tweak-label">${escapeHtml(tOr('theme_creator_banner_pos_y', 'Vertical position'))} <em id="tc-by-val">${Math.round(B.y)}%</em></div>
+                        <input type="range" class="tweak-range" id="tc-banner-y" min="0" max="100" step="1" value="${Math.round(B.y)}">
+                    </div>
+                    <div class="tweak-item" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+                        <div class="tweak-label">${escapeHtml(tOr('theme_creator_banner_zoom', 'Zoom'))} <em id="tc-bz-val">${B.zoom.toFixed(2)}x</em></div>
+                        <input type="range" class="tweak-range" id="tc-banner-zoom" min="100" max="400" step="5" value="${Math.round(B.zoom * 100)}">
+                    </div>
+                    <div class="tweak-item" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+                        <button type="button" class="btn-secondary" id="tc-banner-reset">
+                            <i data-lucide="move"></i>
+                            <span>${escapeHtml(tOr('theme_creator_banner_reset_pos', 'Reset position'))}</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    setHeroBannerSize(width, height) {
+        const w = Math.round(Number(width));
+        const h = Math.round(Number(height));
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return;
+        if (this.heroSize?.width === w && this.heroSize?.height === h) return;
+        this.heroSize = { width: w, height: h };
+        this._fitBannerPreview();
+    }
+
+    _fitBannerPreview() {
+        const frame = this.root?.querySelector('#theme-creator-banner-frame');
+        const preview = this.root?.querySelector('#theme-creator-banner-preview');
+        if (!frame || !preview) return;
+        preview.style.width = '100%';
+        preview.style.height = this.heroSize ? `${this.heroSize.height}px` : '';
+    }
+
+    _syncBannerControls() {
+        const B = normalizeBannerLayout(this.bannerLayout);
+        const root = this.root;
+        if (!root) return;
+        const set = (id, value, label) => {
+            const input = root.querySelector(`#${id}`);
+            if (input && Number(input.value) !== value) input.value = String(value);
+            const em = root.querySelector(`#${id.replace('tc-banner-', 'tc-b')}-val`);
+            if (em) em.textContent = label;
+        };
+        set('tc-banner-x', Math.round(B.x), `${Math.round(B.x)}%`);
+        set('tc-banner-y', Math.round(B.y), `${Math.round(B.y)}%`);
+        const zoomEm = root.querySelector('#tc-bz-val');
+        const zoomInput = root.querySelector('#tc-banner-zoom');
+        if (zoomInput) zoomInput.value = String(Math.round(B.zoom * 100));
+        if (zoomEm) zoomEm.textContent = `${B.zoom.toFixed(2)}x`;
+    }
+
+    _setBannerLayout(next) {
+        this.bannerLayout = normalizeBannerLayout(next);
+        this._syncBannerControls();
+        this._markDirty();
+        this._pushPreview();
     }
 
     _renderLogo() {
@@ -725,6 +883,7 @@ export class ThemeCreator {
     _activePanelHtml() {
         if (this.activeTab === 'colors') return this._renderColors();
         if (this.activeTab === 'logo') return this._renderLogo();
+        if (this.activeTab === 'banner') return this._renderBanner();
         return this._renderGeneral();
     }
 
@@ -759,6 +918,10 @@ export class ThemeCreator {
                             <button type="button" class="settings-tab-btn ${this.activeTab === 'logo' ? 'active' : ''}" data-tc-tab="logo">
                                 <i data-lucide="image"></i>
                                 <span>${escapeHtml(t('theme_creator_tab_logo'))}</span>
+                            </button>
+                            <button type="button" class="settings-tab-btn ${this.activeTab === 'banner' ? 'active' : ''}" data-tc-tab="banner">
+                                <i data-lucide="mountain"></i>
+                                <span>${escapeHtml(tOr('theme_creator_tab_banner', 'Banner'))}</span>
                             </button>
                         </nav>
                         <div class="settings-inner-content">
@@ -1118,6 +1281,53 @@ export class ThemeCreator {
             }
         }, { signal });
 
+        const pickBannerBtn = root.querySelector('#theme-creator-pick-banner');
+        const bannerFileInput = root.querySelector('#theme-creator-banner-file');
+        pickBannerBtn?.addEventListener('click', () => bannerFileInput?.click(), { signal });
+        bannerFileInput?.addEventListener('change', async (e) => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (!file) return;
+            try {
+                const { dataUrl } = await processBannerFile(file);
+                this.bannerDataUrl = dataUrl;
+                this.bannerLayout = { ...DEFAULT_BANNER_LAYOUT };
+                this._setStatus('', '');
+                this._markDirty();
+                this._render();
+                this._bind();
+                if (window.lucide) window.lucide.createIcons();
+                this._pushPreview();
+            } catch (err) {
+                this._setStatus('error', err?.message || t('theme_creator_logo_failed'));
+            }
+        }, { signal });
+        root.querySelector('#theme-creator-default-banner')?.addEventListener('click', () => {
+            if (!this.bannerDataUrl) return;
+            this.bannerDataUrl = '';
+            this.bannerLayout = { ...DEFAULT_BANNER_LAYOUT };
+            this._bannerSeedToken = (this._bannerSeedToken || 0) + 1;
+            this._markDirty();
+            this._render();
+            this._bind();
+            if (window.lucide) window.lucide.createIcons();
+            this._pushPreview();
+        }, { signal });
+
+        root.querySelector('#tc-banner-x')?.addEventListener('input', (e) => {
+            this._setBannerLayout({ ...this.bannerLayout, x: Number(e.target.value) });
+        }, { signal });
+        root.querySelector('#tc-banner-y')?.addEventListener('input', (e) => {
+            this._setBannerLayout({ ...this.bannerLayout, y: Number(e.target.value) });
+        }, { signal });
+        root.querySelector('#tc-banner-zoom')?.addEventListener('input', (e) => {
+            this._setBannerLayout({ ...this.bannerLayout, zoom: Number(e.target.value) / 100 });
+        }, { signal });
+        root.querySelector('#tc-banner-reset')?.addEventListener('click', () => {
+            this._setBannerLayout({ ...DEFAULT_BANNER_LAYOUT });
+        }, { signal });
+        this._bindBannerPreviewEdit(signal);
+
         root.querySelectorAll('.theme-creator-builtin-logo').forEach((btn) => {
             btn.addEventListener('click', () => {
                 this._useBuiltInLogo(btn.dataset.logoUrl, btn.dataset.logoTheme);
@@ -1209,6 +1419,51 @@ export class ThemeCreator {
         });
     }
 
+    _bindBannerPreviewEdit(signal) {
+        const preview = this.root?.querySelector('#theme-creator-banner-preview');
+        if (!preview) return;
+
+        this._fitBannerPreview();
+        requestAnimationFrame(() => this._fitBannerPreview());
+        if (this._bannerRO) { try { this._bannerRO.disconnect(); } catch {  } this._bannerRO = null; }
+        const frame = this.root?.querySelector('#theme-creator-banner-frame');
+        if (frame && typeof ResizeObserver !== 'undefined') {
+            this._bannerRO = new ResizeObserver(() => this._fitBannerPreview());
+            this._bannerRO.observe(frame);
+            signal?.addEventListener?.('abort', () => {
+                try { this._bannerRO?.disconnect(); } catch {  }
+                this._bannerRO = null;
+            }, { once: true });
+        }
+
+        preview.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            preview.setPointerCapture?.(e.pointerId);
+            preview.classList.add('is-dragging');
+            const rect = preview.getBoundingClientRect();
+            const start = { x: e.clientX, y: e.clientY, base: { ...this.bannerLayout } };
+            const onMove = (ev) => {
+                const dx = (ev.clientX - start.x) / Math.max(1, rect.width) * 100;
+                const dy = (ev.clientY - start.y) / Math.max(1, rect.height) * 100;
+                this._setBannerLayout({ ...start.base, x: start.base.x - dx, y: start.base.y - dy });
+            };
+            const onUp = () => {
+                preview.classList.remove('is-dragging');
+                window.removeEventListener('pointermove', onMove);
+                window.removeEventListener('pointerup', onUp);
+            };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onUp);
+        }, { signal });
+
+        preview.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? -0.1 : 0.1;
+            this._setBannerLayout({ ...this.bannerLayout, zoom: this.bannerLayout.zoom + delta });
+        }, { signal, passive: false });
+    }
+
     _buildManifest() {
         this._recomputeDerived();
         const tokens = {};
@@ -1220,6 +1475,7 @@ export class ThemeCreator {
             displayName: this.displayName.trim(),
             tokens,
             logoLayout: normalizeLogoLayout(this.logoLayout),
+            bannerLayout: normalizeBannerLayout(this.bannerLayout),
         };
     }
 
@@ -1255,6 +1511,7 @@ export class ThemeCreator {
                 mode,
                 manifest,
                 logoDataUrl,
+                bannerDataUrl: this.bannerDataUrl || '',
             });
         } catch (err) {
             this._setStatus('error', err?.message || t('theme_creator_save_failed'));

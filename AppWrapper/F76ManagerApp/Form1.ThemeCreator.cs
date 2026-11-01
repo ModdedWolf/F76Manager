@@ -161,6 +161,19 @@ public partial class Form1
             };
             string logoDataUrl = $"data:{mime};base64,{Convert.ToBase64String(content.LogoBytes)}";
 
+            string bannerDataUrl = "";
+            if (content.BannerBytes.Length > 0)
+            {
+                string bannerMime = content.BannerExtension.ToLowerInvariant() switch
+                {
+                    ".gif" => "image/gif",
+                    ".webp" => "image/webp",
+                    ".jpg" or ".jpeg" => "image/jpeg",
+                    _ => "image/png",
+                };
+                bannerDataUrl = $"data:{bannerMime};base64,{Convert.ToBase64String(content.BannerBytes)}";
+            }
+
             Post(new
             {
                 type = "THEME_EDIT_DATA",
@@ -170,6 +183,8 @@ public partial class Form1
                 tokens = content.Tokens,
                 logoLayout = content.LogoLayout,
                 logoDataUrl,
+                bannerDataUrl,
+                bannerLayout = content.BannerLayout,
             });
         }
         catch (Exception ex)
@@ -193,10 +208,17 @@ public partial class Form1
                     writer.WriteString("css", css.GetString() ?? "");
                 if (root.TryGetProperty("logoUrl", out var logo))
                     writer.WriteString("logoUrl", logo.GetString() ?? "");
+                if (root.TryGetProperty("bannerUrl", out var banner))
+                    writer.WriteString("bannerUrl", banner.GetString() ?? "");
                 if (root.TryGetProperty("layout", out var layout) && layout.ValueKind == JsonValueKind.Object)
                 {
                     writer.WritePropertyName("layout");
                     layout.WriteTo(writer);
+                }
+                if (root.TryGetProperty("bannerLayout", out var bannerLayout) && bannerLayout.ValueKind == JsonValueKind.Object)
+                {
+                    writer.WritePropertyName("bannerLayout");
+                    bannerLayout.WriteTo(writer);
                 }
                 writer.WriteEndObject();
             }

@@ -14,6 +14,9 @@ public static class ThemePackageReader
         public Dictionary<string, object> LogoLayout { get; init; } = new(StringComparer.Ordinal);
         public byte[] LogoBytes { get; init; } = Array.Empty<byte>();
         public string LogoExtension { get; init; } = ".png";
+        public byte[] BannerBytes { get; init; } = Array.Empty<byte>();
+        public string BannerExtension { get; init; } = "";
+        public IReadOnlyDictionary<string, object> BannerLayout { get; init; } = new Dictionary<string, object>(StringComparer.Ordinal);
     }
 
     public static bool TryRead(string packagePath, out ThemePackageContent? content, out string? error)
@@ -36,7 +39,7 @@ public static class ThemePackageReader
 
         using var zip = ZipFile.OpenRead(packagePath);
         var entries = zip.Entries.Where(e => !string.IsNullOrEmpty(e.Name)).ToList();
-        if (entries.Count == 0 || entries.Count > 2)
+        if (entries.Count == 0 || entries.Count > 3)
         {
             error = "Invalid entry count.";
             return false;
@@ -44,6 +47,7 @@ public static class ThemePackageReader
 
         ZipArchiveEntry? manifestEntry = null;
         ZipArchiveEntry? logoEntry = null;
+        ZipArchiveEntry? bannerEntry = null;
 
         foreach (var e in entries)
         {
@@ -53,6 +57,8 @@ public static class ThemePackageReader
                 manifestEntry = e;
             else if (name.StartsWith("logo.", StringComparison.OrdinalIgnoreCase))
                 logoEntry = e;
+            else if (name.StartsWith("banner.", StringComparison.OrdinalIgnoreCase))
+                bannerEntry = e;
             else
             {
                 error = $"Unexpected entry: {name}";
@@ -97,6 +103,27 @@ public static class ThemePackageReader
         if (!ThemePackageValidator.TryValidateLogoImage(logoBytes, out var ext, out error))
             return false;
 
+        byte[] bannerBytes = Array.Empty<byte>();
+        string bannerExt = "";
+        if (bannerEntry != null)
+        {
+            using (var bs = bannerEntry.Open())
+            using (var buf = new MemoryStream())
+            {
+                bs.CopyTo(buf);
+                bannerBytes = buf.ToArray();
+            }
+
+            if (bannerBytes.Length > ThemePackageValidator.MaxBannerBytes)
+            {
+                error = "Banner too large.";
+                return false;
+            }
+
+            if (!ThemePackageValidator.TryValidateLogoImage(bannerBytes, out bannerExt, out error))
+                return false;
+        }
+
         var logoLayout = ThemePackageValidator.NormalizeLogoLayout(
             JsonDocument.Parse(manifestJson).RootElement);
 
@@ -108,6 +135,9 @@ public static class ThemePackageReader
             LogoLayout = logoLayout,
             LogoBytes = logoBytes,
             LogoExtension = ext,
+            BannerBytes = bannerBytes,
+            BannerExtension = bannerExt,
+            BannerLayout = manifest.BannerLayout,
         };
         return true;
     }

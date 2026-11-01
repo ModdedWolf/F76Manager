@@ -11,7 +11,7 @@ function t(key, fallback) {
 }
 
 function previewNotice() {
-    return `<p class="preview-placeholder-notice" style="margin:0;padding:8px 16px;font-size:0.75rem;color:var(--text-muted);background:rgba(var(--primary-rgb),0.08);border-bottom:1px solid var(--border-color);text-align:center;">Theme preview — sample layout only (not connected to your mod list)</p>`;
+    return `<p class="preview-placeholder-notice" style="margin:0;padding:8px 16px;font-size:0.75rem;color:var(--text-muted);background:rgba(var(--primary-rgb),0.08);border-bottom:1px solid var(--border-color);text-align:center;">${t('theme_preview_notice', 'Theme preview — sample layout only (not connected to your mod list)')}</p>`;
 }
 
 function placeholderModRow({ name, file, type, version, enabled = true }) {
@@ -156,7 +156,7 @@ function renderConfigPlaceholder() {
 }
 
 function previewNoticeFooter() {
-    return `<p class="preview-placeholder-notice" style="margin:12px 24px 0;font-size:0.7rem;color:var(--text-muted);opacity:0.65;text-align:center;">Sample layout for theme preview only</p>`;
+    return `<p class="preview-placeholder-notice" style="margin:12px 24px 0;font-size:0.7rem;color:var(--text-muted);opacity:0.65;text-align:center;">${t('theme_preview_notice_short', 'Sample layout for theme preview only')}</p>`;
 }
 
 function renderBundlePlaceholder() {
@@ -166,13 +166,13 @@ function renderBundlePlaceholder() {
                 <div class="toolbar-left" style="display:flex;align-items:center;gap:16px;">
                     <div class="header-with-icon" style="display:flex;align-items:center;gap:12px;">
                         <i data-lucide="archive" style="width:24px;height:24px;color:var(--primary-green);"></i>
-                        <h2 style="margin:0;font-size:1.25rem;font-weight:700;">${t('mod_bundles', 'Mod Bundles')}</h2>
+                        <h2 style="margin:0;font-size:1.25rem;font-weight:700;">${t('bundle_creations', 'Creations')}</h2>
                         <span class="badge" style="background:rgba(255,255,255,0.1);">1</span>
                     </div>
                 </div>
                 <div class="tool-buttons">
                     <button type="button" class="btn-secondary" disabled>
-                        <i data-lucide="plus"></i> ${t('create_new_bundle', 'Create New Bundle')}
+                        <i data-lucide="plus"></i> ${t('create_new_bundle', 'Create New Mod')}
                     </button>
                 </div>
             </div>
@@ -211,7 +211,7 @@ export function renderPreviewPlaceholder(sectionId) {
         case 'bundle':
             return renderBundlePlaceholder();
         default:
-            return `<div class="empty-section" style="padding:48px;text-align:center;opacity:0.5;"><p>Preview placeholder unavailable.</p></div>`;
+            return `<div class="empty-section" style="padding:48px;text-align:center;opacity:0.5;"><p>${t('theme_preview_unavailable', 'Preview placeholder unavailable.')}</p></div>`;
     }
 }
 

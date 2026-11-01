@@ -191,7 +191,7 @@ export const ModsRenderer = {
                                     <i data-lucide="upload"></i>
                                     <span>${window._t('preset_export')}</span>
                                 </button>
-                                <button type="button" class="mods-actions-item" id="mods-action-preset-import">
+                                <button type="button" class="mods-actions-item" id="mods-action-preset-import" title="${escapeHtml(window._t('preset_import_hint'))}">
                                     <i data-lucide="download"></i>
                                     <span>${window._t('preset_import')}</span>
                                 </button>

@@ -183,8 +183,14 @@ public partial class Form1
         string? dropTarget = _modFileDropTarget;
         if (!string.IsNullOrWhiteSpace(dropTarget))
         {
+            var presetFiles = files.Where(IsModPresetFile).ToList();
+            var modFiles = files.Where(f => !IsModPresetFile(f)).ToList();
+            if (presetFiles.Count > 0)
+                HandleAddModFiles(presetFiles);
+            if (modFiles.Count == 0) return;
+
             LogActivity($"[PROCESS] Routing drop into mod '{dropTarget}'.");
-            HandleAddFilesToMod(dropTarget, files.ToList());
+            HandleAddFilesToMod(dropTarget, modFiles);
             return;
         }
         HandleAddModFiles(files.ToList());

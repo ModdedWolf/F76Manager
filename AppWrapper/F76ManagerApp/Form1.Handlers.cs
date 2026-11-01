@@ -89,6 +89,7 @@ public partial class Form1
         else
         {
             AddImportedKeysToActivePreset(importedKeys);
+            _modManager.InsertModsAtTopOfLoadOrder(importedKeys);
         }
 
         _modUpdateCache.Clear();
@@ -910,6 +911,29 @@ public partial class Form1
         return result;
     }
 
+    private List<F76ManagerApp.Managers.Ba2Replacement> ParseBa2ReplacementList(JsonElement root)
+    {
+        var result = new List<F76ManagerApp.Managers.Ba2Replacement>();
+        if (!TryGetArray(root, "replacements", out var arr, required: false)) return result;
+
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            if (!TryGetString(item, "path", out var entryPath) || string.IsNullOrWhiteSpace(entryPath)) continue;
+            if (!TryGetString(item, "source", out var source) || string.IsNullOrWhiteSpace(source)) continue;
+            string archive = TryGetString(item, "archive", out var archiveValue) ? archiveValue : "";
+
+            result.Add(new F76ManagerApp.Managers.Ba2Replacement
+            {
+                Archive = archive,
+                Path = entryPath,
+                Source = source
+            });
+        }
+
+        return result;
+    }
+
     private List<F76ManagerApp.Managers.FolderPartialSelection> ParseFolderPartialList(JsonElement root)
     {
         var result = new List<F76ManagerApp.Managers.FolderPartialSelection>();
@@ -1156,6 +1180,25 @@ public partial class Form1
                         HandleOpenThemeCreator(editThemeId);
                         break;
                     }
+                    case "HERO_BANNER_SIZE":
+                    {
+                        try
+                        {
+                            int w = root.TryGetProperty("width", out var wEl) && wEl.TryGetInt32(out var wi) ? Math.Clamp(wi, 1, 10000) : 0;
+                            int h = root.TryGetProperty("height", out var hEl) && hEl.TryGetInt32(out var hi) ? Math.Clamp(hi, 1, 10000) : 0;
+                            if (w > 0 && h > 0 && _themeCreator?.CoreWebView != null)
+                            {
+                                _themeCreator.CoreWebView.PostWebMessageAsJson(JsonSerializer.Serialize(new
+                                {
+                                    type = "HERO_BANNER_SIZE",
+                                    width = w,
+                                    height = h,
+                                }));
+                            }
+                        }
+                        catch { }
+                        break;
+                    }
                     case "SAVE_THEME_PACKAGE":
                         HandleSaveThemePackage(root);
                         break;
@@ -1267,6 +1310,7 @@ public partial class Form1
                             var bFolders = GetStringList(root, "folders");
                             var bPartial = ParseBa2PartialList(root);
                             var bFolderPartial = ParseFolderPartialList(root);
+                            var bReplacements = ParseBa2ReplacementList(root);
                             if (bMods.Count == 0 && bFolders.Count == 0 && bPartial.Count == 0 && bFolderPartial.Count == 0)
                             {
                                 LogError("[RCV] CREATE_BUNDLE missing or empty 'mods', 'folders', 'ba2Partial', and 'folderPartial'.");
@@ -1275,7 +1319,28 @@ public partial class Form1
                             string bCompression = (root.TryGetProperty("compression", out var cProp) && cProp.ValueKind == JsonValueKind.String) ? (cProp.GetString() ?? "Default") : "Default";
                             string bFormat = (root.TryGetProperty("format", out var formatProp) && formatProp.ValueKind == JsonValueKind.String) ? (formatProp.GetString() ?? "Auto") : "Auto";
 
-                            _bundleManager.CreateBundle(bName, bMods, bFolders, bPartial, bFolderPartial, bCompression, bFormat, generatedFiles => this.Invoke(() => {
+                            if (TryGetString(root, "editBundle", out var editBundleKey) && !string.IsNullOrWhiteSpace(editBundleKey))
+                            {
+                                var editTarget = _modManager.PrepareBundleEdit(editBundleKey, out string editError);
+                                if (editTarget == null)
+                                {
+                                    if (string.Equals(editError, "This mod is not a bundle.", StringComparison.Ordinal))
+                                        SendStatusMessage("error", editError, "bundle_not_a_bundle");
+                                    else
+                                        SendStatusMessage("error", $"Could not edit bundle: {editError}", "bundle_edit_failed", new object[] { editError ?? "" });
+                                    break;
+                                }
+                                _bundleManager.CreateBundle(editTarget.BaseName, bMods, bFolders, bPartial, bFolderPartial, bReplacements, editTarget, bCompression, bFormat, generatedFiles => this.Invoke(() => {
+                                    string newKey = _modManager.FinishBundleEdit(editTarget, generatedFiles);
+                                    if (!string.Equals(newKey, editTarget.Key, StringComparison.OrdinalIgnoreCase))
+                                        SyncProfileAfterModMovedToBundles(new List<string> { editTarget.Key }, newKey);
+                                    RefreshConflictCount();
+                                    SendDataToWeb();
+                                }));
+                                break;
+                            }
+
+                            _bundleManager.CreateBundle(bName, bMods, bFolders, bPartial, bFolderPartial, bReplacements, bCompression, bFormat, generatedFiles => this.Invoke(() => {
                                 AddNewBundleToActiveProfileAndPreset(generatedFiles);
                                 RefreshConflictCount();
                                 SendDataToWeb();
@@ -1283,7 +1348,26 @@ public partial class Form1
                         }
                         break;
                     case "BUNDLE_BROWSE_FOLDER":
-                        HandleBundleBrowseFolder();
+                        {
+                            string? mergeInto = TryGetString(root, "mergeInto", out var mergeArchive) ? mergeArchive : null;
+                            HandleBundleBrowseFolder(mergeInto);
+                        }
+                        break;
+                    case "BUNDLE_PICK_OVERLAY":
+                        if (TryGetString(root, "archive", out var overlayArchive, required: true))
+                        {
+                            string overlayMode = TryGetString(root, "mode", out var overlayModeVal) ? overlayModeVal : "files";
+                            string targetDir = TryGetString(root, "targetDir", out var overlayTarget) ? overlayTarget : "";
+                            HandleBundlePickOverlay(overlayArchive, targetDir, overlayMode);
+                        }
+                        break;
+                    case "BUNDLE_OVERLAY_FROM_FOLDERS":
+                        if (TryGetString(root, "archive", out var overlayFromArchive, required: true))
+                        {
+                            var overlayFolders = GetStringList(root, "folders");
+                            string overlayFromTarget = TryGetString(root, "targetDir", out var overlayFromDir) ? overlayFromDir : "";
+                            HandleBundleOverlayFromFolders(overlayFromArchive, overlayFolders, overlayFromTarget);
+                        }
                         break;
                     case "BUNDLE_EXTRACT":
                         if (TryGetString(root, "archive", out var extractArchive, required: true))
@@ -1295,12 +1379,42 @@ public partial class Form1
                                 HandleBundleExtract(extractArchive, extractPaths);
                         }
                         break;
+                    case "BUNDLE_ISOLATE_SELECTION":
+                        if (TryGetString(root, "archive", out var isolateArchive, required: true))
+                        {
+                            var isolatePaths = GetStringList(root, "paths");
+                            var isolateReplacements = ParseBa2ReplacementList(root);
+                            HandleBundleIsolateSelection(isolateArchive, isolatePaths, isolateReplacements);
+                        }
+                        break;
+                    case "BUNDLE_STAGE_LOOSE":
+                        if (TryGetString(root, "key", out var stageLooseKey, required: true))
+                            HandleBundleStageLoose(stageLooseKey);
+                        break;
+                    case "BUNDLE_DISCARD_ISOLATED":
+                        if (TryGetString(root, "path", out var discardIsolatedPath, required: true))
+                            HandleBundleDiscardIsolated(discardIsolatedPath);
+                        break;
                     case "BUNDLE_LIST_BA2":
                         if (TryGetString(root, "path", out var listBa2Path, required: true))
                             HandleBundleListBa2(listBa2Path);
                         break;
                     case "BUNDLE_ADD_DROPPED_FILES":
-                        HandleBundleDroppedFiles(e.AdditionalObjects);
+                        {
+                            var dropSources = new List<(string Kind, string Ref)>();
+                            if (TryGetArray(root, "sources", out var sourcesArr, required: false))
+                            {
+                                foreach (var item in sourcesArr.EnumerateArray())
+                                {
+                                    if (item.ValueKind != JsonValueKind.Object) continue;
+                                    string kind = TryGetString(item, "kind", out var kindVal) ? (kindVal ?? "") : "";
+                                    string srcRef = TryGetString(item, "ref", out var refVal) ? (refVal ?? "") : "";
+                                    if (string.IsNullOrWhiteSpace(kind) || string.IsNullOrWhiteSpace(srcRef)) continue;
+                                    dropSources.Add((kind.Trim().ToLowerInvariant(), srcRef));
+                                }
+                            }
+                            HandleBundleDroppedFiles(e.AdditionalObjects, dropSources);
+                        }
                         break;
                     case "BUNDLE_PREVIEW_FILE":
                         if (TryGetString(root, "source", out var previewSource, required: true) &&
@@ -1314,8 +1428,21 @@ public partial class Form1
                             {
                                 previewRequestId = previewRequestValue;
                             }
-                            HandleBundlePreviewFile(previewSource, previewMode, previewEntryPath, previewRequestId);
+                            bool previewWantModel = root.TryGetProperty("model", out var previewModelProp) &&
+                                (previewModelProp.ValueKind == JsonValueKind.True ||
+                                 (previewModelProp.ValueKind == JsonValueKind.String &&
+                                  string.Equals(previewModelProp.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
+                            HandleBundlePreviewFile(previewSource, previewMode, previewEntryPath, previewRequestId, wantModel: previewWantModel);
                         }
+                        break;
+                    case "BUNDLE_LOAD_TEXT_EDIT":
+                        HandleBundleLoadTextEdit(root, SendMessageToWeb);
+                        break;
+                    case "BUNDLE_SAVE_TEXT_EDIT":
+                        HandleBundleSaveTextEdit(root, SendMessageToWeb);
+                        break;
+                    case "OPEN_BUNDLE_PREVIEW_POPOUT":
+                        HandleOpenBundlePreviewPopout(root);
                         break;
                     case "BUNDLE_LIST_GAME_BA2S":
                         HandleBundleListGameBa2s();
@@ -1418,6 +1545,17 @@ public partial class Form1
                     case "PROMOTE_BUNDLE_TO_MOD":
                         if (TryGetString(root, "name", out var promoteBundleName, required: true))
                             HandlePromoteBundleToMod(promoteBundleName);
+                        break;
+                    case "MOVE_MOD_TO_BUNDLES":
+                        if (TryGetString(root, "name", out var moveToBundlesName, required: true))
+                            HandleMoveModToBundles(moveToBundlesName);
+                        break;
+                    case "BUNDLE_PICK_REPLACEMENT":
+                        if (TryGetString(root, "archive", out var replaceArchive, required: true) &&
+                            TryGetString(root, "path", out var replaceEntryPath, required: true))
+                        {
+                            HandleBundlePickReplacement(replaceArchive, replaceEntryPath);
+                        }
                         break;
                     case "BROWSE_FILE":
                         try {
@@ -1653,7 +1791,10 @@ public partial class Form1
                             else if (!confirmed)
                             {
                                 if (importedKeys.Count > 0)
+                                {
                                     AddImportedKeysToActivePreset(importedKeys);
+                                    _modManager.InsertModsAtTopOfLoadOrder(importedKeys);
+                                }
                                 SendStatusMessage(
                                     "info",
                                     $"Kept the previous version of {Path.GetFileName(replaceOrigResp)}.",
@@ -1836,7 +1977,8 @@ public partial class Form1
                     _modManager.UpdateModOrder(mods, true);
                     this.Invoke(() => SendStatusMessage(
                         "info",
-                        "Virtual Mod Mode is enabled. Deployment is staged now, then applied at launch and cleaned after game exit."
+                        "Virtual Mod Mode is enabled. Deployment is staged now. Mods are applied only when you launch the game from F76 Manager, then cleaned after exit.",
+                        "virtual_mod_mode_deploy_staged"
                     ));
                     SendDataToWeb();
                     return;
@@ -1871,6 +2013,7 @@ public partial class Form1
             .Select(NormalizePresetModKey)
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var presetMembers = GetActivePresetMemberKeys();
 
         foreach (dynamic m in _modManager.GetModsList().ToList())
         {
@@ -1882,6 +2025,7 @@ public partial class Form1
             bool currentlyEnabled = string.Equals((string)m.status, "enabled", StringComparison.OrdinalIgnoreCase);
             bool shouldEnable = want.Contains(key);
             if (currentlyEnabled == shouldEnable) continue;
+            if (!shouldEnable && IsUnlistedGameRootInjector(key, presetMembers)) continue;
             if (!_modManager.ToggleModEnabled(original, shouldEnable, out string? err) &&
                 !string.IsNullOrWhiteSpace(err))
             {
@@ -1947,6 +2091,29 @@ public partial class Form1
             .Where(m => members.Contains(NormalizePresetModKey(m)))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private HashSet<string> GetActivePresetMemberKeys()
+    {
+        EnsureModPresetsInitialized();
+        var presets = LoadModPresetsDictionary();
+        string name = string.IsNullOrWhiteSpace(activeModPreset) ? DefaultModPresetName : activeModPreset;
+        if (!presets.TryGetValue(name, out var preset) || preset == null)
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return (preset.Mods ?? new List<string>())
+            .Select(NormalizePresetModKey)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    // dxgi.dll / d3d11.dll in the game folder are often installed by other tools (ReShade, overlays),
+    // so presets only disable them when the preset actually lists them.
+    private static bool IsUnlistedGameRootInjector(string key, HashSet<string> presetMembers)
+    {
+        if (!key.StartsWith("GameRoot/", StringComparison.OrdinalIgnoreCase)) return false;
+        string fileName = Path.GetFileName(key);
+        if (!ModManager.IsGameRootInjectorName(fileName)) return false;
+        return !presetMembers.Contains(key) && !presetMembers.Contains(fileName);
     }
 
     private static string NormalizePresetModKey(string? name)
@@ -2540,7 +2707,15 @@ public partial class Form1
         if (root.TryGetProperty("fontFamily", out var ff))
             configEditorFontFamily = NormalizeConfigEditorFontFamily(ff, configEditorFontFamily);
         SaveSettings();
+        PostToPreviewPopout(BuildConfigEditorFontChangedJson());
     }
+
+    private string BuildConfigEditorFontChangedJson() => JsonSerializer.Serialize(new
+    {
+        type = "CONFIG_EDITOR_FONT_CHANGED",
+        fontSize = configEditorFontSize,
+        fontFamily = configEditorFontFamily
+    });
 
     private async Task HandleUpdateSettingsBatch(JsonElement settings, string presetName)
     {
@@ -2900,10 +3075,16 @@ public partial class Form1
     private void AddNewBundleToActiveProfileAndPreset(List<string> generatedFiles)
     {
         if (generatedFiles == null || generatedFiles.Count == 0) return;
-        var keys = generatedFiles
-            .Select(f => (f ?? "").Replace("\\", "/"))
-            .Where(k => !string.IsNullOrWhiteSpace(k))
-            .ToList();
+        var keys = new List<string>();
+        foreach (var raw in generatedFiles)
+        {
+            string fileName = Path.GetFileName((raw ?? "").Replace("\\", "/"));
+            if (string.IsNullOrWhiteSpace(fileName)) continue;
+            string listKey = $"Bundles/{fileName}";
+            if (!keys.Contains(listKey, StringComparer.OrdinalIgnoreCase))
+                keys.Add(listKey);
+        }
+        if (keys.Count == 0) return;
 
         if (activeProfile != "Default Profile")
         {
@@ -2914,11 +3095,10 @@ public partial class Form1
                 bool changed = false;
                 foreach (var key in keys)
                 {
-                    if (!p.ProfileMods.Contains(key, StringComparer.OrdinalIgnoreCase))
-                    {
-                        p.ProfileMods.Add(key);
-                        changed = true;
-                    }
+                    if (ProfileAllowsMod(new HashSet<string>(p.ProfileMods, StringComparer.OrdinalIgnoreCase), key))
+                        continue;
+                    p.ProfileMods.Add(key);
+                    changed = true;
                 }
                 if (changed) SaveProfiles();
             }
@@ -2943,7 +3123,10 @@ public partial class Form1
                 }
             }
             if (result != null && result.Count > 0)
+            {
                 AddImportedKeysToActivePreset(result);
+                _modManager.InsertModsAtTopOfLoadOrder(result);
+            }
         }); 
         RefreshConflictCount(false, sendDataUpdate: false); 
         SendDataToWeb(); 
@@ -3123,6 +3306,13 @@ public partial class Form1
                 LogActivity($"[IMPORT] Queued {normalizedFiles.Count} item(s) while import is active.");
                 return;
             }
+        }
+
+        normalizedFiles = ImportDroppedModPresets(normalizedFiles);
+        if (normalizedFiles.Count == 0) return;
+
+        lock (_importDropLock)
+        {
             _isImportRunning = true;
         }
 
@@ -3210,7 +3400,10 @@ public partial class Form1
 
                         bool isUpdateReplace = !string.IsNullOrWhiteSpace(pendingNexus?.ReplaceOriginalName);
                         if (!isUpdateReplace)
+                        {
                             AddImportedKeysToActivePreset(result);
+                            _modManager.InsertModsAtTopOfLoadOrder(result);
+                        }
 
                         string profileContext = activeProfile == "Default Profile" ? "" : $" and added {addedToProfile} to '{activeProfile}'";
                         LogActivity($"[IMPORT] Completed import of {result.Count} mod files to {AppPaths.DataPath}{profileContext}.");
@@ -3515,6 +3708,7 @@ public partial class Form1
             bool currentlyEnabled = string.Equals((string)m.status, "enabled", StringComparison.OrdinalIgnoreCase);
             bool shouldEnable = members.Count > 0 && members.Contains(key) && wantEnabled.Contains(key);
             if (currentlyEnabled == shouldEnable) continue;
+            if (!shouldEnable && IsUnlistedGameRootInjector(key, members)) continue;
             if (!_modManager.ToggleModEnabled(original, shouldEnable, out string? err) &&
                 !string.IsNullOrWhiteSpace(err))
             {
@@ -3557,7 +3751,8 @@ public partial class Form1
                     version = 1,
                     name,
                     mods = preset.Mods,
-                    enabled = preset.Enabled
+                    enabled = preset.Enabled,
+                    receiveUpdates = preset.ReceiveUpdates
                 };
                 File.WriteAllText(sfd.FileName, JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
                 LogActivity($"[PRESETS] Exported metadata-only '{name}' to {sfd.FileName}");
@@ -3584,7 +3779,8 @@ public partial class Form1
                     version = 2,
                     name,
                     mods = preset.Mods,
-                    enabled = preset.Enabled
+                    enabled = preset.Enabled,
+                    receiveUpdates = preset.ReceiveUpdates
                 };
                 var presetEntry = archive.CreateEntry("preset.json", CompressionLevel.Optimal);
                 using (var writer = new StreamWriter(presetEntry.Open()))
@@ -3608,6 +3804,14 @@ public partial class Form1
                     {
                         LogError($"[PRESETS] Skipped pack file '{sourcePath}': {fileEx.Message}");
                     }
+                }
+
+                foreach (var dir in metaSubset.Values.SelectMany(m => m.Directories ?? new List<string>()))
+                {
+                    string rel = (dir ?? "").Replace('\\', '/').Trim('/');
+                    if (rel.Length == 0) continue;
+                    string dirEntry = $"Data/{rel}/";
+                    if (added.Add(dirEntry)) archive.CreateEntry(dirEntry);
                 }
 
                 LogActivity($"[PRESETS] Exported pack '{name}' ({filesAdded} file(s), {metaSubset.Count} meta) to {outPath}");
@@ -3637,9 +3841,59 @@ public partial class Form1
             };
             if (ofd.ShowDialog(this) != DialogResult.OK) return;
 
-            string path = ofd.FileName;
-            string ext = Path.GetExtension(path);
+            ImportModPresetFile(ofd.FileName);
+        }
+        catch (Exception ex)
+        {
+            LogError($"[PRESETS] Import failed: {ex.Message}");
+            SendStatusMessage("error", "Preset import failed.", "preset_import_failed");
+        }
+    }
 
+    private static bool IsModPresetFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return false;
+        string ext = Path.GetExtension(path);
+        if (ext.Equals(".f76presetpack", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".f76preset", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Renamed packs (e.g. .zip / .ba2 masquerading) that contain preset.json
+        if (LooksLikeZipFile(path) && ZipContainsPresetPackManifest(path))
+            return true;
+
+        return false;
+    }
+
+    private static bool ZipContainsPresetPackManifest(string path)
+    {
+        try
+        {
+            using var archive = ZipFile.OpenRead(path);
+            var entry = archive.GetEntry("preset.json")
+                ?? archive.Entries.FirstOrDefault(e =>
+                    string.Equals(e.FullName.Replace('\\', '/'), "preset.json", StringComparison.OrdinalIgnoreCase));
+            if (entry == null) return false;
+
+            using var reader = new StreamReader(entry.Open());
+            string json = reader.ReadToEnd();
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("format", out var format)) return false;
+            string? fmt = format.GetString();
+            return string.Equals(fmt, "f76presetpack", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(fmt, "f76preset", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ImportModPresetFile(string path)
+    {
+        try
+        {
+            string ext = Path.GetExtension(path);
             if (ext.Equals(".f76presetpack", StringComparison.OrdinalIgnoreCase)
                 || ext.Equals(".zip", StringComparison.OrdinalIgnoreCase)
                 || LooksLikeZipFile(path))
@@ -3652,9 +3906,27 @@ public partial class Form1
         }
         catch (Exception ex)
         {
-            LogError($"[PRESETS] Import failed: {ex.Message}");
+            LogError($"[PRESETS] Import failed for '{path}': {ex.Message}");
             SendStatusMessage("error", "Preset import failed.", "preset_import_failed");
         }
+    }
+
+    /// <summary>
+    /// Imports any preset files in the list and returns the remaining paths for the mod importer.
+    /// </summary>
+    private List<string> ImportDroppedModPresets(List<string> files)
+    {
+        var presetFiles = files.Where(f => IsModPresetFile(f) && File.Exists(f)).ToList();
+        if (presetFiles.Count == 0) return files;
+
+        foreach (var path in presetFiles)
+        {
+            LogActivity($"[PRESETS] Importing dropped preset file: {path}");
+            ImportModPresetFile(path);
+        }
+
+        var presetSet = new HashSet<string>(presetFiles, StringComparer.OrdinalIgnoreCase);
+        return files.Where(f => !presetSet.Contains(f)).ToList();
     }
 
     private static bool LooksLikeZipFile(string path)
@@ -3733,11 +4005,14 @@ public partial class Form1
             if (state.Mods.Count == 0 && root.TryGetProperty("mods", out var modsArr))
                 state = ParsePresetElement(JsonDocument.Parse($"{{\"mods\":{modsArr.GetRawText()},\"enabled\":{(root.TryGetProperty("enabled", out var en) ? en.GetRawText() : "[]")}}}").RootElement);
 
+            string configBackupRoot = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory, "Backups", "PresetImports", DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+
             string dataSrc = Path.Combine(extractRoot, "Data");
             if (Directory.Exists(dataSrc))
             {
                 string dataDest = virtualModMode ? AppPaths.ManagedStagingDataPath : AppPaths.DataPath;
-                CopyDirectoryContentsRecursive(dataSrc, dataDest);
+                CopyPresetPackModFiles(dataSrc, dataDest, Path.Combine(configBackupRoot, "Data"));
             }
 
             string stringsSrc = Path.Combine(extractRoot, "Data", "Strings");
@@ -3753,7 +4028,7 @@ public partial class Form1
 
             string disabledSrc = Path.Combine(extractRoot, "Disabled Mods");
             if (Directory.Exists(disabledSrc))
-                CopyDirectoryContentsRecursive(disabledSrc, AppPaths.DisabledModsPath);
+                CopyPresetPackModFiles(disabledSrc, AppPaths.DisabledModsPath, Path.Combine(configBackupRoot, "Disabled Mods"));
 
             string gameInstallSrc = Path.Combine(extractRoot, "GameInstall");
             if (Directory.Exists(gameInstallSrc))
@@ -3770,7 +4045,21 @@ public partial class Form1
                     var incoming = JsonSerializer.Deserialize<Dictionary<string, ModManager.ModMetadata>>(
                         File.ReadAllText(settingsMeta), options);
                     if (incoming != null && incoming.Count > 0)
-                        _modManager.MergeMetadataSubset(incoming);
+                    {
+                        var packFiles = GetPresetPackModFiles(extractRoot);
+                        var present = new Dictionary<string, ModManager.ModMetadata>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var kvp in incoming)
+                        {
+                            if (kvp.Value == null) continue;
+                            var shipped = GetShippedPresetPackFiles(kvp.Key, kvp.Value, packFiles);
+                            if (shipped.Count == 0) continue;
+                            kvp.Value.Files = shipped;
+                            present[kvp.Key] = kvp.Value;
+                        }
+                        if (present.Count < incoming.Count)
+                            LogActivity($"[PRESETS] Skipped metadata for {incoming.Count - present.Count} mod(s) whose files are not in the pack.");
+                        _modManager.MergeMetadataSubset(present, preferIncoming: true);
+                    }
                 }
                 catch (Exception metaEx)
                 {
@@ -3793,17 +4082,141 @@ public partial class Form1
             activeModPreset = finalName;
             PersistModPresets(presets);
 
-            LogActivity($"[PRESETS] Imported pack '{finalName}' ({state.Mods.Count} mods in preset).");
-            SendStatusMessage(
-                "success",
-                "Preset pack imported (mods + Nexus metadata).",
-                "preset_pack_imported");
+            var installed = new HashSet<string>(
+                _modManager.GetModsList().Select(m => (string)((dynamic)m).originalName),
+                StringComparer.OrdinalIgnoreCase);
+            bool IsInstalled(string key) =>
+                installed.Contains(key) || installed.Contains("Disabled/" + key) ||
+                (key.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase) && installed.Contains(key.Substring("Disabled/".Length)));
+            var installedMembers = state.Mods.Where(IsInstalled).ToList();
+            int missing = state.Mods.Count - installedMembers.Count;
+
+            int addedToProfile = AddModKeysToActiveProfile(installedMembers);
+
+            LogActivity($"[PRESETS] Imported pack '{finalName}' ({state.Mods.Count} mods in preset, {missing} not included in the pack, {addedToProfile} added to profile '{activeProfile}').");
+            if (missing > 0)
+                SendStatusMessage("warning", $"{missing} mods in the preset are not installed.", "preset_import_missing", new object[] { missing });
+            else
+                SendStatusMessage(
+                    "success",
+                    "Preset pack imported (mods + Nexus metadata).",
+                    "preset_pack_imported");
             SendDataToWeb();
         }
         finally
         {
             try { if (Directory.Exists(extractRoot)) Directory.Delete(extractRoot, true); } catch { }
         }
+    }
+
+    private void CopyPresetPackModFiles(string sourceDir, string destDir, string backupDir)
+    {
+        if (!Directory.Exists(sourceDir)) return;
+        Directory.CreateDirectory(destDir);
+
+        foreach (string dir in Directory.GetDirectories(sourceDir, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(destDir, Path.GetRelativePath(sourceDir, dir)));
+
+        foreach (string file in Directory.GetFiles(sourceDir, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(sourceDir, file);
+            string relKey = rel.Replace('\\', '/');
+            if (_modManager.IsVanillaModFile(relKey))
+            {
+                LogActivity($"[PRESETS] Skipped vanilla game file in pack: {relKey}");
+                continue;
+            }
+
+            string destFile = Path.Combine(destDir, rel);
+            string? destParent = Path.GetDirectoryName(destFile);
+            if (!string.IsNullOrEmpty(destParent)) Directory.CreateDirectory(destParent);
+
+            if (File.Exists(destFile) && ConfigFileMerger.IsLooseConfigExtension(Path.GetExtension(file)))
+            {
+                if (FilesHaveSameContent(file, destFile)) continue;
+
+                string backupFile = Path.Combine(backupDir, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(backupFile)!);
+                File.Copy(destFile, backupFile, true);
+                LogActivity($"[PRESETS] Replaced config {relKey} with the pack's copy (backup: {backupFile}).");
+            }
+
+            File.Copy(file, destFile, true);
+        }
+    }
+
+    private static bool FilesHaveSameContent(string a, string b)
+    {
+        try
+        {
+            if (new FileInfo(a).Length != new FileInfo(b).Length) return false;
+            return File.ReadAllBytes(a).AsSpan().SequenceEqual(File.ReadAllBytes(b));
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Data-relative paths of every mod file shipped in an extracted pack, keyed case-insensitively.</summary>
+    private static Dictionary<string, string> GetPresetPackModFiles(string extractRoot)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string sub in new[] { "Data", "Disabled Mods", "Bundles", "GameInstall" })
+        {
+            string root = Path.Combine(extractRoot, sub);
+            if (!Directory.Exists(root)) continue;
+            string prefix = sub is "Bundles" or "GameInstall" ? sub + "/" : "";
+            foreach (string file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+            {
+                string rel = prefix + Path.GetRelativePath(root, file).Replace('\\', '/');
+                result.TryAdd(rel, rel);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// The entry's files that the pack actually contains, as their real pack paths. Entries whose files
+    /// were not shipped must not be imported, or they would claim same-named files the receiver already owns.
+    /// </summary>
+    private static List<string> GetShippedPresetPackFiles(
+        string key, ModManager.ModMetadata meta, Dictionary<string, string> packFiles)
+    {
+        var shipped = new List<string>();
+        var files = meta.Files is { Count: > 0 } ? meta.Files : new List<string> { key };
+        foreach (var raw in files)
+        {
+            string rel = (raw ?? "").Replace('\\', '/').Trim();
+            if (rel.StartsWith("Disabled/", StringComparison.OrdinalIgnoreCase)) rel = rel.Substring("Disabled/".Length);
+            if (rel.Length == 0) continue;
+            if (rel.StartsWith("GameRoot/", StringComparison.OrdinalIgnoreCase))
+            {
+                if (packFiles.ContainsKey("GameInstall/" + Path.GetFileName(rel))) shipped.Add(rel);
+                continue;
+            }
+            if (packFiles.TryGetValue(rel, out var actual)
+                || (!rel.Contains('/') && packFiles.TryGetValue("Strings/" + rel, out actual)))
+                shipped.Add(actual);
+        }
+        return shipped.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private int AddModKeysToActiveProfile(IEnumerable<string> keys)
+    {
+        if (activeProfile == "Default Profile") return 0;
+        var p = profiles.FirstOrDefault(x => x.Name == activeProfile);
+        if (p == null) return 0;
+
+        var allowed = new HashSet<string>(p.ProfileMods, StringComparer.OrdinalIgnoreCase);
+        int added = 0;
+        foreach (var raw in keys)
+        {
+            string key = (raw ?? "").Replace("\\", "/");
+            if (string.IsNullOrWhiteSpace(key) || ProfileAllowsMod(allowed, key)) continue;
+            p.ProfileMods.Add(key);
+            allowed.Add(key);
+            added++;
+        }
+        if (added > 0) SaveProfiles();
+        return added;
     }
 
     private static void CopyDirectoryContentsRecursive(string sourceDir, string destDir)
@@ -3966,6 +4379,128 @@ public partial class Form1
         }
     }
 
+    private void HandleMoveModToBundles(string modName)
+    {
+        try
+        {
+            if (_modManager.MoveModToBundles(modName, out string error, out string newBundleKey, out var movedKeys, out string errorKey, out var errorArgs))
+            {
+                SyncProfileAfterModMovedToBundles(movedKeys, newBundleKey);
+                RefreshConflictCount();
+                string movedList = string.Join(", ", movedKeys.Select(k => Path.GetFileName(k)));
+                SendStatusMessage(
+                    "success",
+                    $"Moved {movedList} to Bundles.",
+                    "mod_moved_to_bundles",
+                    new object[] { movedList });
+                SendDataToWeb();
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(errorKey))
+                    SendStatusMessage("error", error, errorKey, errorArgs);
+                else
+                    SendStatusMessage(
+                        "error",
+                        string.IsNullOrWhiteSpace(error) ? "Failed to move mod to Bundles." : error,
+                        "mod_move_to_bundles_failed",
+                        new object[] { error ?? "" });
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"Move Mod To Bundles Error: {ex.Message}");
+            SendStatusMessage("error", "Failed to move mod to Bundles.", "mod_move_to_bundles_failed", new object[] { ex.Message });
+        }
+    }
+
+    private void SyncProfileAfterModMovedToBundles(List<string> oldKeys, string newBundleKey)
+    {
+        var oldCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string oldKey in oldKeys)
+        {
+            string fileName = Path.GetFileName((oldKey ?? "").Replace('\\', '/'));
+            oldCandidates.Add(NormalizeProfileModPath(oldKey ?? ""));
+            oldCandidates.Add(NormalizeProfileModPath(fileName));
+            oldCandidates.Add(NormalizeProfileModPath($"Disabled/{fileName}"));
+        }
+        string newNorm = NormalizeProfileModPath(newBundleKey);
+
+        foreach (var profile in profiles)
+        {
+            int firstIndex = profile.ProfileMods.FindIndex(entry =>
+                oldCandidates.Contains(NormalizeProfileModPath(entry)));
+            if (firstIndex >= 0)
+            {
+                profile.ProfileMods[firstIndex] = newNorm;
+                for (int i = profile.ProfileMods.Count - 1; i > firstIndex; i--)
+                {
+                    if (oldCandidates.Contains(NormalizeProfileModPath(profile.ProfileMods[i])))
+                        profile.ProfileMods.RemoveAt(i);
+                }
+            }
+
+            bool wasEnabled = profile.EnabledMods.Any(entry =>
+                oldCandidates.Contains(NormalizeProfileModPath(entry)));
+            profile.EnabledMods.RemoveAll(entry =>
+                oldCandidates.Contains(NormalizeProfileModPath(entry)));
+            if (wasEnabled &&
+                !profile.EnabledMods.Any(entry =>
+                    string.Equals(NormalizeProfileModPath(entry), newNorm, StringComparison.OrdinalIgnoreCase)))
+            {
+                profile.EnabledMods.Add(newNorm);
+            }
+        }
+
+        SaveProfiles();
+    }
+
+    private void HandleBundlePickReplacement(string archive, string entryPath)
+    {
+        this.Invoke(() =>
+        {
+            string entryFileName = Path.GetFileName(entryPath.Replace('/', '\\'));
+            string ext = Path.GetExtension(entryFileName);
+            using var ofd = new OpenFileDialog
+            {
+                Title = $"Replace {entryFileName}",
+                Filter = string.IsNullOrEmpty(ext)
+                    ? "All files (*.*)|*.*"
+                    : $"{ext.TrimStart('.').ToUpperInvariant()} file (*{ext})|*{ext}",
+                Multiselect = false,
+                CheckFileExists = true
+            };
+            string startDir = GetBundleExtractStartDir();
+            if (!string.IsNullOrWhiteSpace(startDir) && Directory.Exists(startDir))
+                ofd.InitialDirectory = startDir;
+            if (ofd.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(ofd.FileName))
+                return;
+
+            string source = ofd.FileName;
+            if (!string.IsNullOrEmpty(ext) &&
+                !string.Equals(Path.GetExtension(source), ext, StringComparison.OrdinalIgnoreCase))
+            {
+                SendStatusMessage(
+                    "error",
+                    $"The replacement must be a {ext} file.",
+                    "bundle_replace_ext_mismatch",
+                    new object[] { ext });
+                return;
+            }
+
+            _lastBundleExtractDir = Path.GetDirectoryName(source);
+            LogActivity($"[BUNDLE] Replacement picked for '{entryPath}' in '{archive}': {source}");
+            SendMessageToWeb(JsonSerializer.Serialize(new
+            {
+                type = "BUNDLE_REPLACEMENT_SELECTED",
+                archive,
+                path = entryPath,
+                source,
+                size = TryGetFileSize(source)
+            }));
+        });
+    }
+
     private void SyncProfileAfterBundlePromote(string oldBundleKey, string newModKey)
     {
         string fileName = Path.GetFileName((oldBundleKey ?? "").Replace('\\', '/'));
@@ -4036,6 +4571,15 @@ public partial class Form1
                 if (metadata.TryGetProperty("isEnabled", out _))
                 {
                     _modManager.UpdateModMetadata(originalName, meta);
+                    if (meta.IsEnabled)
+                    {
+                        var bundleKeys = _modManager.GetBundlePresetKeys(originalName);
+                        if (bundleKeys.Count > 0)
+                        {
+                            AddImportedKeysToActivePreset(bundleKeys, markEnabled: true);
+                            _modManager.InsertModsAtTopOfLoadOrder(bundleKeys);
+                        }
+                    }
                     string friendlyStatus = meta.IsEnabled ? "Enabled" : "Disabled";
                     SendStatusMessage("success", $"{originalName} updated to {friendlyStatus}.", "mod_updated_status", new object[] { originalName, friendlyStatus });
                 }
@@ -4295,13 +4839,24 @@ public partial class Form1
         }
     }
 
-    private void HandleBundleBrowseFolder()
+    private void HandleBundleBrowseFolder(string? mergeInto = null)
     {
         this.Invoke(() =>
         {
-            using var fbd = new FolderBrowserDialog { Description = "Select folder to add to bundle workspace" };
+            using var fbd = new FolderBrowserDialog
+            {
+                Description = string.IsNullOrWhiteSpace(mergeInto)
+                    ? "Select folder to add to bundle workspace"
+                    : "Select folder to merge into the open archive"
+            };
             if (fbd.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(fbd.SelectedPath))
                 return;
+
+            if (!string.IsNullOrWhiteSpace(mergeInto))
+            {
+                HandleBundleOverlayFromFolders(mergeInto, new List<string> { fbd.SelectedPath }, "");
+                return;
+            }
 
             SendMessageToWeb(JsonSerializer.Serialize(new
             {
@@ -4311,19 +4866,157 @@ public partial class Form1
         });
     }
 
-    private static string ResolveBundleBa2Path(string ba2Path)
+    private void HandleBundlePickOverlay(string archive, string targetDir, string mode)
     {
-        if (string.IsNullOrWhiteSpace(ba2Path))
-            throw new FileNotFoundException("BA2 path is empty.");
-        if (File.Exists(ba2Path))
-            return ba2Path;
-        string resolved = Path.IsPathRooted(ba2Path)
-            ? ba2Path
-            : Path.Combine(AppPaths.DataPath, ba2Path);
-        if (File.Exists(resolved))
-            return resolved;
-        throw new FileNotFoundException($"BA2 file not found: {ba2Path}", ba2Path);
+        this.Invoke(() =>
+        {
+            var files = new List<(string Path, string Source)>();
+            string targetPrefix = Managers.BundleManager.NormalizeOverlayArchivePath(targetDir);
+
+            if (string.Equals(mode, "folder", StringComparison.OrdinalIgnoreCase))
+            {
+                using var fbd = new FolderBrowserDialog { Description = "Select folder to add into the archive tree" };
+                string startDir = GetBundleExtractStartDir();
+                if (!string.IsNullOrWhiteSpace(startDir) && Directory.Exists(startDir))
+                    fbd.InitialDirectory = startDir;
+                if (fbd.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(fbd.SelectedPath))
+                    return;
+
+                _lastBundleExtractDir = fbd.SelectedPath;
+                CollectOverlayFilesFromFolder(fbd.SelectedPath, targetPrefix, useDataMapping: false, files);
+            }
+            else
+            {
+                using var ofd = new OpenFileDialog
+                {
+                    Title = "Select files to add into the archive tree",
+                    Filter = "All files (*.*)|*.*",
+                    Multiselect = true,
+                    CheckFileExists = true
+                };
+                string startDir = GetBundleExtractStartDir();
+                if (!string.IsNullOrWhiteSpace(startDir) && Directory.Exists(startDir))
+                    ofd.InitialDirectory = startDir;
+                if (ofd.ShowDialog() != DialogResult.OK || ofd.FileNames.Length == 0)
+                    return;
+
+                _lastBundleExtractDir = Path.GetDirectoryName(ofd.FileNames[0]);
+                foreach (string source in ofd.FileNames)
+                {
+                    if (!TryBuildOverlayEntry(Path.GetFileName(source), source, targetPrefix, out var entry))
+                        continue;
+                    files.Add(entry);
+                }
+            }
+
+            SendBundleOverlayFiles(archive, files);
+        });
     }
+
+    private void HandleBundleOverlayFromFolders(string archive, List<string> folders, string targetDir)
+    {
+        this.Invoke(() =>
+        {
+            var files = new List<(string Path, string Source)>();
+            string targetPrefix = Managers.BundleManager.NormalizeOverlayArchivePath(targetDir);
+            bool useDataMapping = string.IsNullOrWhiteSpace(targetPrefix);
+
+            foreach (string folder in folders)
+            {
+                if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+                {
+                    LogActivity($"[BUNDLE] Overlay folder not found: {folder}");
+                    continue;
+                }
+                CollectOverlayFilesFromFolder(folder, targetPrefix, useDataMapping, files);
+            }
+
+            SendBundleOverlayFiles(archive, files);
+        });
+    }
+
+    private static void CollectOverlayFilesFromFolder(
+        string folder,
+        string targetPrefix,
+        bool useDataMapping,
+        List<(string Path, string Source)> files)
+    {
+        string normalizedSource = Path.GetFullPath(folder);
+        var allFiles = Directory.GetFiles(normalizedSource, "*.*", SearchOption.AllDirectories);
+        var mapper = useDataMapping
+            ? Managers.BundleManager.CreateFolderDataMapper(normalizedSource, allFiles.Select(f => Path.GetRelativePath(normalizedSource, f)))
+            : null;
+        foreach (var file in allFiles)
+        {
+            string relPath = Path.GetRelativePath(normalizedSource, file);
+            string? mapped = mapper != null ? mapper(relPath) : relPath;
+            if (mapped == null) continue;
+            if (!TryBuildOverlayEntry(mapped, file, targetPrefix, out var entry))
+                continue;
+            files.Add(entry);
+        }
+    }
+
+    private static readonly HashSet<string> BundleOverlayJunkNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "thumbs.db", "desktop.ini", ".ds_store", "moduleconfig.xml",
+        "readme.txt", "readme.md", "license.txt", "license.md", "changelog.txt", "changelog.md"
+    };
+
+    private static bool TryBuildOverlayEntry(string relativePath, string source, string targetPrefix, out (string Path, string Source) entry)
+    {
+        entry = default;
+        string rel = Managers.BundleManager.NormalizeOverlayArchivePath(relativePath);
+        if (string.IsNullOrWhiteSpace(rel) || string.IsNullOrWhiteSpace(source) || !File.Exists(source))
+            return false;
+
+        string fileName = Path.GetFileName(rel);
+        string ext = Path.GetExtension(fileName);
+        if (ext.Equals(".dll", StringComparison.OrdinalIgnoreCase) ||
+            ext.Equals(".ba2", StringComparison.OrdinalIgnoreCase) ||
+            BundleOverlayJunkNames.Contains(fileName))
+            return false;
+
+        var parts = rel.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Any(p => p.Equals("fomod", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        string archivePath = string.IsNullOrEmpty(targetPrefix) ? rel : $"{targetPrefix.TrimEnd('/')}/{rel}";
+        archivePath = Managers.BundleManager.NormalizeOverlayArchivePath(archivePath);
+        if (string.IsNullOrWhiteSpace(archivePath)) return false;
+
+        entry = (archivePath, source);
+        return true;
+    }
+
+    private void SendBundleOverlayFiles(string archive, List<(string Path, string Source)> files)
+    {
+        if (files.Count == 0)
+        {
+            SendStatusMessage("warning", "No files found to add into the archive.", "bundle_overlay_empty");
+            return;
+        }
+
+        var unique = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (path, source) in files)
+            unique[path] = source;
+
+        LogActivity($"[BUNDLE] Overlay {unique.Count} file(s) into '{archive}'.");
+        SendMessageToWeb(JsonSerializer.Serialize(new
+        {
+            type = "BUNDLE_OVERLAY_FILES",
+            archive,
+            files = unique.Select(kv => new { path = kv.Key, source = kv.Value, size = TryGetFileSize(kv.Value) })
+        }));
+    }
+
+    private static long TryGetFileSize(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch { return 0; }
+    }
+
+    private string ResolveBundleBa2Path(string ba2Path) => _modManager.ResolveArchiveOnDisk(ba2Path);
 
     private string? _lastBundleExtractDir;
 
@@ -4530,6 +5223,199 @@ public partial class Form1
         });
     }
 
+    private void HandleBundleIsolateSelection(
+        string archive,
+        List<string> paths,
+        List<F76ManagerApp.Managers.Ba2Replacement> replacements)
+    {
+        Task.Run(() =>
+        {
+            try
+            {
+                SyncAppPaths();
+                string archivePath = ResolveBundleBa2Path(archive);
+
+                var includePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string path in paths ?? new List<string>())
+                {
+                    if (string.IsNullOrWhiteSpace(path)) continue;
+                    includePaths.Add(path.Replace('\\', '/').ToLowerInvariant());
+                }
+                if (includePaths.Count == 0)
+                    throw new InvalidOperationException("No files selected.");
+
+                string isolateRoot = AppPaths.BundleIsolatePath;
+                Directory.CreateDirectory(isolateRoot);
+
+                string stem = Path.GetFileNameWithoutExtension(archivePath);
+                if (string.IsNullOrWhiteSpace(stem)) stem = "Selection";
+                foreach (char c in Path.GetInvalidFileNameChars())
+                    stem = stem.Replace(c, '_');
+
+                int selectionCount = includePaths.Count;
+                string baseName = $"{stem} ({selectionCount} file{(selectionCount == 1 ? "" : "s")})";
+                string destDir = MakeUniqueIsolateDir(isolateRoot, baseName);
+                Directory.CreateDirectory(destDir);
+
+                LogActivity($"[BUNDLE] Isolate '{archivePath}' -> '{destDir}' ({selectionCount} path(s))");
+                BA2Utility.Extract(archivePath, destDir, LogActivity, includePaths, stripPrefix: null);
+
+                string destRoot = Path.GetFullPath(destDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                foreach (var replacement in replacements ?? new List<F76ManagerApp.Managers.Ba2Replacement>())
+                {
+                    if (replacement == null || string.IsNullOrWhiteSpace(replacement.Path) || string.IsNullOrWhiteSpace(replacement.Source))
+                        continue;
+                    if (!File.Exists(replacement.Source))
+                    {
+                        LogActivity($"[BUNDLE] Isolate replacement source missing: {replacement.Source}");
+                        continue;
+                    }
+
+                    string relPath = replacement.Path.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
+                    string destPath = Path.GetFullPath(Path.Combine(destDir, relPath));
+                    if (!destPath.StartsWith(destRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        LogActivity($"[BUNDLE] Rejected isolate replacement outside folder: {replacement.Path}");
+                        continue;
+                    }
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                    File.Copy(replacement.Source, destPath, overwrite: true);
+                    LogActivity($"[BUNDLE] Isolate replaced {replacement.Path}");
+                }
+
+                int fileCount = Directory.Exists(destDir)
+                    ? Directory.GetFiles(destDir, "*.*", SearchOption.AllDirectories).Length
+                    : selectionCount;
+
+                this.Invoke(() =>
+                {
+                    SendMessageToWeb(JsonSerializer.Serialize(new
+                    {
+                        type = "BUNDLE_ISOLATED",
+                        archive,
+                        path = destDir,
+                        count = fileCount
+                    }));
+                });
+                LogActivity($"[BUNDLE] Isolate complete: {archivePath} -> {destDir} ({fileCount} file(s))");
+            }
+            catch (Exception ex)
+            {
+                LogError($"[BUNDLE] Isolate failed: {ex.Message}");
+                this.Invoke(() => SendStatusMessage(
+                    "error",
+                    $"Could not add files to the bundle: {ex.Message}",
+                    "bundle_isolate_failed",
+                    new object[] { ex.Message }));
+            }
+        });
+    }
+
+    private void HandleBundleStageLoose(string looseKey)
+    {
+        Task.Run(() =>
+        {
+            try
+            {
+                SyncAppPaths();
+                var items = _modManager.CollectLoosePackFilesForBundle(looseKey, out string displayName, out var archives, out string error);
+                if (items == null) throw new InvalidOperationException(error);
+
+                string destDir = "";
+                int copied = 0;
+                if (items.Count > 0)
+                {
+                    string isolateRoot = AppPaths.BundleIsolatePath;
+                    Directory.CreateDirectory(isolateRoot);
+                    string baseName = string.IsNullOrWhiteSpace(displayName) ? "Loose" : displayName;
+                    foreach (char c in Path.GetInvalidFileNameChars())
+                        baseName = baseName.Replace(c, '_');
+                    destDir = MakeUniqueIsolateDir(isolateRoot, baseName);
+                    string destRoot = Path.GetFullPath(destDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                        + Path.DirectorySeparatorChar;
+
+                    foreach (var (abs, rel) in items)
+                    {
+                        string destPath = Path.GetFullPath(Path.Combine(destDir, rel.Replace('/', Path.DirectorySeparatorChar)));
+                        if (!destPath.StartsWith(destRoot, StringComparison.OrdinalIgnoreCase))
+                        {
+                            LogActivity($"[BUNDLE] Rejected loose file outside workspace folder: {rel}");
+                            continue;
+                        }
+                        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                        File.Copy(abs, destPath, overwrite: true);
+                        copied++;
+                    }
+                    if (copied == 0)
+                    {
+                        try { Directory.Delete(destDir, recursive: true); } catch { }
+                        destDir = "";
+                    }
+                }
+                if (copied == 0 && archives.Count == 0)
+                    throw new InvalidOperationException("No files could be copied from the loose pack.");
+
+                LogActivity($"[BUNDLE] Staged loose pack '{looseKey}' -> folder '{destDir}' ({copied} file(s)), {archives.Count} BA2(s)");
+                this.Invoke(() => SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "BUNDLE_LOOSE_STAGED",
+                    key = looseKey,
+                    path = destDir,
+                    count = copied,
+                    archives
+                })));
+            }
+            catch (Exception ex)
+            {
+                LogError($"[BUNDLE] Stage loose pack failed for {looseKey}: {ex.Message}");
+                this.Invoke(() => SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "BUNDLE_LOOSE_STAGE_FAILED",
+                    key = looseKey,
+                    error = ex.Message
+                })));
+            }
+        });
+    }
+
+    private static string MakeUniqueIsolateDir(string root, string baseName)
+    {
+        string dest = Path.Combine(root, baseName);
+        if (!Directory.Exists(dest)) return dest;
+        for (int i = 2; i < 10000; i++)
+        {
+            dest = Path.Combine(root, $"{baseName} ({i})");
+            if (!Directory.Exists(dest)) return dest;
+        }
+        return Path.Combine(root, $"{baseName} ({Guid.NewGuid():N})");
+    }
+
+    private void HandleBundleDiscardIsolated(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+
+            string full = Path.GetFullPath(path);
+            string root = Path.GetFullPath(AppPaths.BundleIsolatePath)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                LogError($"[BUNDLE] Refused to discard folder outside Bundle Workspace: {path}");
+                return;
+            }
+
+            Directory.Delete(full, recursive: true);
+            LogActivity($"[BUNDLE] Discarded isolated folder: {full}");
+        }
+        catch (Exception ex)
+        {
+            LogError($"[BUNDLE] Discard isolated failed: {ex.Message}");
+        }
+    }
+
     private static readonly HashSet<string> PreviewTextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".txt", ".xml", ".ini", ".json", ".lst", ".csv", ".cfg", ".psc",
@@ -4546,20 +5432,36 @@ public partial class Form1
     private const int PreviewTextSniffBytes = 8 * 1024;
     private const long PreviewTextSniffMaxBytes = 1024 * 1024;
 
-    private void HandleBundlePreviewFile(string source, string mode, string entryPath, int requestId)
+    [ThreadStatic] private static Action<string>? _previewPostTarget;
+
+    private void HandleBundlePreviewFile(string source, string mode, string entryPath, int requestId, Action<string>? post = null, bool wantModel = false)
     {
         Task.Run(() =>
         {
+            _previewPostTarget = post;
             try
             {
                 bool folder = string.Equals(mode, "folder", StringComparison.OrdinalIgnoreCase);
                 string ext = Path.GetExtension(entryPath ?? "");
-                byte[] bytes = folder
-                    ? ReadPreviewFolderFile(source, entryPath)
-                    : ext.Equals(".dds", StringComparison.OrdinalIgnoreCase)
+                byte[] bytes;
+                if (folder)
+                {
+                    string folderPath = source ?? "";
+                    string relative = entryPath ?? "";
+                    string full = ResolvePreviewFolderFile(folderPath, relative);
+                    long before = PreviewFileStamp(full);
+                    bytes = ReadPreviewFolderFile(folderPath, relative);
+                    long after = PreviewFileStamp(full);
+                    // A write that lands during the read must not stick as the cached preview.
+                    ArmPreviewFolderWatch(full, folderPath, relative, before == after ? after : 0);
+                }
+                else
+                {
+                    bytes = ext.Equals(".dds", StringComparison.OrdinalIgnoreCase)
                         ? BA2Utility.ReadTexturePreviewBytes(ResolveBundleBa2Path(source), entryPath, DdsPreview.MaxEdge, LogActivity)
                         : BA2Utility.ReadEntryBytes(ResolveBundleBa2Path(source), entryPath, LogActivity);
-                SendBundleFilePreview(requestId, source, entryPath, bytes);
+                }
+                SendBundleFilePreview(requestId, source, entryPath, bytes, wantModel);
             }
             catch (BA2Utility.PreviewFileTooLargeException ex)
             {
@@ -4570,10 +5472,14 @@ public partial class Form1
                 LogError($"[BUNDLE] Preview failed: {ex.Message}");
                 SendBundleFilePreviewNone(requestId, source, entryPath, 0, ex.Message);
             }
+            finally
+            {
+                _previewPostTarget = null;
+            }
         });
     }
 
-    private static byte[] ReadPreviewFolderFile(string folder, string relativePath)
+    private static string ResolvePreviewFolderFile(string folder, string relativePath)
     {
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             throw new DirectoryNotFoundException($"Folder not found: {folder}");
@@ -4586,14 +5492,19 @@ public partial class Form1
             throw new UnauthorizedAccessException("Preview path is outside the selected folder.");
         if (!File.Exists(full))
             throw new FileNotFoundException("File not found.", relativePath);
+        return full;
+    }
 
+    private static byte[] ReadPreviewFolderFile(string folder, string relativePath)
+    {
+        string full = ResolvePreviewFolderFile(folder, relativePath);
         long length = new FileInfo(full).Length;
         if (length > BA2Utility.MaxPreviewBytes)
             throw new BA2Utility.PreviewFileTooLargeException(length);
         return File.ReadAllBytes(full);
     }
 
-    private void SendBundleFilePreview(int requestId, string source, string entryPath, byte[] bytes)
+    private void SendBundleFilePreview(int requestId, string source, string entryPath, byte[] bytes, bool wantModel = false)
     {
         string ext = Path.GetExtension(entryPath ?? "");
         long size = bytes?.LongLength ?? 0;
@@ -4663,6 +5574,52 @@ public partial class Form1
                 return;
             }
             SendHexPreview(requestId, source, entryPath, bytes, size, mesh.TooLarge ? "mesh_too_large" : null);
+            return;
+        }
+
+        if (ext.Equals(".hkx", StringComparison.OrdinalIgnoreCase))
+        {
+            HkxAnimationReader.Result anim = HkxAnimationReader.Read(bytes, entryPath, source, LogActivity, withMatrices: wantModel);
+            if (anim.Ok)
+            {
+                SendHkxMeshPreview(requestId, source, entryPath, size, anim, wantModel);
+                return;
+            }
+            if (anim.Error == HkxAnimationReader.Failure.BehaviorGraph)
+            {
+                SendBundleFilePreviewNone(requestId, source, entryPath, size, "hkx_behavior");
+                return;
+            }
+            if (anim.Error == HkxAnimationReader.Failure.CharacterSetup)
+            {
+                SendBundleFilePreviewNone(requestId, source, entryPath, size, "hkx_character");
+                return;
+            }
+            if (anim.Error == HkxAnimationReader.Failure.ProjectData)
+            {
+                SendBundleFilePreviewNone(requestId, source, entryPath, size, "hkx_project");
+                return;
+            }
+            if (anim.Error == HkxAnimationReader.Failure.NotClip
+                || anim.Error == HkxAnimationReader.Failure.NoClip)
+            {
+                SendBundleFilePreviewNone(requestId, source, entryPath, size, "hkx_not_clip");
+                return;
+            }
+            if (anim.Error == HkxAnimationReader.Failure.NoSkeleton)
+            {
+                string meta = anim.Duration > 0
+                    ? $"{anim.Duration:0.##}s · {anim.TrackCount} tracks"
+                    : $"{anim.TrackCount} tracks";
+                SendBundleFilePreviewNone(requestId, source, entryPath, size, "hkx_no_skeleton", format: meta);
+                return;
+            }
+            if (anim.Error == HkxAnimationReader.Failure.UnsupportedVersion)
+            {
+                SendHexPreview(requestId, source, entryPath, bytes, size, "hkx_unsupported");
+                return;
+            }
+            SendHexPreview(requestId, source, entryPath, bytes, size, null);
             return;
         }
 
@@ -4803,6 +5760,118 @@ public partial class Form1
         });
     }
 
+    private void SendHkxMeshPreview(int requestId, string source, string entryPath, long size, HkxAnimationReader.Result anim, bool wantModel = false)
+    {
+        var bonePositions = new float[anim.Bones.Count * 3];
+        var boneParents = new int[anim.Bones.Count];
+        var boneNames = new List<string>(anim.Bones.Count);
+        for (int i = 0; i < anim.Bones.Count; i++)
+        {
+            bonePositions[i * 3] = anim.Bones[i].X;
+            bonePositions[i * 3 + 1] = anim.Bones[i].Y;
+            bonePositions[i * 3 + 2] = anim.Bones[i].Z;
+            boneParents[i] = anim.Bones[i].Parent;
+            boneNames.Add(anim.Bones[i].Name ?? "");
+        }
+
+        var shapes = new List<object>();
+        var textures = new List<string>();
+        string modelPath = "";
+        string modelStatus = "";
+        float minX = anim.MinX, minY = anim.MinY, minZ = anim.MinZ;
+        float maxX = anim.MaxX, maxY = anim.MaxY, maxZ = anim.MaxZ;
+        int vertexCount = 0, triangleCount = 0, skipped = 0;
+
+        if (wantModel)
+        {
+            string resolveContext = source;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(source) &&
+                    string.Equals(Path.GetExtension(source), ".ba2", StringComparison.OrdinalIgnoreCase))
+                    resolveContext = ResolveBundleBa2Path(source);
+            }
+            catch { /* keep source */ }
+
+            HkxAnimationReader.BodyHit body = HkxAnimationReader.ResolveActorBody(entryPath, resolveContext, anim.Bones, LogActivity);
+            modelStatus = body.Status ?? "not_found";
+            modelPath = body.Path ?? "";
+            if (body.Ok && body.Bytes != null)
+            {
+                string meshContext = !string.IsNullOrWhiteSpace(body.Context) ? body.Context : resolveContext;
+                NifMeshReader.Result mesh = NifMeshReader.ReadSkinned(body.Bytes, meshContext, LogActivity);
+                if (mesh.Ok && mesh.Shapes.Count > 0)
+                {
+                    HkxAnimationReader.RemapSkinToSkeleton(mesh, anim.Bones);
+                    foreach (NifMeshReader.Shape shape in mesh.Shapes)
+                    {
+                        shapes.Add(new
+                        {
+                            name = shape.Name,
+                            material = shape.Material,
+                            positions = ToBase64(shape.Positions),
+                            normals = shape.Normals == null ? null : ToBase64(shape.Normals),
+                            uvs = shape.Uvs == null ? null : ToBase64(shape.Uvs),
+                            indices = ToBase64(shape.Indices),
+                            joints = shape.Joints == null ? null : ToBase64(shape.Joints),
+                            weights = shape.Weights == null ? null : ToBase64(shape.Weights),
+                            texture = shape.Texture,
+                            textureStatus = shape.TextureStatus,
+                            texturePath = shape.TexturePath,
+                            textureFormat = shape.TextureFormat
+                        });
+                    }
+                    foreach (byte[] png in mesh.TexturePngs)
+                        textures.Add("data:image/png;base64," + Convert.ToBase64String(png));
+                    minX = mesh.MinX; minY = mesh.MinY; minZ = mesh.MinZ;
+                    maxX = mesh.MaxX; maxY = mesh.MaxY; maxZ = mesh.MaxZ;
+                    vertexCount = mesh.VertexCount;
+                    triangleCount = mesh.TriangleCount;
+                    skipped = mesh.Skipped;
+                    modelStatus = "ok";
+                }
+                else if (modelStatus == "ok")
+                {
+                    modelStatus = "no_match";
+                }
+            }
+        }
+
+        string matricesB64 = wantModel && anim.WorldMatrices != null ? ToBase64(anim.WorldMatrices) : null;
+        string inverseBindB64 = wantModel && anim.InverseBind != null ? ToBase64(anim.InverseBind) : null;
+
+        SendBundleFilePreviewMessage(requestId, source, entryPath, "mesh", size, null, 0, 0, 0, mesh: new
+        {
+            shapes,
+            textures,
+            bones = new
+            {
+                positions = ToBase64(bonePositions),
+                parents = ToBase64(boneParents),
+                names = boneNames
+            },
+            bounds = new
+            {
+                min = new[] { minX, minY, minZ },
+                max = new[] { maxX, maxY, maxZ }
+            },
+            vertexCount,
+            triangleCount,
+            skipped,
+            modelPath = string.IsNullOrEmpty(modelPath) ? null : modelPath,
+            modelStatus = string.IsNullOrEmpty(modelStatus) ? null : modelStatus,
+            animation = new
+            {
+                duration = anim.Duration,
+                frameCount = anim.FrameCount,
+                trimmed = anim.Trimmed,
+                positions = ToBase64(anim.WorldPositions ?? Array.Empty<float>()),
+                matrices = matricesB64,
+                inverseBind = inverseBindB64
+            }
+        });
+    }
+
     private static string ToBase64(float[] values)
     {
         if (values == null || values.Length == 0) return "";
@@ -4823,6 +5892,14 @@ public partial class Form1
     {
         if (values == null || values.Length == 0) return "";
         var bytes = new byte[values.Length * sizeof(int)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static string ToBase64(ushort[] values)
+    {
+        if (values == null || values.Length == 0) return "";
+        var bytes = new byte[values.Length * sizeof(ushort)];
         Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
         return Convert.ToBase64String(bytes);
     }
@@ -4878,7 +5955,8 @@ public partial class Form1
         string? error = null, string? hex = null, object material = null, object mesh = null,
         string? audioUrl = null, string? mime = null, object audio = null)
     {
-        SendMessageToWeb(JsonSerializer.Serialize(new
+        var post = _previewPostTarget ?? SendMessageToWeb;
+        post(JsonSerializer.Serialize(new
         {
             type = "BUNDLE_FILE_PREVIEW",
             requestId,
@@ -4903,10 +5981,11 @@ public partial class Form1
         }));
     }
 
-    private void HandleBundleDroppedFiles(IReadOnlyList<object>? additionalObjects)
+    private void HandleBundleDroppedFiles(IReadOnlyList<object>? additionalObjects, List<(string Kind, string Ref)>? sources = null)
     {
         var files = new List<string>();
         var folders = new List<string>();
+        var looseFiles = new List<string>();
         var rejected = new List<string>();
 
         if (additionalObjects != null)
@@ -4928,28 +6007,256 @@ public partial class Form1
                     files.Add(path);
                     LogActivity($"[BUNDLE] Dropped BA2 staged: {path}");
                 }
+                else if (File.Exists(path))
+                {
+                    looseFiles.Add(path);
+                    LogActivity($"[BUNDLE] Dropped loose file for replace match: {path}");
+                }
                 else
                 {
                     rejected.Add(path);
-                    LogActivity($"[BUNDLE] Dropped item rejected (not a .ba2 file or folder): {path}");
+                    LogActivity($"[BUNDLE] Dropped item rejected (missing path): {path}");
                 }
             }
         }
 
-        if (files.Count == 0 && folders.Count == 0)
+        if (files.Count == 0 && folders.Count == 0 && looseFiles.Count == 0)
         {
-            LogActivity("[BUNDLE] Drop contained no usable .ba2 files or folders.");
-            SendStatusMessage("error", "Only .ba2 files or folders can be added to a bundle.");
+            LogActivity("[BUNDLE] Drop contained no usable .ba2 files, folders, or loose files.");
+            SendStatusMessage("error", "Only .ba2 files, folders, or matching loose files can be dropped into the workspace.");
             return;
         }
 
-        SendMessageToWeb(JsonSerializer.Serialize(new
+        if (looseFiles.Count == 0)
         {
-            type = "BUNDLE_FILES_DROPPED",
-            files,
-            folders,
-            rejected
-        }));
+            SendMessageToWeb(JsonSerializer.Serialize(new
+            {
+                type = "BUNDLE_FILES_DROPPED",
+                files,
+                folders,
+                rejected,
+                replacements = Array.Empty<object>(),
+                unmatched = Array.Empty<string>()
+            }));
+            return;
+        }
+
+        var sourceList = sources ?? new List<(string Kind, string Ref)>();
+        Task.Run(() =>
+        {
+            try
+            {
+                var (replacements, unmatched) = MatchDroppedLooseFiles(looseFiles, sourceList);
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "BUNDLE_FILES_DROPPED",
+                    files,
+                    folders,
+                    rejected,
+                    replacements,
+                    unmatched
+                }));
+            }
+            catch (Exception ex)
+            {
+                LogError($"[BUNDLE] Drop replace matching failed: {ex.Message}");
+                SendMessageToWeb(JsonSerializer.Serialize(new
+                {
+                    type = "BUNDLE_FILES_DROPPED",
+                    files,
+                    folders,
+                    rejected,
+                    replacements = Array.Empty<object>(),
+                    unmatched = looseFiles.Select(Path.GetFileName).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+                }));
+            }
+        });
+    }
+
+    private sealed class DropReplaceCandidate
+    {
+        public string Kind { get; set; } = "";
+        public string ArchiveOrFolder { get; set; } = "";
+        public string Path { get; set; } = "";
+        public string? DataPath { get; set; }
+        public string[] Segments { get; set; } = Array.Empty<string>();
+    }
+
+    private (List<object> Replacements, List<string> Unmatched) MatchDroppedLooseFiles(
+        List<string> looseFiles,
+        List<(string Kind, string Ref)> sources)
+    {
+        var index = new Dictionary<string, List<DropReplaceCandidate>>(StringComparer.OrdinalIgnoreCase);
+
+        void AddCandidate(string fileName, DropReplaceCandidate candidate)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return;
+            if (!index.TryGetValue(fileName, out var list))
+            {
+                list = new List<DropReplaceCandidate>();
+                index[fileName] = list;
+            }
+            list.Add(candidate);
+        }
+
+        foreach (var (kind, srcRef) in sources)
+        {
+            if (string.IsNullOrWhiteSpace(srcRef)) continue;
+            if (string.Equals(kind, "ba2", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    string resolved = ResolveBundleBa2Path(srcRef);
+                    if (!File.Exists(resolved))
+                    {
+                        LogActivity($"[BUNDLE] Drop-replace skipped missing BA2 source: {srcRef}");
+                        continue;
+                    }
+                    var result = BA2Utility.ListEntries(resolved, LogActivity);
+                    foreach (var entry in result.Entries)
+                    {
+                        string norm = (entry.Path ?? "").Replace('\\', '/').TrimStart('/');
+                        if (string.IsNullOrWhiteSpace(norm)) continue;
+                        string name = Path.GetFileName(norm);
+                        var segs = norm.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        AddCandidate(name, new DropReplaceCandidate
+                        {
+                            Kind = "ba2",
+                            ArchiveOrFolder = srcRef,
+                            Path = norm.ToLowerInvariant(),
+                            Segments = segs
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError($"[BUNDLE] Drop-replace BA2 index failed for {srcRef}: {ex.Message}");
+                }
+            }
+            else if (string.Equals(kind, "folder", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (!Directory.Exists(srcRef))
+                    {
+                        LogActivity($"[BUNDLE] Drop-replace skipped missing folder source: {srcRef}");
+                        continue;
+                    }
+                    string normalizedRoot = Path.GetFullPath(srcRef);
+                    var diskFiles = Directory.GetFiles(normalizedRoot, "*.*", SearchOption.AllDirectories);
+                    var mapper = Managers.BundleManager.CreateFolderDataMapper(
+                        normalizedRoot,
+                        diskFiles.Select(f => Path.GetRelativePath(normalizedRoot, f)));
+                    foreach (var file in diskFiles)
+                    {
+                        if (file.EndsWith(".ba2", StringComparison.OrdinalIgnoreCase)) continue;
+                        string relPath = Path.GetRelativePath(normalizedRoot, file).Replace('\\', '/');
+                        string? dataPath = mapper(relPath);
+                        if (dataPath == null) continue;
+                        string name = Path.GetFileName(relPath);
+                        var segs = relPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        AddCandidate(name, new DropReplaceCandidate
+                        {
+                            Kind = "folder",
+                            ArchiveOrFolder = normalizedRoot,
+                            Path = relPath.Replace('\\', '/').ToLowerInvariant(),
+                            DataPath = dataPath.ToLowerInvariant(),
+                            Segments = segs
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError($"[BUNDLE] Drop-replace folder index failed for {srcRef}: {ex.Message}");
+                }
+            }
+        }
+
+        static int TrailingSegmentScore(string[] dropSegs, string[] candidateSegs)
+        {
+            int score = 0;
+            int di = dropSegs.Length - 1;
+            int ci = candidateSegs.Length - 1;
+            while (di >= 0 && ci >= 0)
+            {
+                if (!string.Equals(dropSegs[di], candidateSegs[ci], StringComparison.OrdinalIgnoreCase))
+                    break;
+                score++;
+                di--;
+                ci--;
+            }
+            return score;
+        }
+
+        var replacements = new List<object>();
+        var unmatched = new List<string>();
+        var unmatchedSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var loosePath in looseFiles)
+        {
+            string fileName = Path.GetFileName(loosePath);
+            if (string.IsNullOrWhiteSpace(fileName)) continue;
+
+            if (!index.TryGetValue(fileName, out var candidates) || candidates.Count == 0)
+            {
+                if (unmatchedSeen.Add(fileName)) unmatched.Add(fileName);
+                continue;
+            }
+
+            string full = Path.GetFullPath(loosePath);
+            var dropSegs = full.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+            int bestScore = -1;
+            var winners = new List<DropReplaceCandidate>();
+            foreach (var cand in candidates)
+            {
+                int score = TrailingSegmentScore(dropSegs, cand.Segments);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    winners.Clear();
+                    winners.Add(cand);
+                }
+                else if (score == bestScore)
+                {
+                    winners.Add(cand);
+                }
+            }
+
+            long size = 0;
+            try { size = new FileInfo(loosePath).Length; } catch { }
+
+            foreach (var win in winners)
+            {
+                if (string.Equals(win.Kind, "ba2", StringComparison.OrdinalIgnoreCase))
+                {
+                    replacements.Add(new
+                    {
+                        kind = "ba2",
+                        archive = win.ArchiveOrFolder,
+                        path = win.Path,
+                        source = loosePath,
+                        size
+                    });
+                    LogActivity($"[BUNDLE] Drop-replace matched BA2 {win.ArchiveOrFolder} :: {win.Path} <- {loosePath}");
+                }
+                else
+                {
+                    replacements.Add(new
+                    {
+                        kind = "folder",
+                        folder = win.ArchiveOrFolder,
+                        path = win.Path,
+                        dataPath = win.DataPath,
+                        source = loosePath,
+                        size
+                    });
+                    LogActivity($"[BUNDLE] Drop-replace matched folder {win.ArchiveOrFolder} :: {win.Path} <- {loosePath}");
+                }
+            }
+        }
+
+        return (replacements, unmatched);
     }
 
     private void HandleBundleListBa2(string ba2Path)
@@ -4958,14 +6265,15 @@ public partial class Form1
         {
             try
             {
-                ba2Path = ResolveBundleBa2Path(ba2Path);
+                string resolvedPath = ResolveBundleBa2Path(ba2Path);
 
-                var result = BA2Utility.ListEntries(ba2Path, LogActivity);
+                var result = BA2Utility.ListEntries(resolvedPath, LogActivity);
                 var entries = result.Entries.Select(e => new { path = e.Path, unpackedSize = e.UnpackedSize }).ToList();
                 SendMessageToWeb(JsonSerializer.Serialize(new
                 {
                     type = "BA2_CONTENTS",
                     path = ba2Path,
+                    resolvedPath,
                     archiveType = result.ArchiveType,
                     fileCount = entries.Count,
                     entries
@@ -4996,12 +6304,17 @@ public partial class Form1
 
                 string normalizedRoot = Path.GetFullPath(folderPath);
                 var entries = new List<object>();
-                foreach (var file in Directory.GetFiles(normalizedRoot, "*.*", SearchOption.AllDirectories))
+                var files = Directory.GetFiles(normalizedRoot, "*.*", SearchOption.AllDirectories);
+                var mapper = Managers.BundleManager.CreateFolderDataMapper(normalizedRoot, files.Select(f => Path.GetRelativePath(normalizedRoot, f)));
+                foreach (var file in files)
                 {
                     string relPath = Path.GetRelativePath(normalizedRoot, file).Replace('\\', '/');
+                    string? dataPath = mapper(relPath);
+                    if (dataPath == null) continue;
+                    if (file.EndsWith(".ba2", StringComparison.OrdinalIgnoreCase)) dataPath = null;
                     long size = 0;
                     try { size = new FileInfo(file).Length; } catch { }
-                    entries.Add(new { path = relPath, unpackedSize = size });
+                    entries.Add(new { path = relPath, dataPath = dataPath?.ToLowerInvariant(), unpackedSize = size });
                 }
 
                 SendMessageToWeb(JsonSerializer.Serialize(new
@@ -5182,6 +6495,29 @@ public partial class Form1
                 return;
             }
 
+            byte[]? bannerBytes = null;
+            string bannerExt = "";
+            if (TryGetString(root, "bannerDataUrl", out var bannerDataUrl) && !string.IsNullOrWhiteSpace(bannerDataUrl))
+            {
+                if (!TryDecodeDataUrl(bannerDataUrl, out bannerBytes, out var _) || bannerBytes == null || bannerBytes.Length == 0)
+                {
+                    PostThemeSaveResult(false, mode, null, null, "Could not decode banner image.", replyTo);
+                    return;
+                }
+
+                if (bannerBytes.Length > ThemePackageValidator.MaxBannerBytes)
+                {
+                    PostThemeSaveResult(false, mode, null, null, "Banner too large.", replyTo);
+                    return;
+                }
+
+                if (!ThemePackageValidator.TryValidateLogoImage(bannerBytes, out bannerExt, out var bannerErr))
+                {
+                    PostThemeSaveResult(false, mode, null, null, bannerErr ?? "Invalid banner.", replyTo);
+                    return;
+                }
+            }
+
             string manifestJson = manifestEl.GetRawText();
             if (!ThemePackageValidator.TryValidateManifest(manifestJson, out var manifest, out var manErr) || manifest == null)
             {
@@ -5203,6 +6539,7 @@ public partial class Form1
                 ["displayName"] = manifest.DisplayName,
                 ["tokens"] = manifest.Tokens.ToDictionary(kv => kv.Key, kv => kv.Value),
                 ["logoLayout"] = manifest.LogoLayout,
+                ["bannerLayout"] = manifest.BannerLayout,
             };
             string cleanManifestJson = JsonSerializer.Serialize(packageManifest, new JsonSerializerOptions
             {
@@ -5232,7 +6569,7 @@ public partial class Form1
                 destPath = Path.Combine(AppPaths.ThemesFolder, fileName);
             }
 
-            WriteThemePackageZip(destPath!, cleanManifestJson, logoBytes, ext);
+            WriteThemePackageZip(destPath!, cleanManifestJson, logoBytes, ext, bannerBytes, bannerExt);
 
             if (mode == "export")
             {
@@ -5328,7 +6665,7 @@ public partial class Form1
         }
     }
 
-    private static void WriteThemePackageZip(string path, string manifestJson, byte[] logoBytes, string logoExt)
+    private static void WriteThemePackageZip(string path, string manifestJson, byte[] logoBytes, string logoExt, byte[]? bannerBytes = null, string bannerExt = "")
     {
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -5344,6 +6681,14 @@ public partial class Form1
         var logoEntry = zip.CreateEntry(logoName, System.IO.Compression.CompressionLevel.Optimal);
         using (var ls = logoEntry.Open())
             ls.Write(logoBytes, 0, logoBytes.Length);
+
+        if (bannerBytes != null && bannerBytes.Length > 0 && !string.IsNullOrEmpty(bannerExt))
+        {
+            var bannerName = "banner" + (bannerExt.StartsWith('.') ? bannerExt : "." + bannerExt);
+            var bannerEntry = zip.CreateEntry(bannerName, System.IO.Compression.CompressionLevel.Optimal);
+            using var bs = bannerEntry.Open();
+            bs.Write(bannerBytes, 0, bannerBytes.Length);
+        }
     }
 
     private void HandleOpenThemesFolder()
@@ -6222,7 +7567,7 @@ public partial class Form1
             catch (UnauthorizedAccessException)
             {
                 SendStatusMessage("error",
-                    $"Couldn't write to the {dstLabel} folder (access denied). Xbox/Game Pass installs are protected — run Fallout 76 Manager as administrator, or use Virtual Mod Mode.",
+                    $"Couldn't write to the {dstLabel} folder (access denied). Xbox/Game Pass installs are protected — run F76 Manager as administrator, or use Virtual Mod Mode.",
                     "transfer_mods_denied", new object[] { dstLabel });
                 return;
             }
@@ -6489,6 +7834,7 @@ public partial class Form1
             case "uiAnimations":
                 uiAnimations = val.GetBoolean();
                 NotifyLogsPopoutTheme();
+                NotifyPreviewPopoutTheme();
                 break;
             case "hideKofi": hideKofi = val.GetBoolean(); break;
             case "logsPopoutReopenOnLaunch": logsPopoutReopenOnLaunch = val.GetBoolean(); break;
@@ -7651,7 +8997,7 @@ public partial class Form1
   "documents_path": "Documents / INI Path",
   "local_appdata_path": "Local AppData (plugins.txt)",
   "strings_path": "Strings Mod Path",
-  "manager_settings_desc": "Configure your Fallout 76 Manager environment.",
+  "manager_settings_desc": "Configure your F76 Manager environment.",
   "settings_paths_desc": "Set game, documents, and mod paths.",
   "settings_advanced_desc": "Backup INI files, reset config, or clear cache.",
   "ui_language_label": "UI Language:",
@@ -7721,7 +9067,7 @@ public partial class Form1
   "nexus_login_desc": "Sign in with your Nexus account to search and download mods in-app.",
   "nexus_sso_pending": "Nexus Mods sign-in will be available after this application is registered with Nexus Mods.",
   "nexus_sso_pending_title": "Nexus Mods integration pending",
-  "nexus_sso_pending_desc": "In-app Nexus search and downloads require application registration with Nexus Mods. Use Mod Manager Download on the Nexus website — Fallout 76 Manager will import mods via NXM links.",
+  "nexus_sso_pending_desc": "In-app Nexus search and downloads require application registration with Nexus Mods. Use Mod Manager Download on the Nexus website — F76 Manager will import mods via NXM links.",
   "nexus_auth_unavailable": "Nexus Mods sign-in is not available until this application is registered with Nexus Mods.",
   "nexus_login_required_title": "Sign in with Nexus Mods",
   "nexus_login_sso_hint": "Opens your browser to authorize this application with your Nexus account.",
@@ -7752,7 +9098,7 @@ public partial class Form1
   "add_mod": "Add Mod",
   "deploy_n_mods": "Deploy {0} Mods",
   "no_mods_found": "No mods found",
-  "no_mods_hint": "Drag and drop mods here or use the \"Add Mod\" button to get started.",
+  "no_mods_hint": "Drag and drop mods or preset packs (.f76presetpack) here, or use the \"Add Mod\" button to get started.",
   "add_first_mod": "Add Your First Mod",
   "new_preset_prompt": "Enter new preset name:",
   "delete_preset": "Delete Preset",
@@ -7918,7 +9264,7 @@ public partial class Form1
   "import_no_new_files": "Import finished. No new mod files were added.",
   "nexus_download_complete": "Download complete. Importing {0}...",
   "nexus_download_premium": "Direct Nexus downloads require Premium. Opening the mod page — use Slow Download or Mod Manager Download.",
-  "nexus_download_free_user": "Free Nexus account: opening Mod Manager Download in your browser. Confirm once — Fallout 76 Manager will import automatically.",
+  "nexus_download_free_user": "Free Nexus account: opening Mod Manager Download in your browser. Confirm once — F76 Manager will import automatically.",
   "nexus_download_forbidden": "Nexus blocked the download request. Try reconnecting your Nexus account in Settings, or download from the opened mod page.",
   "nexus_collection_heading": "Import Nexus Collection",
   "nexus_collection_desc": "Paste a collection URL to download all mods via the Nexus API.",
@@ -7982,20 +9328,22 @@ public partial class Form1
   "widget_conflict_detected": "Conflict Detected",
   "widget_conflict_count": "{0} Conflicts",
   "mod_bundles": "Mod Bundles",
-  "create_new_bundle": "Create New Bundle",
-  "no_bundles_found": "No Bundles Found",
+  "create_new_bundle": "Create New Mod",
+  "no_bundles_found": "No Creations Found",
   "no_bundles_desc": "Combine multiple mods into a single optimized BA2 archive to improve game stability and bypass the mod limit.",
-  "create_first_bundle": "Create Your First Bundle",
+  "create_first_bundle": "Create Your First Mod",
   "in_mod_list": "In Mod List",
   "storage_only": "Storage Only",
   "bundling_workspace": "Bundling Workspace",
-  "add_mod_from_list": "Add Mod from List",
+  "add_mod_from_list": "Add From Mod List",
   "add_external_ba2": "Add External BA2",
   "staged_items": "Staged Items ({0})",
   "workspace_empty": "Workspace is Empty",
   "workspace_empty_hint": "Workspace is empty.",
   "compression_default": "Default (Standard)",
-  "create_bundle": "Create Bundle",
+  "create_bundle": "Create Ba2",
+  "create_ba2_info_label": "About creating a Ba2",
+  "create_ba2_info": "Combine loose mod files into one optimized BA2 archive (general and/or textures). Name the output, pick compression, then create it to stay under the mod limit and improve stability.",
   "select_internal_mods": "Select Internal Mods",
   "n_selected_badge": "{0} Selected",
   "no_ba2_mods_found": "No BA2 mods found",
@@ -8081,7 +9429,15 @@ public partial class Form1
   "bundle_extract_success_to": "Extracted {0} to {1}",
   "bundle_extract_saved_to": "Saved {0} to {1}",
   "preview_audio_decode_failed": "This audio file couldn't be decoded. Showing a hex dump instead.",
-  "preview_audio_codec_unsupported": "This audio codec can't be previewed yet. Showing a hex dump instead."
+  "preview_audio_codec_unsupported": "This audio codec can't be previewed yet. Showing a hex dump instead.",
+  "preview_animation": "Animation · {0} bones · {1}",
+  "preview_hkx_behavior": "Behavior graphs pick clips at runtime and can't be played as one animation.",
+  "preview_hkx_character": "Character setup points at a behavior graph and a skeleton. It isn't a clip you can play.",
+  "preview_hkx_project": "Project data points at a character setup. Open the behavior or an animation clip to preview motion.",
+  "preview_hkx_not_clip": "This Havok file isn't a playable animation.",
+  "preview_hkx_no_skeleton": "This clip decoded, but no skeleton was found in this archive or the game meshes.",
+  "preview_hkx_unsupported": "This Havok version isn't supported for animation preview. Showing a hex dump instead.",
+  "preview_hkx_trimmed": "Clip trimmed to the first 60 seconds."
 }
 """;
 
